@@ -1,0 +1,998 @@
+import axios from 'axios';
+import CryptoJS from 'crypto-js';
+import type {
+  SourceBean,
+  ParseBean,
+  TVBoxConfig,
+  ParseRule,
+  LiveChannelGroup,
+  LiveChannelItem,
+  IJKCodeGroup,
+} from './models';
+
+// ---------- Constants ----------
+
+const LOCAL_PROXY = 'http://127.0.0.1:9978';
+
+const DEFAULT_ADS: string[] = [
+  'mimg.0c1q0l.cn',
+  'www.googletagmanager.com',
+  'www.google-analytics.com',
+  'mc.usihnbcq.cn',
+  'mg.g1mm3d.cn',
+  'mscs.svaeuzh.cn',
+  'cnzz.hhttm.top',
+  'tp.vinuxhome.com',
+  'cnzz.mmstat.com',
+  'www.baihuillq.com',
+  's23.cnzz.com',
+  'z3.cnzz.com',
+  'c.cnzz.com',
+  'stj.v1vo.top',
+  'z12.cnzz.com',
+  'img.mosflower.cn',
+  'tips.gamevvip.com',
+  'ehwe.yhdtns.com',
+  'xdn.cqqc3.com',
+  'www.jixunkyy.cn',
+  'sp.chemacid.cn',
+  'hm.baidu.com',
+  's9.cnzz.com',
+  'z6.cnzz.com',
+  'um.cavuc.com',
+  'mav.mavuz.com',
+  'wofwk.aoidf3.com',
+  'z5.cnzz.com',
+  'xc.hubeijieshikj.cn',
+  'tj.tianwenhu.com',
+  'xg.gars57.cn',
+  'k.jinxiuzhilv.com',
+  'cdn.bootcss.com',
+  'ppl.xunzhuo123.com',
+  'xomk.jiangjunmh.top',
+  'img.xunzhuo123.com',
+  'z1.cnzz.com',
+  's13.cnzz.com',
+  'xg.huataisangao.cn',
+  'z7.cnzz.com',
+  'xg.huataisangao.cn',
+  'z2.cnzz.com',
+  's96.cnzz.com',
+  'q11.cnzz.com',
+  'thy.dacedsfa.cn',
+  'xg.whsbpw.cn',
+  's19.cnzz.com',
+  'z8.cnzz.com',
+  's4.cnzz.com',
+  'f5w.as12df.top',
+  'ae01.alicdn.com',
+  'www.92424.cn',
+  'k.wudejia.com',
+  'vivovip.mmszxc.top',
+  'qiu.xixiqiu.com',
+  'cdnjs.hnfenxun.com',
+  'cms.qdwght.com',
+];
+
+const DEFAULT_IJK: IJKCodeGroup[] = [
+  {
+    group: '软解码',
+    options: [
+      { name: 'opensles', category: 4, value: '0' },
+      { name: 'overlay-format', category: 4, value: '842225234' },
+      { name: 'framedrop', category: 4, value: '0' },
+      { name: 'soundtouch', category: 4, value: '1' },
+      { name: 'start-on-prepared', category: 4, value: '1' },
+      { name: 'http-detect-rangeupport', category: 1, value: '0' },
+      { name: 'fflags', category: 1, value: 'fastseek' },
+      { name: 'skip_loop_filter', category: 2, value: '48' },
+      { name: 'reconnect', category: 4, value: '1' },
+      { name: 'enable-accurate-seek', category: 4, value: '0' },
+      { name: 'mediacodec', category: 4, value: '0' },
+      { name: 'mediacodec-auto-rotate', category: 4, value: '0' },
+      { name: 'mediacodec-handle-resolution-change', category: 4, value: '0' },
+      { name: 'mediacodec-hevc', category: 4, value: '0' },
+      { name: 'dns_cache_timeout', category: 1, value: '600000000' },
+    ],
+  },
+  {
+    group: '硬解码',
+    options: [
+      { name: 'opensles', category: 4, value: '0' },
+      { name: 'overlay-format', category: 4, value: '842225234' },
+      { name: 'framedrop', category: 4, value: '0' },
+      { name: 'soundtouch', category: 4, value: '1' },
+      { name: 'start-on-prepared', category: 4, value: '1' },
+      { name: 'http-detect-rangeupport', category: 1, value: '0' },
+      { name: 'fflags', category: 1, value: 'fastseek' },
+      { name: 'skip_loop_filter', category: 2, value: '48' },
+      { name: 'reconnect', category: 4, value: '1' },
+      { name: 'enable-accurate-seek', category: 4, value: '0' },
+      { name: 'mediacodec', category: 4, value: '1' },
+      { name: 'mediacodec-auto-rotate', category: 4, value: '1' },
+      { name: 'mediacodec-handle-resolution-change', category: 4, value: '1' },
+      { name: 'mediacodec-hevc', category: 4, value: '1' },
+      { name: 'dns_cache_timeout', category: 1, value: '600000000' },
+    ],
+  },
+];
+
+// ---------- Utility Functions ----------
+
+function computeMd5(str: string): string {
+  return CryptoJS.MD5(str).toString();
+}
+
+function rightPadding(str: string, pad: string, len: number): string {
+  const trimmed = str.trim();
+  if (trimmed.length > len) return trimmed.substring(0, len);
+  if (trimmed.length === len) return trimmed;
+  return trimmed + pad.repeat(len - trimmed.length);
+}
+
+function isJsonString(content: string): boolean {
+  try {
+    JSON.parse(content);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeGetString(obj: any, key: string, defaultVal: string): string {
+  try {
+    if (
+      obj != null &&
+      key in obj &&
+      obj[key] !== undefined &&
+      obj[key] !== null
+    ) {
+      const val = obj[key];
+      if (typeof val === 'object') return JSON.stringify(val);
+      return String(val).trim();
+    }
+  } catch {
+    /* return default */
+  }
+  return defaultVal;
+}
+
+function safeGetInt(obj: any, key: string, defaultVal: number): number {
+  try {
+    if (
+      obj != null &&
+      key in obj &&
+      obj[key] !== undefined &&
+      obj[key] !== null
+    ) {
+      const n = Number(obj[key]);
+      return Number.isNaN(n) ? defaultVal : n;
+    }
+  } catch {
+    /* return default */
+  }
+  return defaultVal;
+}
+
+function safeGetStringList(obj: any, key: string): string[] {
+  const result: string[] = [];
+  try {
+    if (
+      obj != null &&
+      key in obj &&
+      obj[key] !== undefined &&
+      obj[key] !== null
+    ) {
+      const val = obj[key];
+      if (Array.isArray(val)) {
+        for (const item of val) result.push(String(item));
+      } else {
+        result.push(String(val));
+      }
+    }
+  } catch {
+    /* return empty */
+  }
+  return result;
+}
+
+/** Convert hex string to a UTF-8 decoded string (mirrors Android AES.toBytes then new String) */
+function hexToUtf8String(hex: string): string {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+/** M3U8.isAd equivalent - check if a regex string represents an ad marker */
+function m3u8IsAd(regex: string): boolean {
+  if (regex.includes('#EXT-X-DISCONTINUITY')) return true;
+  if (regex.includes('#EXTINF')) return true;
+  if (regex.includes('#EXT-X-ENDLIST')) return true;
+  if (regex.includes('#EXT-X-KEY')) return true;
+  try {
+    if (parseFloat(regex) !== 0) return true;
+  } catch {
+    /* not a number */
+  }
+  return false;
+}
+
+// ---------- URL / Content Helpers ----------
+
+/** Convert clan:// URL to http:// address */
+function clanToAddress(clanUrl: string): string {
+  if (clanUrl.startsWith('clan://localhost/')) {
+    return clanUrl.replace('clan://localhost/', LOCAL_PROXY + '/file/');
+  }
+  const link = clanUrl.substring(7); // strip "clan://"
+  const slashIdx = link.indexOf('/');
+  return (
+    'http://' +
+    link.substring(0, slashIdx) +
+    '/file/' +
+    link.substring(slashIdx + 1)
+  );
+}
+
+/** Replace clan:// references in content with the actual base URL derived from a clan HTTP URL */
+function clanContentFix(clanHttpUrl: string, content: string): string {
+  const fix = clanHttpUrl.substring(0, clanHttpUrl.indexOf('/file/') + 6);
+  return content.replace(/clan:\/\//g, fix);
+}
+
+/** Fix relative ./ paths in config content by replacing with the base URL directory */
+function fixContentPath(url: string, content: string): string {
+  if (!content.includes('"./')) return content;
+  let fixedUrl = url.replace('file://', 'clan://localhost/');
+  if (!fixedUrl.startsWith('http') && !fixedUrl.startsWith('clan://')) {
+    fixedUrl = 'http://' + fixedUrl;
+  }
+  if (fixedUrl.startsWith('clan://')) fixedUrl = clanToAddress(fixedUrl);
+  const base = fixedUrl.substring(0, fixedUrl.lastIndexOf('/') + 1);
+  return content.replace(/\.\//g, base);
+}
+
+/** Replace proxy:// with local proxy URL (mirrors Android DefaultConfig.checkReplaceProxy) */
+function checkReplaceProxy(url: string): string {
+  if (url.startsWith('proxy://')) {
+    return url.replace('proxy://', LOCAL_PROXY + '/proxy?');
+  }
+  return url;
+}
+
+/** Base64 URL-safe encode (matches Android Base64.URL_SAFE | NO_WRAP) */
+function base64UrlEncode(str: string): string {
+  return btoa(unescape(encodeURIComponent(str)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+/** Base64 URL-safe decode */
+function base64UrlDecode(str: string): string {
+  let s = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  return decodeURIComponent(escape(atob(s)));
+}
+
+// ---------- ConfigParser ----------
+
+export class ConfigParser {
+  /** Public config object for backward compatibility */
+  public config: TVBoxConfig | null = null;
+
+  // Internal parsed state
+  private sourceBeanList: Map<string, SourceBean> = new Map();
+  private mHomeSource: SourceBean | null = null;
+  private mDefaultParse: ParseBean | null = null;
+  private parseBeanList: ParseBean[] = [];
+  private liveChannelGroupList: LiveChannelGroup[] = [];
+  private vipParseFlags: string[] = [];
+  private ijkCodes: IJKCodeGroup[] = [];
+  private spiderJar = '';
+  private wallpaperStr = '';
+  private jarCacheStr = 'true';
+  private livePlayHeadersVal: any = null;
+  private parseRules: ParseRule[] = [];
+  private adDomains: string[] = [];
+
+  // ========== Config Loading ==========
+
+  async load(url: string, useCache = false): Promise<TVBoxConfig> {
+    const cacheKey = `tvbox_cache_${computeMd5(url)}`;
+
+    // 1. Try loading from cache when useCache is true
+    if (useCache) {
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        try {
+          this.parseJson(url, cached);
+          return this.config!;
+        } catch {
+          /* fall through to network */
+        }
+      }
+    }
+
+    // 2. Process the URL: extract ;pk; AES key, convert clan, ensure http prefix
+    let configKey: string | null = null;
+    let configUrl = url;
+    const pkSeparator = ';pk;';
+
+    if (configUrl.includes(pkSeparator)) {
+      const parts = configUrl.split(pkSeparator);
+      configKey = parts[1] || null;
+      if (parts[0].startsWith('clan')) {
+        configUrl = clanToAddress(parts[0]);
+      } else if (parts[0].startsWith('http')) {
+        configUrl = parts[0];
+      } else {
+        configUrl = 'http://' + parts[0];
+      }
+    } else if (configUrl.startsWith('clan')) {
+      configUrl = clanToAddress(configUrl);
+    } else if (!configUrl.startsWith('http')) {
+      configUrl = 'http://' + configUrl;
+    }
+
+    // 3. Fetch remote config
+    try {
+      const response = await axios.get(configUrl, {
+        headers: {
+          'User-Agent': 'okhttp/3.15',
+          Accept:
+            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        responseType: 'text',
+      });
+
+      let json: string =
+        typeof response.data === 'string'
+          ? response.data
+          : JSON.stringify(response.data);
+
+      // Decrypt content if needed
+      json = ConfigParser.findResult(json, configKey);
+
+      // Fix clan:// references if original URL was a clan URL
+      const originalBase = url.split(pkSeparator)[0];
+      if (originalBase.startsWith('clan')) {
+        json = clanContentFix(clanToAddress(originalBase), json);
+      }
+
+      // Fix relative ./ paths
+      json = fixContentPath(url, json);
+
+      // Parse the JSON into internal state
+      this.parseJson(url, json);
+
+      // Cache the raw result for offline use
+      try {
+        localStorage.setItem(cacheKey, json);
+      } catch {
+        /* ignore storage quota errors */
+      }
+
+      return this.config!;
+    } catch (error) {
+      // On network error, attempt cache fallback
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) {
+        try {
+          this.parseJson(url, cached);
+          return this.config!;
+        } catch {
+          /* ignore */
+        }
+      }
+      throw error;
+    }
+  }
+
+  // ========== Config Decryption (FindResult) ==========
+
+  /**
+   * Decrypt/decode a config string. Mirrors Android ApiConfig.FindResult.
+   * - If already valid JSON, return as-is.
+   * - Pattern [A-Za-z0]{8}\*\* → strip prefix, Base64 decode.
+   * - Prefix "2423" → AES CBC: extract data, decode hex for key/iv, decrypt.
+   * - If configKey provided and not JSON → AES ECB decrypt with configKey.
+   * - Otherwise return as-is.
+   */
+  static findResult(json: string, configKey?: string | null): string {
+    let content = json;
+    try {
+      // Already valid JSON?
+      if (isJsonString(content)) return content;
+
+      // Pattern: [A-Za-z0]{8}\*\* → strip the 10-char prefix, base64-decode the rest
+      const pattern = /[A-Za-z0]{8}\*\*/;
+      const match = pattern.exec(content);
+      if (match) {
+        content = content.substring(content.indexOf(match[0]) + 10);
+        try {
+          content = atob(content);
+        } catch {
+          content = base64UrlDecode(content);
+        }
+      }
+
+      if (content.startsWith('2423')) {
+        // AES CBC decryption
+        // data is between the first "2324" marker and the last 26 chars
+        const idx2324 = content.indexOf('2324');
+        if (idx2324 === -1) return content;
+        const data = content.substring(idx2324 + 4, content.length - 26);
+
+        // Decode the full hex string to a UTF-8 string, then lowercase
+        const decoded = hexToUtf8String(content).toLowerCase();
+
+        // Key is between "$#" and "#$"
+        const keyStart = decoded.indexOf('$#');
+        const keyEnd = decoded.indexOf('#$');
+        let rawKey = '';
+        if (keyStart !== -1 && keyEnd !== -1 && keyStart + 2 < keyEnd) {
+          rawKey = decoded.substring(keyStart + 2, keyEnd);
+        }
+        const key = rightPadding(rawKey, '0', 16);
+
+        // IV is the last 13 chars of the decoded string
+        const iv = rightPadding(
+          decoded.substring(decoded.length - 13),
+          '0',
+          16,
+        );
+
+        const decrypted = ConfigParser.aesCbc(data, key, iv);
+        if (decrypted) return decrypted;
+      } else if (configKey && !isJsonString(content)) {
+        // AES ECB decrypt with configKey
+        const decrypted = ConfigParser.aesEcb(content, configKey);
+        if (decrypted) return decrypted;
+      } else {
+        return content;
+      }
+    } catch (e) {
+      console.error('ConfigParser.findResult error:', e);
+    }
+    return json;
+  }
+
+  // ========== AES Helpers ==========
+
+  private static aesCbc(
+    hexData: string,
+    key: string,
+    iv: string,
+  ): string | null {
+    try {
+      const keyParsed = CryptoJS.enc.Utf8.parse(key);
+      const ivParsed = CryptoJS.enc.Utf8.parse(iv);
+      const ciphertext = CryptoJS.enc.Hex.parse(hexData);
+      const decrypted = CryptoJS.AES.decrypt({ ciphertext } as any, keyParsed, {
+        iv: ivParsed,
+        padding: CryptoJS.pad.Pkcs7,
+      });
+      const result = decrypted.toString(CryptoJS.enc.Utf8);
+      return result || null;
+    } catch (e) {
+      console.error('AES CBC decrypt error:', e);
+      return null;
+    }
+  }
+
+  private static aesEcb(hexData: string, key: string): string | null {
+    try {
+      const paddedKey = rightPadding(key, '0', 16);
+      const keyParsed = CryptoJS.enc.Utf8.parse(paddedKey);
+      const ciphertext = CryptoJS.enc.Hex.parse(hexData);
+      const decrypted = CryptoJS.AES.decrypt({ ciphertext } as any, keyParsed, {
+        mode: CryptoJS.mode.ECB,
+        padding: CryptoJS.pad.Pkcs7,
+      });
+      const result = decrypted.toString(CryptoJS.enc.Utf8);
+      return result || null;
+    } catch (e) {
+      console.error('AES ECB decrypt error:', e);
+      return null;
+    }
+  }
+
+  // ========== Full JSON Parsing (parseJson equivalent) ==========
+
+  private parseJson(apiUrl: string, jsonStr: string): void {
+    const infoJson = JSON.parse(jsonStr);
+
+    // jarCache
+    this.jarCacheStr = safeGetString(infoJson, 'jarCache', 'true');
+
+    // spider (global JAR URL)
+    this.spiderJar = safeGetString(infoJson, 'spider', '');
+
+    // wallpaper
+    this.wallpaperStr = safeGetString(infoJson, 'wallpaper', '');
+
+    // livePlayHeaders
+    if ('livePlayHeaders' in infoJson) {
+      this.livePlayHeadersVal = infoJson.livePlayHeaders;
+    } else {
+      this.livePlayHeadersVal = null;
+    }
+
+    // ---- Sites ----
+    this.sourceBeanList.clear();
+    let firstVisibleSite: SourceBean | null = null;
+
+    const sites: any[] = infoJson.video?.sites ?? infoJson.sites ?? [];
+    for (const obj of sites) {
+      const siteKey = String(obj.key ?? '').trim();
+      if (!siteKey) continue;
+
+      const sb: SourceBean = {
+        key: siteKey,
+        name: safeGetString(obj, 'name', siteKey),
+        type: safeGetInt(obj, 'type', 0),
+        api: safeGetString(obj, 'api', ''),
+        searchable: safeGetInt(obj, 'searchable', 1),
+        quickSearch: safeGetInt(obj, 'quickSearch', 1),
+        filterable: siteKey.startsWith('py_')
+          ? 1
+          : safeGetInt(obj, 'filterable', 1),
+        hide: safeGetInt(obj, 'hide', 0),
+        playerUrl: safeGetString(obj, 'playUrl', ''),
+        ext: safeGetString(obj, 'ext', ''),
+        jar: safeGetString(obj, 'jar', ''),
+        playerType: safeGetInt(obj, 'playerType', -1),
+        categories: safeGetStringList(obj, 'categories'),
+        clickSelector: safeGetString(obj, 'click', ''),
+        style: safeGetString(obj, 'style', ''),
+      };
+
+      if (firstVisibleSite === null && sb.hide === 0) {
+        firstVisibleSite = sb;
+      }
+      this.sourceBeanList.set(siteKey, sb);
+    }
+
+    // Set home source from saved preference
+    if (this.sourceBeanList.size > 0) {
+      const savedHome = localStorage.getItem('tvbox_home_source') || '';
+      const stored = savedHome ? this.sourceBeanList.get(savedHome) : null;
+      if (stored && stored.hide !== 1) {
+        this.mHomeSource = stored;
+      } else {
+        this.mHomeSource = firstVisibleSite;
+      }
+    }
+
+    // ---- VIP Parse Flags ----
+    this.vipParseFlags = safeGetStringList(infoJson, 'flags');
+
+    // ---- Parses ----
+    this.parseBeanList = [];
+    if (infoJson.parses && Array.isArray(infoJson.parses)) {
+      for (const obj of infoJson.parses) {
+        let parseUrl = safeGetString(obj, 'url', '').trim();
+        // Handle proxy:// URLs in parse - convert to local proxy URL
+        if (parseUrl.startsWith('proxy://')) {
+          try {
+            const proxyUrl = new URL(parseUrl);
+            proxyUrl.searchParams.get('ext') || '';
+            parseUrl = `${LOCAL_PROXY}/proxy?${proxyUrl.searchParams.toString()}`;
+          } catch {
+            /* keep original */
+          }
+        }
+        const pb: ParseBean = {
+          name: safeGetString(obj, 'name', '').trim(),
+          url: parseUrl,
+          type: safeGetInt(obj, 'type', 0),
+          ext:
+            obj.ext !== undefined && obj.ext !== null
+              ? typeof obj.ext === 'object'
+                ? JSON.stringify(obj.ext)
+                : String(obj.ext)
+              : undefined,
+        };
+        this.parseBeanList.push(pb);
+      }
+      // Insert "超级解析" (Super Parse) at index 0 if there are any parses
+      if (this.parseBeanList.length > 0) {
+        this.parseBeanList.unshift({
+          name: '超级解析',
+          url: 'SuperParse',
+          type: 4,
+          ext: '',
+        });
+      }
+    }
+
+    // Set default parse from saved preference
+    if (this.parseBeanList.length > 0) {
+      const savedParse = localStorage.getItem('tvbox_default_parse') || '';
+      const found = savedParse
+        ? this.parseBeanList.find((p) => p.name === savedParse)
+        : null;
+      this.mDefaultParse = found || this.parseBeanList[0];
+    } else {
+      this.mDefaultParse = null;
+    }
+
+    // ---- Lives ----
+    this.liveChannelGroupList = [];
+    const savedLiveUrl = localStorage.getItem('tvbox_live_url') || '';
+    const savedEpgUrl = localStorage.getItem('tvbox_epg_url') || '';
+    let liveURL_final: string | null = null;
+
+    try {
+      if (
+        infoJson.lives &&
+        Array.isArray(infoJson.lives) &&
+        infoJson.lives.length > 0
+      ) {
+        const livesObj = infoJson.lives[0];
+        const livesStr = JSON.stringify(livesObj);
+        const proxyIndex = livesStr.indexOf('proxy://');
+
+        if (proxyIndex !== -1) {
+          // proxy:// format - extract ext URL parameter
+          const endQuoteIdx = livesStr.lastIndexOf('"');
+          let proxyUrl = livesStr.substring(proxyIndex, endQuoteIdx);
+          proxyUrl = checkReplaceProxy(proxyUrl);
+
+          // Extract ext parameter from URL
+          const extMatch = proxyUrl.match(/[?&]ext=([^&]*)/);
+          if (extMatch && extMatch[1]) {
+            let extUrl = extMatch[1];
+            // Decode ext if not already an HTTP/clan URL (may be base64)
+            if (!extUrl.startsWith('http') && !extUrl.startsWith('clan://')) {
+              try {
+                extUrl = base64UrlDecode(extUrl);
+              } catch {
+                /* not base64, use as-is */
+              }
+            }
+            // Convert clan:// URLs in ext
+            if (extUrl.startsWith('clan://')) {
+              const originalBase = apiUrl.split(';pk;')[0];
+              extUrl = clanContentFix(clanToAddress(originalBase), extUrl);
+            }
+
+            console.log('Live URL:', extUrl);
+            this.putLiveHistory(extUrl);
+
+            if (!savedLiveUrl) {
+              localStorage.setItem('tvbox_live_url', extUrl);
+            } else {
+              extUrl = savedLiveUrl;
+            }
+            liveURL_final = extUrl;
+          }
+
+          // EPG from config
+          if (livesObj.epg) {
+            const epg = String(livesObj.epg);
+            console.log('EPG URL:', epg);
+            this.putEpgHistory(epg);
+            if (!savedEpgUrl) {
+              localStorage.setItem('tvbox_epg_url', epg);
+            } else {
+              localStorage.setItem('tvbox_epg_url', savedEpgUrl);
+            }
+          }
+        } else if (!livesStr.includes('"type"')) {
+          // Old format: array of {group, channels} objects
+          this.loadLives(infoJson.lives);
+        } else {
+          // FongMi format: {type:"0", url, epg}
+          const fongMiObj = infoJson.lives[0];
+          const typeVal = String(fongMiObj.type ?? '');
+
+          if (typeVal === '0') {
+            let furl = String(fongMiObj.url ?? '');
+
+            // EPG from FongMi config
+            if (fongMiObj.epg) {
+              const epg = String(fongMiObj.epg);
+              console.log('EPG URL:', epg);
+              this.putEpgHistory(epg);
+              if (!savedEpgUrl) {
+                localStorage.setItem('tvbox_epg_url', epg);
+              } else {
+                localStorage.setItem('tvbox_epg_url', savedEpgUrl);
+              }
+            }
+
+            if (furl.startsWith('http')) {
+              console.log('Live URL:', furl);
+              this.putLiveHistory(furl);
+              if (!savedLiveUrl) {
+                localStorage.setItem('tvbox_live_url', furl);
+              } else {
+                furl = savedLiveUrl;
+              }
+              liveURL_final = furl;
+            }
+          }
+        }
+
+        // Build final proxy live URL
+        if (!liveURL_final) {
+          liveURL_final = savedLiveUrl || null;
+        }
+        if (liveURL_final) {
+          const encoded = base64UrlEncode(liveURL_final);
+          const proxyLiveUrl = `${LOCAL_PROXY}/proxy?do=live&type=txt&ext=${encoded}`;
+          this.liveChannelGroupList.push({
+            groupName: proxyLiveUrl,
+            groupIndex: 0,
+            channels: [],
+          });
+        }
+      }
+    } catch (e) {
+      console.error('Error parsing lives:', e);
+    }
+
+    // ---- Rules (sniffing / ad filtering / script injection) ----
+    this.parseRules = [];
+    if (infoJson.rules && Array.isArray(infoJson.rules)) {
+      for (const obj of infoJson.rules) {
+        // {host, rule:[], filter:[]} - host-specific video match/filter rules
+        if (obj.host) {
+          const rule: ParseRule = { host: String(obj.host) };
+          if (Array.isArray(obj.rule) && obj.rule.length > 0) {
+            rule.rule = obj.rule.map(String);
+          }
+          if (Array.isArray(obj.filter) && obj.filter.length > 0) {
+            rule.filter = obj.filter.map(String);
+          }
+          this.parseRules.push(rule);
+        }
+
+        // {hosts:[], regex:[]} - multi-host rules, split into ad filters or sniff rules
+        if (Array.isArray(obj.hosts) && Array.isArray(obj.regex)) {
+          const ads: string[] = [];
+          const rules: string[] = [];
+          for (const r of obj.regex) {
+            const rs = String(r);
+            if (m3u8IsAd(rs)) {
+              ads.push(rs);
+            } else {
+              rules.push(rs);
+            }
+          }
+          for (const h of obj.hosts) {
+            const hs = String(h);
+            if (rules.length > 0) {
+              this.parseRules.push({ host: hs, rule: [...rules] });
+            }
+            if (ads.length > 0) {
+              this.parseRules.push({ host: hs, filter: [...ads] });
+            }
+          }
+        }
+
+        // {hosts:[], script:[]} - host-specific JS scripts to inject
+        if (
+          Array.isArray(obj.hosts) &&
+          Array.isArray(obj.script) &&
+          obj.script.length > 0
+        ) {
+          const scripts = obj.script.map(String);
+          for (const h of obj.hosts) {
+            this.parseRules.push({ host: String(h), script: [...scripts] });
+          }
+        }
+      }
+    }
+
+    // ---- Ads ----
+    this.adDomains = [...DEFAULT_ADS];
+    if (infoJson.ads && Array.isArray(infoJson.ads)) {
+      for (const host of infoJson.ads) {
+        const h = String(host);
+        if (!this.adDomains.includes(h)) {
+          this.adDomains.push(h);
+        }
+      }
+    }
+
+    // ---- IJK Codec Parameters ----
+    if (this.ijkCodes.length === 0) {
+      const ijkSource =
+        infoJson.ijk && Array.isArray(infoJson.ijk)
+          ? infoJson.ijk
+          : DEFAULT_IJK;
+      this.ijkCodes = [];
+      for (const obj of ijkSource) {
+        const group: IJKCodeGroup = {
+          group: String(obj.group ?? ''),
+          options: Array.isArray(obj.options)
+            ? obj.options.map((o: any) => ({
+                name: String(o.name ?? ''),
+                category: Number(o.category ?? 0),
+                value: String(o.value ?? ''),
+              }))
+            : [],
+        };
+        this.ijkCodes.push(group);
+      }
+
+      // Ensure at least one codec is available
+      if (this.ijkCodes.length === 0) {
+        this.ijkCodes = DEFAULT_IJK.map((g) => ({
+          group: g.group,
+          options: g.options.map((o) => ({ ...o })),
+        }));
+      }
+    }
+
+    // ---- Build public config for backward compatibility ----
+    this.config = {
+      sites: Array.from(this.sourceBeanList.values()),
+      parses: this.parseBeanList,
+      flags: this.vipParseFlags,
+      wallpaper: this.wallpaperStr,
+      spider: this.spiderJar,
+      jarCache: this.jarCacheStr,
+      livePlayHeaders: this.livePlayHeadersVal,
+      lives: this.liveChannelGroupList as any[],
+      rules: this.parseRules,
+      ads: this.adDomains,
+      ijk: this.ijkCodes,
+    };
+  }
+
+  // ========== Live Channel Parsing (Old Format) ==========
+
+  private loadLives(livesArray: any[]): void {
+    this.liveChannelGroupList = [];
+    let groupIndex = 0;
+    let channelNum = 0;
+
+    for (const groupElement of livesArray) {
+      const rawGroupName = String(groupElement.group ?? '').trim();
+      const splitParts = rawGroupName.split('_', 2);
+
+      const channels: LiveChannelItem[] = [];
+      let channelIndex = 0;
+
+      if (Array.isArray(groupElement.channels)) {
+        for (const ch of groupElement.channels) {
+          const chName = String(ch.name ?? '').trim();
+          const urls = safeGetStringList(ch, 'urls');
+          const channelUrls: string[] = [];
+          const channelSourceNames: string[] = [];
+
+          let sourceIdx = 1;
+          for (const url of urls) {
+            const parts = url.split('$', 2);
+            channelUrls.push(parts[0]);
+            channelSourceNames.push(
+              parts.length > 1 ? parts[1] : `源${sourceIdx}`,
+            );
+            sourceIdx++;
+          }
+
+          channels.push({
+            channelName: chName,
+            channelIndex: channelIndex++,
+            channelNum: ++channelNum,
+            channelUrls,
+            channelSourceNames,
+          });
+        }
+      }
+
+      this.liveChannelGroupList.push({
+        groupName: splitParts[0],
+        groupPassword: splitParts.length > 1 ? splitParts[1] : undefined,
+        groupIndex: groupIndex++,
+        channels,
+      });
+    }
+  }
+
+  // ========== History Helpers ==========
+
+  private putLiveHistory(url: string): void {
+    if (!url) return;
+    try {
+      const key = 'tvbox_live_history';
+      let history: string[] = JSON.parse(localStorage.getItem(key) || '[]');
+      history = history.filter((h) => h !== url);
+      history.unshift(url);
+      if (history.length > 20) history = history.slice(0, 20);
+      localStorage.setItem(key, JSON.stringify(history));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private putEpgHistory(url: string): void {
+    if (!url) return;
+    try {
+      const key = 'tvbox_epg_history';
+      let history: string[] = JSON.parse(localStorage.getItem(key) || '[]');
+      history = history.filter((h) => h !== url);
+      history.unshift(url);
+      if (history.length > 20) history = history.slice(0, 20);
+      localStorage.setItem(key, JSON.stringify(history));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // ========== Public Accessors ==========
+
+  getSites(): SourceBean[] {
+    return Array.from(this.sourceBeanList.values());
+  }
+
+  getSite(key: string): SourceBean | undefined {
+    return this.sourceBeanList.get(key);
+  }
+
+  getHomeSource(): SourceBean | null {
+    return this.mHomeSource;
+  }
+
+  setHomeSource(bean: SourceBean): void {
+    this.mHomeSource = bean;
+    localStorage.setItem('tvbox_home_source', bean.key);
+  }
+
+  getParses(): ParseBean[] {
+    return this.parseBeanList;
+  }
+
+  getDefaultParse(): ParseBean | null {
+    return this.mDefaultParse;
+  }
+
+  setDefaultParse(pb: ParseBean): void {
+    this.mDefaultParse = pb;
+    localStorage.setItem('tvbox_default_parse', pb.name);
+  }
+
+  getVipParseFlags(): string[] {
+    return this.vipParseFlags;
+  }
+
+  getSpider(): string {
+    return this.spiderJar;
+  }
+
+  getRules(): ParseRule[] {
+    return this.parseRules;
+  }
+
+  getAds(): string[] {
+    return this.adDomains;
+  }
+
+  getLiveChannelGroups(): LiveChannelGroup[] {
+    return this.liveChannelGroupList;
+  }
+
+  getWallpaper(): string {
+    return this.wallpaperStr;
+  }
+
+  getJarCache(): string {
+    return this.jarCacheStr;
+  }
+
+  getLivePlayHeaders(): any {
+    return this.livePlayHeadersVal;
+  }
+
+  getIjkCodes(): IJKCodeGroup[] {
+    return this.ijkCodes;
+  }
+}
+
+export const configParser = new ConfigParser();

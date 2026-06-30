@@ -1,0 +1,45 @@
+{
+  "name": "tvbox-pc",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "@vueuse/core": "^14.3.0",
+    "axios": "^1.18.1",
+    "cheerio": "^1.2.0",
+    "crypto-js": "^4.2.0",
+    "element-plus": "^2.14.2",
+    "iconv-lite": "^0.7.2",
+    "localforage": "^1.10.0",
+    "node-forge": "^1.4.0",
+    "pinia": "^3.0.4",
+    "vue": "^3.5.38",
+    "vue-router": "^5.1.0",
+    "xgplayer": "^3.0.24",
+    "xgplayer-flv.js": "^3.0.24",
+    "xgplayer-hls.js": "^3.0.24"
+  },
+  "devDependencies": {
+    "@types/crypto-js": "^4.2.2",
+    "@types/node": "^24.13.2",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "@vue/test-utils": "^2.4.11",
+    "@vue/tsconfig": "^0.9.1",
+    "electron": "^33.4.11",
+    "jsdom": "^29.1.1",
+    "ts-node": "^10.9.2",
+    "typescript": "~6.0.2",
+    "vite": "^6.4.3",
+    "vite-plugin-electron": "^1.1.0",
+    "vitest": "^4.1.9",
+    "vue-tsc": "^3.3.5"
+  }
+}
