@@ -1,10 +1,10 @@
 <template>
-  <div class="h-full flex flex-col">
+  <div class="h-full flex flex-col" style="background: var(--color-bg-base)">
     <!-- Top bar -->
-    <div class="h-12 bg-white shadow-sm flex items-center px-4 justify-between flex-shrink-0">
+    <div class="h-12 flex items-center px-4 justify-between flex-shrink-0" style="background:var(--color-bg-elevated);border-bottom:1px solid var(--color-border)">
       <div class="flex items-center gap-3">
         <el-button :icon="'Back'" size="small" @click="$router.push('/')">返回首页</el-button>
-        <span class="font-semibold text-gray-700">直播电视</span>
+        <span class="font-semibold" style="color: var(--color-text-primary)">直播电视</span>
       </div>
       <div class="flex items-center gap-2">
         <el-switch v-model="showEpg" active-text="EPG" inactive-text="" size="small" />
@@ -16,7 +16,7 @@
     </div>
 
     <!-- URL input bar (shown when no groups loaded) -->
-    <div v-if="showUrlInput || (!groups.length && !loading)" class="p-3 bg-gray-50 border-b">
+    <div v-if="showUrlInput || (!groups.length && !loading)" class="p-3" style="background: var(--color-bg-surface); border-bottom: 1px solid var(--color-border)">
       <div class="flex gap-2 max-w-2xl">
         <el-input v-model="liveUrlInput" placeholder="输入直播源地址 (txt/m3u)" size="small" clearable />
         <el-button type="primary" size="small" :loading="loading" @click="loadLiveSource">加载</el-button>
@@ -25,11 +25,11 @@
 
     <!-- Loading state -->
     <div v-if="loading" class="flex-1 flex items-center justify-center">
-      <el-icon class="is-loading text-4xl text-gray-400"><Loading /></el-icon>
+      <el-icon class="is-loading text-4xl" style="color: var(--color-text-tertiary)"><Loading /></el-icon>
     </div>
 
     <!-- No data state -->
-    <div v-else-if="!groups.length" class="flex-1 flex flex-col items-center justify-center text-gray-400">
+    <div v-else-if="!groups.length" class="flex-1 flex flex-col items-center justify-center" style="color: var(--color-text-tertiary)">
       <el-icon class="text-5xl mb-4"><VideoPlay /></el-icon>
       <p>请输入直播源地址或前往设置配置直播源</p>
     </div>
@@ -37,23 +37,21 @@
     <!-- Main content: sidebar + channel list + player -->
     <div v-else class="flex-1 flex overflow-hidden" tabindex="0" @keydown="onKeyDown">
       <!-- Sidebar: channel groups -->
-      <div class="w-56 bg-gray-50 border-r overflow-y-auto flex-shrink-0">
+      <div class="w-48 lg:w-56 border-r overflow-y-auto flex-shrink-0 live-sidebar">
         <!-- Channel search -->
-        <div class="p-2 border-b">
+        <div class="p-2 border-b" style="border-color: var(--color-border)">
           <el-input v-model="channelSearch" placeholder="搜索频道" size="small" clearable prefix-icon="Search" />
         </div>
         <div
           v-for="group in groups"
           :key="group.groupName"
-          class="px-3 py-2.5 cursor-pointer text-sm transition-colors"
-          :class="activeGroup?.groupName === group.groupName
-            ? 'bg-blue-500 text-white font-semibold'
-            : 'text-gray-700 hover:bg-gray-100'"
+          class="px-3 py-2.5 cursor-pointer text-sm transition-colors live-group-item"
+          :class="activeGroup?.groupName === group.groupName ? 'live-group-active' : ''"
           @click="selectGroup(group)"
         >
           <div class="flex items-center justify-between">
             <span class="truncate">{{ group.groupName }}</span>
-            <span class="text-xs opacity-70">{{ group.channels.length }}</span>
+            <span class="text-xs" style="opacity:0.6">{{ group.channels.length }}</span>
           </div>
           <!-- Password input for locked groups -->
           <el-input
@@ -70,23 +68,21 @@
       </div>
 
       <!-- Channel list -->
-      <div class="w-64 bg-white border-r overflow-y-auto flex-shrink-0">
+      <div class="w-52 lg:w-64 border-r overflow-y-auto flex-shrink-0 live-channel-list">
         <div v-if="activeGroup">
-          <div class="px-3 py-2 bg-gray-50 text-xs text-gray-500 border-b">
+          <div class="px-3 py-2 text-xs border-b live-channel-header">
             {{ activeGroup.groupName }} ({{ filteredChannels.length }})
           </div>
           <div
             v-for="channel in filteredChannels"
             :key="channel.channelIndex"
-            class="px-3 py-2 cursor-pointer text-sm flex items-center gap-2 transition-colors"
-            :class="currentChannel?.channelIndex === channel.channelIndex
-              ? 'bg-blue-50 text-blue-600 font-semibold'
-              : 'text-gray-700 hover:bg-gray-50'"
+            class="px-3 py-2 cursor-pointer text-sm flex items-center gap-2 transition-colors live-channel-item"
+            :class="currentChannel?.channelIndex === channel.channelIndex ? 'live-channel-active' : ''"
             @click="playChannel(channel)"
           >
-            <span class="text-xs text-gray-400 w-6 text-right flex-shrink-0">{{ channel.channelNum }}</span>
+            <span class="text-xs w-6 text-right flex-shrink-0 live-channel-num">{{ channel.channelNum }}</span>
             <span class="truncate flex-1">{{ channel.channelName }}</span>
-            <span v-if="channel.channelUrls.length > 1" class="text-xs text-gray-400 flex-shrink-0">
+            <span v-if="channel.channelUrls.length > 1" class="text-xs flex-shrink-0 live-channel-source">
               {{ channel.channelUrls.length }}源
             </span>
           </div>
@@ -97,28 +93,28 @@
       <div class="flex-1 flex flex-col bg-black">
         <div class="flex-1 relative">
           <VideoPlayer v-if="currentLiveUrl" :url="currentLiveUrl" :title="currentChannelName" @error="onPlayError" @net-speed="onNetSpeed" />
-          <div v-else class="absolute inset-0 flex items-center justify-center text-gray-500">
+          <div v-else class="absolute inset-0 flex items-center justify-center" style="color: var(--color-text-tertiary)">
             <div class="text-center">
               <el-icon class="text-5xl mb-2"><VideoPlay /></el-icon>
               <p>选择频道开始播放</p>
             </div>
           </div>
           <!-- Channel number overlay -->
-          <div v-if="channelNumberDisplay" class="absolute top-2 left-2 text-2xl text-green-400 font-mono bg-black/50 px-3 py-1 rounded pointer-events-none">
+          <div v-if="channelNumberDisplay" class="absolute top-2 left-2 text-2xl font-mono bg-black/50 px-3 py-1 rounded pointer-events-none" style="color: var(--color-primary)">
             {{ channelNumberDisplay }}
           </div>
           <!-- Net speed indicator -->
-          <div v-if="currentLiveUrl && showNetSpeed" class="absolute top-2 right-2 text-xs text-gray-400 bg-black/50 px-2 py-1 rounded pointer-events-none">
+          <div v-if="currentLiveUrl && showNetSpeed" class="absolute top-2 right-2 text-xs bg-black/50 px-2 py-1 rounded pointer-events-none" style="color: var(--color-text-secondary)">
             {{ netSpeedText }}
           </div>
         </div>
         <!-- Current channel info bar -->
-        <div class="h-10 bg-gray-900 flex items-center px-4 text-white text-sm flex-shrink-0">
-          <span v-if="currentChannel" class="truncate">
+        <div class="h-10 flex items-center px-4 text-sm flex-shrink-0 live-info-bar">
+          <span v-if="currentChannel" class="truncate" style="color: var(--color-text-primary)">
             {{ currentChannel.channelName }}
-            <span v-if="currentSourceIndex > 0" class="text-gray-400 ml-2">线路{{ currentSourceIndex + 1 }}</span>
+            <span v-if="currentSourceIndex > 0" class="ml-2" style="color: var(--color-text-tertiary)">线路{{ currentSourceIndex + 1 }}</span>
           </span>
-          <span class="mx-2 text-gray-500">|</span>
+          <span class="mx-2" style="color: var(--color-text-disabled)">|</span>
           <el-switch v-model="autoSwitchSource" active-text="自动换源" inactive-text="" size="small" class="mr-2" />
           <!-- Source switch buttons -->
           <div v-if="currentChannel && currentChannel.channelUrls.length > 1" class="ml-auto flex gap-1">
@@ -134,9 +130,9 @@
           </div>
         </div>
         <!-- EPG date selector + info -->
-        <div v-if="showEpg" class="bg-gray-800 flex-shrink-0 max-h-60 overflow-y-auto">
+        <div v-if="showEpg" class="flex-shrink-0 max-h-60 overflow-y-auto live-epg-panel">
           <!-- EPG date selector -->
-          <div v-if="epgDates.length > 0" class="flex gap-1 px-4 py-1 overflow-x-auto sticky top-0 bg-gray-800 z-10">
+          <div v-if="epgDates.length > 0" class="flex gap-1 px-4 py-1 overflow-x-auto sticky top-0 z-10 live-epg-dates">
             <el-button
               v-for="(date, di) in epgDates"
               :key="di"
@@ -148,14 +144,14 @@
             </el-button>
           </div>
           <!-- EPG current/next info -->
-          <div v-if="currentEpgInfo" class="px-4 py-2 text-sm border-b border-gray-700">
-            <p class="text-green-400">
+          <div v-if="currentEpgInfo" class="px-4 py-2 text-sm border-b" style="border-color: var(--color-border)">
+            <p style="color: var(--color-primary)">
               正在播放: {{ currentEpgInfo.current?.title || '未知' }}
-              <span class="text-gray-500 ml-2">{{ currentEpgInfo.current?.start || '' }}</span>
+              <span class="ml-2" style="color: var(--color-text-tertiary)">{{ currentEpgInfo.current?.start || '' }}</span>
             </p>
-            <p class="text-gray-400">
+            <p style="color: var(--color-text-secondary)">
               下一个: {{ currentEpgInfo.next?.title || '未知' }}
-              <span class="text-gray-500 ml-2">{{ currentEpgInfo.next?.start || '' }}</span>
+              <span class="ml-2" style="color: var(--color-text-tertiary)">{{ currentEpgInfo.next?.start || '' }}</span>
             </p>
           </div>
           <!-- EPG program list (clickable for time-shift) -->
@@ -163,30 +159,30 @@
             <div
               v-for="prog in epgProgramList"
               :key="prog.start"
-              class="flex items-center px-2 py-1 text-xs cursor-pointer rounded hover:bg-gray-700"
-              :class="isCurrentEpgProgram(prog) ? 'bg-blue-900/50 text-blue-300' : 'text-gray-400'"
+              class="flex items-center px-2 py-1 text-xs cursor-pointer rounded transition-colors live-epg-item"
+              :class="isCurrentEpgProgram(prog) ? 'live-epg-current' : ''"
               @click="onEpgClick(prog)"
             >
-              <span class="w-16 flex-shrink-0 text-gray-500">{{ formatEpgTime(prog.start) }}</span>
+              <span class="w-16 flex-shrink-0" style="color: var(--color-text-tertiary)">{{ formatEpgTime(prog.start) }}</span>
               <span class="truncate">{{ prog.title }}</span>
             </div>
           </div>
-          <div v-else-if="currentChannel && !currentEpgInfo" class="px-4 py-2 text-sm text-gray-500">
+          <div v-else-if="currentChannel && !currentEpgInfo" class="px-4 py-2 text-sm" style="color: var(--color-text-tertiary)">
             暂无节目信息
           </div>
         </div>
 
         <!-- Live Settings Panel -->
-        <div v-if="showSettings" class="bg-gray-800 p-4 flex-shrink-0">
+        <div v-if="showSettings" class="p-4 flex-shrink-0 live-settings-panel">
           <div class="grid grid-cols-2 gap-4 text-sm">
             <div>
-              <label class="text-gray-400 mb-1 block">画面比例</label>
+              <label class="mb-1 block" style="color: var(--color-text-secondary)">画面比例</label>
               <el-select v-model="liveAspectRatio" size="small" @change="onAspectRatioChange">
                 <el-option v-for="r in aspectRatios" :key="r.value" :label="r.label" :value="r.value" />
               </el-select>
             </div>
             <div>
-              <label class="text-gray-400 mb-1 block">超时换台(秒)</label>
+              <label class="mb-1 block" style="color: var(--color-text-secondary)">超时换台(秒)</label>
               <el-select v-model="timeoutSeconds" size="small">
                 <el-option v-for="t in [5, 10, 15, 30, 60]" :key="t" :label="t + '秒'" :value="t" />
               </el-select>
@@ -209,7 +205,7 @@
     </div>
 
     <!-- Time display overlay -->
-    <div v-if="showTime && currentLiveUrl" class="fixed top-2 left-1/2 -translate-x-1/2 text-xs text-gray-300 bg-black/50 px-2 py-1 rounded pointer-events-none z-50">
+    <div v-if="showTime && currentLiveUrl" class="fixed top-2 left-1/2 -translate-x-1/2 text-xs bg-black/50 px-2 py-1 rounded pointer-events-none z-50" style="color: var(--color-text-secondary)">
       {{ currentTimeDisplay }}
     </div>
   </div>
@@ -626,3 +622,92 @@ function onKeyDown(e: KeyboardEvent) {
   }
 }
 </script>
+
+<style scoped>
+/* Sidebar */
+.live-sidebar {
+  background: var(--color-bg-surface);
+  border-color: var(--color-border);
+}
+
+.live-group-item {
+  color: var(--color-text-secondary);
+}
+
+.live-group-item:hover {
+  background: var(--color-bg-elevated);
+}
+
+.live-group-active {
+  background: var(--color-primary-soft) !important;
+  color: var(--color-primary) !important;
+  font-weight: 600;
+}
+
+/* Channel list */
+.live-channel-list {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-border);
+}
+
+.live-channel-header {
+  background: var(--color-bg-surface);
+  color: var(--color-text-tertiary);
+  border-color: var(--color-border);
+}
+
+.live-channel-item {
+  color: var(--color-text-secondary);
+}
+
+.live-channel-item:hover {
+  background: var(--color-bg-surface);
+}
+
+.live-channel-active {
+  background: var(--color-primary-soft) !important;
+  color: var(--color-primary) !important;
+  font-weight: 600;
+}
+
+.live-channel-num {
+  color: var(--color-text-tertiary);
+}
+
+.live-channel-source {
+  color: var(--color-text-tertiary);
+}
+
+/* Info bar */
+.live-info-bar {
+  background: var(--color-bg-overlay);
+}
+
+/* EPG panel */
+.live-epg-panel {
+  background: var(--color-bg-elevated);
+}
+
+.live-epg-dates {
+  background: var(--color-bg-elevated);
+}
+
+.live-epg-item {
+  color: var(--color-text-secondary);
+}
+
+.live-epg-item:hover {
+  background: var(--color-bg-overlay);
+}
+
+.live-epg-current {
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+
+/* Settings panel */
+.live-settings-panel {
+  background: var(--color-bg-elevated);
+  border-top: 1px solid var(--color-border);
+}
+</style>

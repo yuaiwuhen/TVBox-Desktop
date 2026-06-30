@@ -12,14 +12,15 @@
     <!-- Danmu overlay -->
     <div ref="danmuContainer" class="absolute top-0 left-0 w-full h-3/4 pointer-events-none overflow-hidden z-10"></div>
 
-    <!-- Screen display info overlay (time, net speed) -->
-    <div v-if="screenDisplayEnabled && isPlaying" class="absolute top-2 left-2 text-xs text-gray-300 bg-black/40 px-2 py-1 rounded pointer-events-none z-10 space-y-0.5">
+    <!-- Screen display info overlay -->
+    <div v-if="screenDisplayEnabled && isPlaying" class="absolute top-2 left-2 text-xs text-white/70 bg-black/40 px-2 py-1 rounded pointer-events-none z-10 space-y-0.5">
       <div>{{ screenDisplayTime }}</div>
       <div v-if="netSpeedDisplay">{{ netSpeedDisplay }}</div>
     </div>
 
     <!-- Skip intro/outro indicator -->
-    <div v-if="skipIndicator" class="absolute bottom-28 right-8 bg-blue-600/80 text-white text-sm px-3 py-1.5 rounded pointer-events-auto cursor-pointer z-20"
+    <div v-if="skipIndicator" class="absolute bottom-28 right-8 text-sm px-3 py-1.5 rounded pointer-events-auto cursor-pointer z-20"
+         style="background: var(--color-primary); color: #fff"
          @click="skipIndicator === '跳过片头' ? skipToIntroEnd() : skipToOutroEnd()">
       {{ skipIndicator }}
     </div>
@@ -32,83 +33,127 @@
       </div>
     </div>
 
-    <!-- Lock icon (when screen is locked) -->
+    <!-- Lock icon -->
     <div v-if="screenLocked" class="absolute top-4 left-1/2 -translate-x-1/2 z-30">
-      <el-button circle size="small" type="warning" @click="unlockScreen" class="animate-pulse">
-        🔒
-      </el-button>
+      <button class="w-10 h-10 rounded-full flex items-center justify-center animate-pulse" style="background: var(--color-primary)" @click="unlockScreen">
+        <el-icon :size="18" style="color: #fff"><Unlock /></el-icon>
+      </button>
     </div>
 
     <!-- Controls overlay (hidden when screen locked) -->
     <div v-if="showControls && !screenLocked" class="absolute inset-0 flex flex-col justify-end pointer-events-none">
       <!-- Top bar -->
-      <div class="flex items-center justify-between px-4 py-2 bg-gradient-to-b from-black/60 to-transparent pointer-events-auto">
+      <div class="flex items-center justify-between px-4 py-2 pointer-events-auto" style="background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent)">
         <span class="text-white text-sm truncate max-w-[60%]">{{ title }}</span>
         <div class="flex gap-1">
-          <el-button circle size="small" @click="toggleDanmu" :type="danmuEnabled ? 'primary' : 'default'" title="弹幕">弹</el-button>
-          <el-button circle size="small" @click="showDanmuSettings = !showDanmuSettings" title="弹幕设置">⚙</el-button>
-          <el-button circle size="small" @click="toggleSubtitle" :type="subtitleEnabled ? 'primary' : 'default'" title="字幕">字</el-button>
-          <el-button v-if="subtitleEnabled" circle size="small" @click="adjustSubtitleDelay(-0.5)" title="字幕延迟-0.5s">⏪</el-button>
-          <el-button v-if="subtitleEnabled" circle size="small" @click="adjustSubtitleDelay(0.5)" title="字幕延迟+0.5s">⏩</el-button>
-          <el-button v-if="showSubtitleSearch" circle size="small" @click="emit('searchSubtitle')" title="搜索字幕">搜</el-button>
-          <el-button circle size="small" @click="lockScreen" title="锁屏">🔒</el-button>
-          <el-button circle size="small" @click="togglePiP" title="画中画">⧉</el-button>
-          <el-button circle size="small" @click="toggleFullscreen" :title="isFullscreen ? '退出全屏' : '全屏'">⛶</el-button>
+          <button class="ctrl-btn" :class="{ active: danmuEnabled }" @click="toggleDanmu" title="弹幕">
+            <el-icon :size="16"><ChatDotRound /></el-icon>
+          </button>
+          <button class="ctrl-btn" @click="showDanmuSettings = !showDanmuSettings" title="弹幕设置">
+            <el-icon :size="16"><Setting /></el-icon>
+          </button>
+          <button class="ctrl-btn" :class="{ active: subtitleEnabled }" @click="toggleSubtitle" title="字幕">
+            <el-icon :size="16"><Document /></el-icon>
+          </button>
+          <button v-if="subtitleEnabled" class="ctrl-btn" @click="adjustSubtitleDelay(-0.5)" title="字幕延迟-0.5s">
+            <el-icon :size="14"><DArrowLeft /></el-icon>
+          </button>
+          <button v-if="subtitleEnabled" class="ctrl-btn" @click="adjustSubtitleDelay(0.5)" title="字幕延迟+0.5s">
+            <el-icon :size="14"><DArrowRight /></el-icon>
+          </button>
+          <button v-if="showSubtitleSearch" class="ctrl-btn" @click="emit('searchSubtitle')" title="搜索字幕">
+            <el-icon :size="16"><Search /></el-icon>
+          </button>
+          <button class="ctrl-btn" @click="lockScreen" title="锁屏">
+            <el-icon :size="16"><Lock /></el-icon>
+          </button>
+          <button class="ctrl-btn" @click="togglePiP" title="画中画">
+            <el-icon :size="16"><Monitor /></el-icon>
+          </button>
+          <button class="ctrl-btn" @click="toggleFullscreen" :title="isFullscreen ? '退出全屏' : '全屏'">
+            <el-icon :size="16"><FullScreen /></el-icon>
+          </button>
         </div>
       </div>
       <!-- Bottom bar -->
-      <div class="px-4 py-3 bg-gradient-to-t from-black/60 to-transparent pointer-events-auto">
+      <div class="px-4 py-3 pointer-events-auto" style="background: linear-gradient(to top, rgba(0,0,0,0.8), transparent)">
         <div class="flex items-center gap-3 mb-2">
-          <span class="text-white text-xs w-16 text-right">{{ formatTime(currentTime) }}</span>
+          <span class="text-white/80 text-xs w-14 text-right">{{ formatTime(currentTime) }}</span>
           <el-slider v-model="progressPercent" :show-tooltip="false" class="flex-1" @change="seekTo" />
-          <span class="text-white text-xs w-16">{{ formatTime(duration) }}</span>
+          <span class="text-white/80 text-xs w-14">{{ formatTime(duration) }}</span>
         </div>
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-1">
-            <el-button circle @click="togglePlay" :title="isPlaying ? '暂停' : '播放'">
-              <span class="text-xs">{{ isPlaying ? '⏸' : '▶' }}</span>
-            </el-button>
-            <el-button circle @click="skipForward" :title="`快进${timeStep}秒`">⏩</el-button>
-            <el-button circle @click="skipBackward" :title="`快退${timeStep}秒`">⏪</el-button>
-            <el-button circle @click="toggleMute" :type="isMuted ? 'danger' : 'default'" title="静音">🔇</el-button>
-            <el-button v-if="hasPrev" circle @click="$emit('prev')" title="上一集">⏮</el-button>
-            <el-button v-if="hasNext" circle @click="$emit('next')" title="下一集">⏭</el-button>
-            <el-dropdown @command="setTimeStep" trigger="click">
-              <el-button circle size="small" title="步进时间">{{ timeStep }}s</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item v-for="s in [5,10,15,20,25,30]" :key="s" :command="s">{{ s }}s</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
+            <button v-if="hasPrev" class="ctrl-btn" @click="$emit('prev')" title="上一集">
+              <el-icon :size="18"><Back /></el-icon>
+            </button>
+            <button class="ctrl-btn" @click="skipBackward" :title="`快退${timeStep}秒`">
+              <el-icon :size="16"><RefreshLeft /></el-icon>
+            </button>
+            <button class="ctrl-btn play-btn" @click="togglePlay" :title="isPlaying ? '暂停' : '播放'">
+              <el-icon :size="22"><component :is="isPlaying ? 'VideoPause' : 'VideoPlay'" /></el-icon>
+            </button>
+            <button class="ctrl-btn" @click="skipForward" :title="`快进${timeStep}秒`">
+              <el-icon :size="16"><RefreshRight /></el-icon>
+            </button>
+            <button v-if="hasNext" class="ctrl-btn" @click="$emit('next')" title="下一集">
+              <el-icon :size="18"><Right /></el-icon>
+            </button>
           </div>
           <div class="flex items-center gap-1">
-            <el-button circle size="small" @click="toggleSkipIntro" :type="skipIntro > 0 ? 'warning' : 'default'" title="片头跳过">st</el-button>
-            <el-button circle size="small" @click="toggleSkipOutro" :type="skipOutro > 0 ? 'warning' : 'default'" title="片尾跳过">et</el-button>
+            <button class="ctrl-btn" @click="toggleMute" :title="isMuted ? '取消静音' : '静音'">
+              <el-icon :size="16"><component :is="isMuted ? 'Mute' : 'Microphone'" /></el-icon>
+            </button>
             <el-dropdown @command="changeSpeed" trigger="click">
-              <el-button circle size="small">{{ playbackRate }}x</el-button>
+              <button class="ctrl-btn text-xs">{{ playbackRate }}x</button>
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item v-for="s in [0.5, 0.75, 1, 1.25, 1.5, 2, 3]" :key="s" :command="s">{{ s }}x</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
-            <el-dropdown @command="changeAspectRatio" trigger="click">
-              <el-button circle size="small" title="画面比例">⊞</el-button>
+            <el-dropdown @command="setTimeStep" trigger="click">
+              <button class="ctrl-btn text-xs">{{ timeStep }}s</button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item v-for="r in aspectRatios" :key="r.value" :command="r.value">{{ r.label }}</el-dropdown-item>
+                  <el-dropdown-item v-for="s in [5,10,15,20,25,30]" :key="s" :command="s">{{ s }}s</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
-            <el-button circle size="small" @click="toggleFullscreen" :title="isFullscreen ? '退出全屏' : '全屏'">⛶</el-button>
+            <!-- More options dropdown -->
+            <el-dropdown trigger="click">
+              <button class="ctrl-btn" title="更多">
+                <el-icon :size="16"><MoreFilled /></el-icon>
+              </button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item @click="toggleSkipIntro">
+                    <span :style="{ color: skipIntro > 0 ? 'var(--color-primary)' : '' }">片头跳过 {{ skipIntro > 0 ? skipIntro + 's' : '关' }}</span>
+                  </el-dropdown-item>
+                  <el-dropdown-item @click="toggleSkipOutro">
+                    <span :style="{ color: skipOutro > 0 ? 'var(--color-primary)' : '' }">片尾跳过 {{ skipOutro > 0 ? skipOutro + 's' : '关' }}</span>
+                  </el-dropdown-item>
+                  <el-dropdown-item divided>
+                    <el-dropdown @command="changeAspectRatio" trigger="hover" placement="left-start">
+                      <span>画面比例</span>
+                      <template #dropdown>
+                        <el-dropdown-menu>
+                          <el-dropdown-item v-for="r in aspectRatios" :key="r.value" :command="r.value">{{ r.label }}</el-dropdown-item>
+                        </el-dropdown-menu>
+                      </template>
+                    </el-dropdown>
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
         </div>
       </div>
     </div>
 
     <!-- Danmu settings panel -->
-    <div v-if="showDanmuSettings" class="absolute top-12 right-2 bg-gray-900/90 text-white p-3 rounded-lg z-20 w-56 space-y-2 text-sm">
+    <div v-if="showDanmuSettings" class="absolute top-12 right-2 p-3 rounded-lg z-20 w-56 space-y-2 text-sm"
+         style="background: rgba(0,0,0,0.85); backdrop-filter: blur(8px); color: #fff">
       <div class="flex justify-between items-center">
         <span>弹幕开关</span>
         <el-switch v-model="danmuEnabled" size="small" @change="onDanmuToggle" />
@@ -141,7 +186,7 @@
 
     <!-- Long press speed indicator -->
     <div v-if="longPressActive" class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white text-4xl font-bold pointer-events-none z-20">
-      {{ playbackRate }}x ⏩
+      {{ playbackRate }}x <el-icon :size="32"><DArrowRight /></el-icon>
     </div>
   </div>
 </template>
@@ -871,15 +916,52 @@ defineExpose({
 .video-player-wrapper :deep(.xgplayer-controls) {
   display: none;
 }
+
+/* Control buttons */
+.ctrl-btn {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: background 200ms ease, color 200ms ease;
+  flex-shrink: 0;
+}
+.ctrl-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+.ctrl-btn.active {
+  color: var(--color-primary);
+}
+.ctrl-btn.active:hover {
+  background: var(--color-primary-soft);
+}
+.ctrl-btn.play-btn {
+  width: 44px;
+  height: 44px;
+}
+
+/* Progress slider */
 .el-slider :deep(.el-slider__runway) {
-  background-color: rgba(255, 255, 255, 0.3);
+  background-color: rgba(255, 255, 255, 0.2);
 }
 .el-slider :deep(.el-slider__bar) {
-  background-color: #409eff;
+  background-color: var(--color-primary);
 }
 .el-slider :deep(.el-slider__button) {
-  border-color: #409eff;
+  border-color: var(--color-primary);
+  width: 12px;
+  height: 12px;
 }
+.el-slider :deep(.el-slider__button-wrapper) {
+  top: -16px;
+}
+
 @keyframes danmu-scroll {
   from { transform: translateX(0); }
   to { transform: translateX(calc(-100vw - 200px)); }

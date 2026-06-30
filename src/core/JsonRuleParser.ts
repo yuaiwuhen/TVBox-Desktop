@@ -368,11 +368,17 @@ export class JsonRuleParser implements ISpider {
   async init(extend: string): Promise<void> {
     // Parse the ext JSON string into the rule object
     const extStr = extend || this.source.ext || '';
+    console.log(
+      `[JsonRuleParser] init: key=${this.source.key}, type=${this.source.type}, api=${this.source.api}, ext=${extStr.substring(0, 200)}`,
+    );
     if (extStr) {
       try {
         const parsed = JSON.parse(extStr);
         if (parsed && typeof parsed === 'object') {
           this.rules = parsed as JsonRules;
+          console.log(
+            `[JsonRuleParser] parsed ext rules: homeUrl=${this.rules.homeUrl}, categories=${this.rules.categories}, cateVodNode=${this.rules.cateVodNode}`,
+          );
         }
       } catch {
         // ext might be a plain URL or other format
@@ -381,6 +387,32 @@ export class JsonRuleParser implements ISpider {
           this.rules.homeUrl = extStr;
         }
       }
+    }
+
+    // ── mac/vod API auto-configuration (type=1) ──
+    // For standard mac/vod JSON API: detect and set up default rules
+    if (
+      this.sourceType === 1 &&
+      this.source.api &&
+      /^https?:\/\//i.test(this.source.api)
+    ) {
+      if (!this.rules.homeUrl) {
+        this.rules.homeUrl = this.source.api;
+      }
+      if (!this.rules.cateUrl) {
+        this.rules.cateUrl =
+          this.source.api + '?ac=videolist&t={cateId}&pg={catePg}';
+      }
+      if (!this.rules.detailUrl) {
+        this.rules.detailUrl = this.source.api + '?ac=detail&ids={vid}';
+      }
+      if (!this.rules.searchUrl) {
+        this.rules.searchUrl =
+          this.source.api + '?ac=videolist&wd={wd}&pg={catePg}';
+      }
+      console.log(
+        `[JsonRuleParser] mac/vod API auto-config: homeUrl=${this.rules.homeUrl}, cateUrl=${this.rules.cateUrl}, detailUrl=${this.rules.detailUrl}`,
+      );
     }
 
     // Derive base URL from homeUrl or cateUrl for resolving relative paths
@@ -396,18 +428,52 @@ export class JsonRuleParser implements ISpider {
   async homeContent(_filter: boolean): Promise<string> {
     try {
       const homeUrl = this.rules.homeUrl || this.source.api || '';
+      console.log(
+        `[JsonRuleParser] homeContent: key=${this.source.key}, type=${this.sourceType}, homeUrl=${homeUrl}`,
+      );
       if (!homeUrl) return JSON.stringify({ class: [], list: [] });
 
       const html = await this.fetchPage(homeUrl);
+      console.log(
+        `[JsonRuleParser] homeContent: fetched ${html.length} chars from ${homeUrl}`,
+      );
       const parsed = safeParseJson(html);
 
       // Build categories from rules.categories string
-      const classes = this.parseCategories();
+      let classes = this.parseCategories();
 
       // Parse video list using cateVod* rules (fall back to scVod* or direct)
       const nodeRule =
         this.rules.cateVodNode || this.rules.scVodNode || 'json:list';
-      const items = extractNodeList(parsed || html, nodeRule);
+      let items = extractNodeList(parsed || html, nodeRule);
+
+      // mac/vod API fallback: when response is { code, list, page, pagecount, total }
+      if (items.length === 0 && parsed && Array.isArray(parsed.list)) {
+        items = parsed.list;
+      }
+
+      // If categories are still empty, aggregate from the video list (mac/vod API)
+      if (classes.length === 0 && items.length > 0) {
+        const seen = new Map<string, string>();
+        for (const it of items) {
+          if (it && typeof it === 'object') {
+            const tid = String(it.type_id ?? '');
+            const tname = String(it.type_name ?? it.type_id ?? '');
+            if (tid && !seen.has(tid)) {
+              seen.set(tid, tname);
+            }
+          }
+        }
+        classes = Array.from(seen.entries()).map(([tid, tname]) => ({
+          type_id: tid,
+          type_name: tname,
+        }));
+        classes.sort((a, b) => Number(a.type_id) - Number(b.type_id));
+      }
+
+      console.log(
+        `[JsonRuleParser] homeContent: nodeRule=${nodeRule}, items=${items.length}, classes=${classes.length}`,
+      );
 
       const list: Movie[] = [];
       for (const item of items) {
@@ -433,14 +499,28 @@ export class JsonRuleParser implements ISpider {
 
       const nodeRule =
         this.rules.cateVodNode || this.rules.scVodNode || 'json:list';
-      const items = extractNodeList(parsed || html, nodeRule);
+      let items = extractNodeList(parsed || html, nodeRule);
+
+      // mac/vod API fallback
+      if (items.length === 0 && parsed && Array.isArray(parsed.list)) {
+        items = parsed.list;
+      }
 
       const list: Movie[] = [];
       for (const item of items) {
         list.push(this.extractMovie(item, 'cate', homeUrl));
       }
 
-      return JSON.stringify({ list });
+      let page = 1;
+      let pagecount = 1;
+      let total = 0;
+      if (parsed && typeof parsed === 'object') {
+        page = parsed.page || 1;
+        pagecount = parsed.pagecount || parsed.pageCount || 1;
+        total = parsed.total || 0;
+      }
+
+      return JSON.stringify({ list, page, pagecount, total });
     } catch (e) {
       console.error('[JsonRuleParser] homeVideoContent error:', e);
       return JSON.stringify({ list: [] });
@@ -670,13 +750,16 @@ export class JsonRuleParser implements ISpider {
   /**
    * Fetch a page and return its content as text.
    * For JSON APIs, the response is typically already parsed by axios.
+   * Note: User-Agent and other forbidden headers are filtered by browsers,
+   * so we only set allowed custom headers.
    */
   private async fetchPage(url: string): Promise<string> {
-    const headers: Record<string, string> = {
-      'User-Agent':
-        this.rules.ua ||
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    };
+    const headers: Record<string, string> = {};
+    // Only set custom UA when running in Node (Electron main process)
+    // Browser will silently drop the header
+    if (this.rules.ua) {
+      headers['User-Agent'] = this.rules.ua;
+    }
 
     const resp = await axios.get(url, {
       headers,

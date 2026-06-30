@@ -298,7 +298,6 @@ export class PySpider implements ISpider {
 
     try {
       const { data } = await axios.get(this.api, {
-        headers: { 'User-Agent': 'okhttp/3.15' },
         responseType: 'text',
         timeout: 30000,
       });

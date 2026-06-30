@@ -218,7 +218,7 @@ export class M3u8Purifier {
         line.startsWith('#EXTINF') ||
         line.startsWith('#EXT-X-DISCONTINUITY')
       ) {
-        _headerDone = true;
+        headerDone = true;
         break;
       }
       if (line.startsWith('#') || line.trim() === '') {

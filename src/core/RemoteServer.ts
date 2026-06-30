@@ -22,6 +22,9 @@ export interface RemoteControlHandler {
   ): Promise<void>;
   control(action: string): void;
   getStatus(): Record<string, any>;
+  getDebug?(): Record<string, any>;
+  getSpiderUrl?(): string;
+  getConfigInfo?(): Record<string, any> | null;
   setConfigUrl?(url: string): Promise<void>;
   setLiveUrl?(url: string): void;
   setEpgUrl?(url: string): void;
@@ -131,6 +134,12 @@ export class RemoteServer {
       this.handleControl(reqUrl, res);
     } else if (pathname === '/action') {
       await this.handleAction(req, reqUrl, res);
+    } else if (pathname === '/debug') {
+      this.handleDebug(res);
+    } else if (pathname === '/spider') {
+      this.handleSpider(res);
+    } else if (pathname === '/clear-cache') {
+      this.handleClearCache(res);
     } else {
       this.sendJson(res, 404, { error: 'Not Found' });
     }
@@ -144,6 +153,50 @@ export class RemoteServer {
     this.sendJson(res, 200, this.handler.getStatus());
   }
 
+  private handleSpider(res: any): void {
+    if (!this.handler) {
+      this.sendJson(res, 503, { error: 'Handler not connected' });
+      return;
+    }
+    const spiderUrl = (this.handler as any).getSpiderUrl
+      ? (this.handler as any).getSpiderUrl()
+      : 'not exposed';
+    const configInfo = (this.handler as any).getConfigInfo
+      ? (this.handler as any).getConfigInfo()
+      : null;
+    this.sendJson(res, 200, { spiderUrl, configInfo });
+  }
+
+  private handleClearCache(res: any): void {
+    // Clear all tvbox_* localStorage keys
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('tvbox_')) {
+        keysToRemove.push(key);
+      }
+    }
+    for (const key of keysToRemove) {
+      localStorage.removeItem(key);
+    }
+    this.sendJson(res, 200, {
+      cleared: keysToRemove.length,
+      keys: keysToRemove,
+    });
+  }
+
+  private handleDebug(res: any): void {
+    if (!this.handler) {
+      this.sendJson(res, 503, { error: 'Handler not connected' });
+      return;
+    }
+    if (this.handler.getDebug) {
+      this.sendJson(res, 200, this.handler.getDebug());
+    } else {
+      this.sendJson(res, 200, this.handler.getStatus());
+    }
+  }
+
   private handleSources(res: any): void {
     if (!this.handler) {
       this.sendJson(res, 503, { error: 'Handler not connected' });
@@ -153,7 +206,13 @@ export class RemoteServer {
     this.sendJson(
       res,
       200,
-      sources.map((s) => ({ key: s.key, name: s.name, type: s.type })),
+      sources.map((s) => ({
+        key: s.key,
+        name: s.name,
+        type: s.type,
+        api: s.api?.substring(0, 100),
+        ext: typeof s.ext === 'string' ? s.ext.substring(0, 80) : s.ext,
+      })),
     );
   }
 

@@ -15,7 +15,6 @@ export class EpgLoader {
   static async load(epgUrl: string): Promise<Map<string, EpgData>> {
     try {
       const { data } = await axios.get(epgUrl, {
-        headers: { 'User-Agent': 'okhttp/4.10.0' },
         responseType: 'text',
         timeout: 30000,
       });
@@ -174,7 +173,6 @@ export class LiveParser {
       }
 
       const { data } = await axios.get(url, {
-        headers: { 'User-Agent': 'okhttp/4.10.0' },
         responseType: 'text',
         timeout: 30000,
       });

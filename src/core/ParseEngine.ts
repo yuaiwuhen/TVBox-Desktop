@@ -321,10 +321,6 @@ export class ParseEngine {
     try {
       const { data } = await axios.get(url, {
         timeout: 10000,
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-        },
       });
 
       // Try to find video URLs in the response content

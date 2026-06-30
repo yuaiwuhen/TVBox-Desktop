@@ -1,61 +1,62 @@
 <template>
-  <div class="h-full flex flex-col">
+  <div class="h-full flex flex-col" style="background: var(--color-bg-base)">
     <div class="px-6 pt-4 pb-2 flex items-center justify-between flex-shrink-0">
-      <h2 class="text-xl font-bold text-gray-800">观看历史</h2>
+      <h2 class="text-xl font-bold" style="color: var(--color-text-primary)">观看历史</h2>
       <el-button v-if="store.historyList.length > 0" type="danger" size="small" @click="handleClear">清空历史</el-button>
     </div>
 
-    <div v-if="store.historyList.length === 0" class="flex-1 flex flex-col items-center justify-center text-gray-400">
+    <div v-if="store.historyList.length === 0" class="flex-1 flex flex-col items-center justify-center" style="color: var(--color-text-tertiary)">
       <el-icon class="text-5xl mb-3"><Clock /></el-icon>
       <p>暂无观看记录</p>
     </div>
 
     <div v-else class="flex-1 overflow-auto px-4 pb-4">
-      <div class="space-y-3">
-          <el-card
+      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-4 mt-2">
+        <div
           v-for="item in store.historyList"
           :key="`${item.sourceKey}-${item.vod_id}`"
-          :body-style="{ padding: '0px' }"
-          class="cursor-pointer hover:shadow-lg transition-all relative group"
+          class="cursor-pointer rounded-lg overflow-hidden transition-all duration-300 hover:-translate-y-1 group"
+          style="background: var(--color-bg-surface)"
           @click="goToPlay(item)"
         >
-          <div class="flex gap-4 p-3">
+          <div class="relative overflow-hidden aspect-[3/4]">
             <img
               v-if="item.vod_pic"
               :src="item.vod_pic"
-              class="w-20 h-28 object-cover rounded flex-shrink-0"
+              class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
             />
-            <div class="flex flex-col justify-between flex-1 min-w-0">
-              <div>
-                <h3 class="text-base font-bold text-gray-900 truncate">{{ item.vod_name }}</h3>
-                <p v-if="item.type_name" class="text-xs text-gray-500 mt-1">{{ item.type_name }}</p>
-                <p v-if="item.vod_remarks" class="text-xs text-gray-400 mt-0.5">{{ item.vod_remarks }}</p>
-              </div>
-              <div class="flex items-center justify-between mt-2">
-                <div class="flex items-center gap-2 text-xs text-gray-400">
-                  <span>{{ formatTimestamp(item.timestamp) }}</span>
-                  <span v-if="item.duration > 0">· {{ formatProgress(item.progress, item.duration) }}</span>
-                </div>
-                <el-progress
-                  v-if="item.duration > 0"
-                  :percentage="Math.round((item.progress / item.duration) * 100)"
-                  :show-text="false"
-                  :stroke-width="3"
-                  class="w-20"
-                />
-              </div>
+            <div v-else class="w-full h-full flex items-center justify-center" style="background: var(--color-bg-elevated)">
+              <el-icon :size="32" style="color: var(--color-text-tertiary)"><Film /></el-icon>
             </div>
+            <!-- Progress bar at bottom of cover -->
+            <div
+              v-if="item.duration > 0"
+              class="absolute bottom-0 left-0 right-0"
+              style="background: rgba(0,0,0,0.5); height: 2px"
+            >
+              <div
+                style="height: 2px; background: var(--color-primary)"
+                :style="{ width: Math.min(Math.round((item.progress / item.duration) * 100), 100) + '%' }"
+              />
+            </div>
+            <!-- Delete button (hover only) -->
+            <el-button
+              class="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity"
+              circle
+              size="small"
+              type="danger"
+              :icon="Delete"
+              @click.stop="handleDeleteSingle(item)"
+            />
           </div>
-          <!-- Delete button (visible on hover) -->
-          <el-button
-            class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity"
-            circle
-            size="small"
-            type="danger"
-            :icon="Delete"
-            @click.stop="handleDeleteSingle(item)"
-          />
-        </el-card>
+          <div class="p-3">
+            <span class="text-sm font-medium truncate block" style="color: var(--color-text-primary)" :title="item.vod_name">{{ item.vod_name }}</span>
+            <span class="text-xs truncate block mt-1" style="color: var(--color-text-tertiary)">
+              {{ formatTimestamp(item.timestamp) }}
+              <span v-if="item.duration > 0"> · {{ formatProgress(item.progress, item.duration) }}</span>
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -65,7 +66,7 @@
 import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Clock, Delete } from '@element-plus/icons-vue'
+import { Clock, Delete, Film } from '@element-plus/icons-vue'
 import { useAppStore } from '../store/app'
 import { Database, type HistoryRecord } from '../core/Database'
 
@@ -100,10 +101,8 @@ function formatProgress(progress: number, duration: number): string {
   return `${fmt(progress)} / ${fmt(duration)}`
 }
 
-async function goToPlay(item: HistoryRecord) {
-  store.setActiveSite(item.sourceKey)
-  await store.loadDetail(item.vod_id)
-  router.push('/')
+function goToPlay(item: HistoryRecord) {
+  router.push({ name: 'detail', params: { sourceKey: item.sourceKey, vodId: item.vod_id } })
 }
 
 async function handleDeleteSingle(item: HistoryRecord) {

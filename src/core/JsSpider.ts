@@ -1292,17 +1292,24 @@ export class JsSpider implements ISpider {
 
   async init(extend: string): Promise<void> {
     this.ext = extend || this.ext;
+    console.log(
+      `[JsSpider] init: key=${this.key}, api=${this.api}, ext=${this.ext.substring(0, 80)}`,
+    );
 
     // Download JS source
+    // Note: browsers block User-Agent header in fetch/XHR, so we omit it.
+    // The spider JS files are public and accept any UA.
     let code: string;
     try {
       const resp = await axios.get(this.api, {
         responseType: 'text',
-        headers: { 'User-Agent': 'okhttp/4.10.0' },
         timeout: 15000,
       });
       code =
         typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      console.log(
+        `[JsSpider] fetched code length: ${code.length} for ${this.key}`,
+      );
     } catch (e) {
       throw new Error(`[JsSpider] Failed to fetch spider ${this.key}: ${e}`);
     }
@@ -1320,12 +1327,22 @@ export class JsSpider implements ISpider {
     const wrapped = this.wrapCode(code);
     try {
       vm.runInContext(wrapped, this.context!, { timeout: 10000 });
+      console.log(`[JsSpider] code evaluated successfully for ${this.key}`);
     } catch (e) {
       throw new Error(`[JsSpider] Failed to evaluate spider ${this.key}: ${e}`);
     }
 
     // Resolve the spider object from the three possible formats
     this.resolveSpiderObject();
+    console.log(
+      `[JsSpider] spiderObj resolved: ${!!this.spiderObj}, methods: ${
+        this.spiderObj
+          ? Object.keys(this.spiderObj)
+              .filter((k) => typeof this.spiderObj[k] === 'function')
+              .join(',')
+          : 'none'
+      }`,
+    );
 
     // Call the spider's init if it exists
     if (this.spiderObj && typeof this.spiderObj.init === 'function') {
@@ -1338,6 +1355,9 @@ export class JsSpider implements ISpider {
         if (result && typeof result.then === 'function') {
           await result;
         }
+        console.log(
+          `[JsSpider] spider.init() called successfully for ${this.key}`,
+        );
       } catch (e) {
         console.error(`[JsSpider] init() error for ${this.key}:`, e);
       }

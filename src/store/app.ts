@@ -20,7 +20,10 @@ import type {
 
 export const useAppStore = defineStore('app', () => {
   // ===== Config =====
-  const configUrl = ref(localStorage.getItem('tvbox_config_url') || '');
+  const configUrl = ref(
+    localStorage.getItem('tvbox_config_url') ||
+      'https://dxawi.github.io/0/0.json',
+  );
   const sites = ref<SourceBean[]>([]);
   const activeSiteKey = ref(localStorage.getItem('tvbox_active_site') || '');
   const parses = ref<ParseBean[]>([]);
@@ -110,6 +113,12 @@ export const useAppStore = defineStore('app', () => {
       liveUrl.value = localStorage.getItem('tvbox_live_url') || '';
       epgUrl.value = localStorage.getItem('tvbox_epg_url') || '';
 
+      // Pass the spider base URL to SpiderEngine for resolving api key names
+      const spiderBase = configParser.getSpider();
+      if (spiderBase) {
+        spiderEngine.setSpiderBaseUrl(spiderBase);
+      }
+
       if (
         !activeSiteKey.value ||
         !sites.value.find((s) => s.key === activeSiteKey.value)
@@ -149,16 +158,32 @@ export const useAppStore = defineStore('app', () => {
 
   // ===== Spider Data Actions =====
   async function loadHome() {
-    if (!activeSite.value) return;
+    if (!activeSite.value) {
+      console.warn('[Store] loadHome: no active site');
+      return;
+    }
     homeLoading.value = true;
+    console.log(
+      `[Store] loadHome: site=${activeSite.value.name} key=${activeSite.value.key}`,
+    );
     try {
       const spider = await spiderEngine.getSpider(activeSite.value);
       if (!spider) {
+        console.warn(
+          `[Store] loadHome: spider is null for ${activeSite.value.key}`,
+        );
         homeLoading.value = false;
         return;
       }
 
-      const homeResult = JSON.parse(await spider.homeContent(true));
+      const rawHome = await spider.homeContent(true);
+      console.log(
+        `[Store] loadHome: homeContent raw (first 200 chars): ${rawHome.substring(0, 200)}`,
+      );
+      const homeResult = JSON.parse(rawHome);
+      console.log(
+        `[Store] loadHome: parsed class=${homeResult.class?.length || 0}, list=${homeResult.list?.length || 0}, filters=${homeResult.filters ? Object.keys(homeResult.filters).length : 0}`,
+      );
       if (homeResult.class) {
         classes.value = homeResult.class;
       }
@@ -168,8 +193,15 @@ export const useAppStore = defineStore('app', () => {
       if (homeResult.list && homeResult.list.length > 0) {
         homeVodList.value = homeResult.list;
       } else {
-        const vodResult = JSON.parse(await spider.homeVideoContent());
+        const rawVod = await spider.homeVideoContent();
+        console.log(
+          `[Store] loadHome: homeVideoContent raw (first 200 chars): ${rawVod.substring(0, 200)}`,
+        );
+        const vodResult = JSON.parse(rawVod);
         homeVodList.value = vodResult.list || vodResult.vod_list || [];
+        console.log(
+          `[Store] loadHome: homeVideoContent list=${homeVodList.value.length}`,
+        );
       }
     } catch (e) {
       console.error('loadHome failed:', e);

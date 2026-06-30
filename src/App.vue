@@ -1,76 +1,108 @@
 <template>
-  <div class="common-layout h-screen w-full flex bg-gray-50" :style="wallpaperStyle">
-    <!-- Sidebar / Menu -->
-    <div class="w-16 md:w-48 bg-gray-900 text-white flex flex-col items-center md:items-stretch shadow-xl flex-shrink-0">
-      <div class="p-4 text-center font-bold text-xl md:block hidden tracking-wider">TVBox PC</div>
-      <div class="p-4 text-center font-bold text-xl md:hidden block">TB</div>
-      <el-menu
-        class="border-none w-full bg-transparent flex-1"
-        :default-active="route.path"
-        router
-        text-color="#9ca3af"
-        active-text-color="#ffffff"
-      >
-        <el-menu-item index="/">
-          <el-icon><HomeFilled /></el-icon>
-          <template #title>首页推荐</template>
-        </el-menu-item>
-        <el-menu-item index="/search">
-          <el-icon><Search /></el-icon>
-          <template #title>全局搜索</template>
-        </el-menu-item>
-        <el-menu-item index="/live">
-          <el-icon><Monitor /></el-icon>
-          <template #title>直播电视</template>
-        </el-menu-item>
-        <el-menu-item index="/history">
-          <el-icon><Clock /></el-icon>
-          <template #title>观看历史</template>
-        </el-menu-item>
-        <el-menu-item index="/favorites">
-          <el-icon><Star /></el-icon>
-          <template #title>我的收藏</template>
-        </el-menu-item>
-        <el-menu-item index="/drive">
-          <el-icon><FolderOpened /></el-icon>
-          <template #title>网盘浏览</template>
-        </el-menu-item>
-        <el-menu-item index="/settings">
-          <el-icon><Setting /></el-icon>
-          <template #title>配置设置</template>
-        </el-menu-item>
-      </el-menu>
-    </div>
+  <div class="h-screen w-full flex" style="background: var(--color-bg-base)">
+    <!-- Sidebar -->
+    <aside
+      class="flex flex-col flex-shrink-0 overflow-hidden border-r"
+      :style="{
+        width: sidebarExpanded ? 'var(--spacing-sidebar-expanded)' : 'var(--spacing-sidebar-collapsed)',
+        background: 'var(--color-bg-surface)',
+        borderColor: 'var(--color-border)',
+        transition: 'width var(--transition-slow)',
+      }"
+    >
+      <!-- Logo -->
+      <div class="flex items-center h-14 px-4 flex-shrink-0 border-b" style="border-color: var(--color-border)">
+        <el-icon :size="24" style="color: var(--color-primary)"><VideoPlay /></el-icon>
+        <transition name="fade-text">
+          <span v-if="sidebarExpanded" class="ml-3 text-lg font-bold tracking-wide whitespace-nowrap" style="color: var(--color-text-primary)">TVBox</span>
+        </transition>
+      </div>
 
-    <!-- Main Content Area -->
+      <!-- Navigation -->
+      <nav class="flex-1 py-2 overflow-y-auto overflow-x-hidden">
+        <el-tooltip
+          v-for="item in navItems"
+          :key="item.path"
+          :content="item.label"
+          placement="right"
+          :disabled="sidebarExpanded"
+          :show-after="300"
+        >
+          <router-link
+            :to="item.path"
+            class="nav-item flex items-center h-10 mx-2 rounded-lg cursor-pointer transition-all duration-200 relative"
+            :class="{ 'nav-item-active': route.path === item.path }"
+          >
+            <div
+              v-if="route.path === item.path"
+              class="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r"
+              style="background: var(--color-primary)"
+            />
+            <div class="flex items-center w-full px-4">
+              <el-icon :size="20"><component :is="item.icon" /></el-icon>
+              <transition name="fade-text">
+                <span v-if="sidebarExpanded" class="ml-3 text-sm whitespace-nowrap">{{ item.label }}</span>
+              </transition>
+            </div>
+          </router-link>
+        </el-tooltip>
+      </nav>
+
+      <!-- Collapse toggle -->
+      <div class="flex items-center justify-center h-12 border-t flex-shrink-0" style="border-color: var(--color-border)">
+        <el-button text circle @click="sidebarExpanded = !sidebarExpanded">
+          <el-icon :size="18" style="color: var(--color-text-tertiary)">
+            <component :is="sidebarExpanded ? 'Fold' : 'Expand'" />
+          </el-icon>
+        </el-button>
+      </div>
+    </aside>
+
+    <!-- Main Area -->
     <div class="flex-1 flex flex-col h-full overflow-hidden">
       <!-- Topbar -->
-      <div class="h-14 bg-white shadow-sm flex items-center px-4 justify-between flex-shrink-0 z-10">
+      <header
+        class="flex items-center h-14 px-4 flex-shrink-0 border-b z-10"
+        style="background: var(--color-bg-surface); border-color: var(--color-border)"
+      >
         <div class="flex items-center gap-2">
-          <span class="text-sm text-gray-500 font-medium">当前源：</span>
-          <el-select :model-value="store.activeSiteKey" placeholder="选择视频源" class="w-48" size="small" @change="onSiteChange">
+          <span class="text-xs font-medium" style="color: var(--color-text-tertiary)">当前源</span>
+          <el-select
+            :model-value="store.activeSiteKey"
+            placeholder="选择视频源"
+            class="!w-52"
+            size="small"
+            @change="onSiteChange"
+          >
             <el-option v-for="site in store.sites" :key="site.key" :label="site.name" :value="site.key" />
           </el-select>
         </div>
-        <div class="flex items-center gap-2">
-          <el-tag v-if="store.sites.length > 0" type="success" size="small">{{ store.sites.length }} 个源</el-tag>
+        <div class="flex-1" />
+        <div class="flex items-center gap-3">
+          <el-tag v-if="store.sites.length > 0" size="small" type="info">{{ store.sites.length }} 个源</el-tag>
+          <div class="text-xs tabular-nums" style="color: var(--color-text-tertiary)">{{ currentTime }}</div>
+          <el-button text size="small" @click="$router.push('/search')" style="color: var(--color-text-secondary)">
+            <el-icon class="mr-1"><Search /></el-icon>搜索
+          </el-button>
         </div>
-      </div>
-      
-      <!-- Router View -->
-      <div class="flex-1 overflow-auto relative" :class="store.wallpaper ? 'bg-white/80' : 'bg-gray-50'">
+      </header>
+
+      <!-- Content -->
+      <main class="flex-1 overflow-auto" style="background: var(--color-bg-base)">
         <router-view v-slot="{ Component }">
-          <keep-alive>
-            <component :is="Component" />
-          </keep-alive>
+          <transition name="page-slide" mode="out-in">
+            <keep-alive :exclude="['Detail']">
+              <component :is="Component" />
+            </keep-alive>
+          </transition>
         </router-view>
-      </div>
+      </main>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAppStore } from './store/app'
 import { localProxy } from './core/LocalProxyServer'
@@ -78,23 +110,41 @@ import { remoteServer } from './core/RemoteServer'
 import { AdBlocker } from './core/AdBlocker'
 import { VideoParseRuler } from './core/VideoParseRuler'
 import { configParser } from './core/ConfigParser'
+import { spiderEngine } from './core/SpiderEngine'
 import type { RemoteControlHandler } from './core/RemoteServer'
+import {
+  HomeFilled, Search, Monitor, Clock, Star, FolderOpened, Setting, VideoPlay, Fold, Expand,
+} from '@element-plus/icons-vue'
 
 const route = useRoute()
 const store = useAppStore()
+const sidebarExpanded = ref(true)
+const currentTime = ref('')
 
-const wallpaperStyle = computed(() => {
-  if (store.wallpaper) {
-    return {
-      backgroundImage: `url(${store.wallpaper})`,
-      backgroundSize: 'cover',
-      backgroundPosition: 'center',
-    }
-  }
-  return {}
+let timeTimer: ReturnType<typeof setInterval> | null = null
+function updateTime() {
+  const now = new Date()
+  const h = String(now.getHours()).padStart(2, '0')
+  const m = String(now.getMinutes()).padStart(2, '0')
+  currentTime.value = `${h}:${m}`
+}
+updateTime()
+timeTimer = setInterval(updateTime, 30000)
+
+onBeforeUnmount(() => {
+  if (timeTimer) clearInterval(timeTimer)
 })
 
-// Connect remote control handler to the store
+const navItems = [
+  { path: '/', icon: HomeFilled, label: '首页推荐' },
+  { path: '/search', icon: Search, label: '全局搜索' },
+  { path: '/live', icon: Monitor, label: '直播电视' },
+  { path: '/history', icon: Clock, label: '观看历史' },
+  { path: '/favorites', icon: Star, label: '我的收藏' },
+  { path: '/drive', icon: FolderOpened, label: '网盘浏览' },
+  { path: '/settings', icon: Setting, label: '配置设置' },
+]
+
 const remoteHandler: RemoteControlHandler = {
   getCurrentSource() { return store.activeSite },
   getSources() { return store.sites },
@@ -110,7 +160,6 @@ const remoteHandler: RemoteControlHandler = {
     await store.loadPlay(flag, episodeUrl)
   },
   control(action: string) {
-    // Broadcast action via custom event for VideoPlayer to handle
     window.dispatchEvent(new CustomEvent('remote-control', { detail: { action } }))
   },
   getStatus() {
@@ -122,42 +171,63 @@ const remoteHandler: RemoteControlHandler = {
       playFlag: store.currentPlayFlag,
     }
   },
+  getDebug() {
+    return {
+      currentSource: store.activeSite?.name || 'None',
+      currentSourceKey: store.activeSiteKey,
+      sitesCount: store.sites.length,
+      homeLoading: store.homeLoading,
+      classes: store.classes,
+      classesCount: store.classes.length,
+      homeVodListCount: store.homeVodList.length,
+      filters: store.filters ? Object.keys(store.filters).length : 0,
+      categoryLoading: store.categoryLoading,
+      categoryVodListCount: store.categoryVodList.length,
+      currentVod: store.currentVod?.vod_name || 'None',
+      playing: !!store.currentPlayUrl,
+      playUrl: store.currentPlayUrl,
+      playFlag: store.currentPlayFlag,
+    }
+  },
+  getSpiderUrl() {
+    return (spiderEngine as any).spiderBaseUrl ?? 'unknown'
+  },
+  getConfigInfo() {
+    const cfg = (configParser as any).config
+    if (!cfg) return null
+    return {
+      spider: cfg.spider,
+      wallpaper: cfg.wallpaper,
+      hasVideo: !!cfg.video,
+      hasSites: !!(cfg.video?.sites || cfg.sites),
+      firstSiteApi: cfg.video?.sites?.[0]?.api || cfg.sites?.[0]?.api,
+      firstSiteExt: cfg.video?.sites?.[0]?.ext?.substring(0, 100) || cfg.sites?.[0]?.ext?.substring(0, 100),
+      siteKeys: (cfg.video?.sites || cfg.sites || []).map((s: any) => s.key).slice(0, 10),
+    }
+  },
 }
 
 onMounted(async () => {
-  // Start local proxy server
-  try {
-    await localProxy.start()
-  } catch (e) {
-    console.error('[App] Failed to start proxy server:', e)
-  }
-
-  // Start remote control server
+  console.log('[App] Starting initialization...')
+  try { await localProxy.start() } catch (e) { console.error('[App] Proxy start failed:', e) }
   try {
     remoteServer.setHandler(remoteHandler)
     await remoteServer.start()
-  } catch (e) {
-    console.error('[App] Failed to start remote server:', e)
-  }
+  } catch (e) { console.error('[App] Remote server start failed:', e) }
 
-  // Initialize AdBlocker with default domains
   AdBlocker.loadDefault()
-
-  // Initialize DoH index on proxy server
   localProxy.setDohIndex(store.dohIndex)
 
-  // Load config (which also loads rules into VideoParseRuler)
   if (store.configUrl) {
-    await store.loadConfig()
-    // After config load, initialize VideoParseRuler with config rules
+    console.log(`[App] Loading config from: ${store.configUrl}`)
+    const ok = await store.loadConfig()
+    console.log(`[App] Config loaded: ${ok}, sites: ${store.sites.length}`)
     const rules = configParser.getRules()
-    if (rules && rules.length > 0) {
-      VideoParseRuler.loadFromConfig(rules)
-    }
+    if (rules?.length) VideoParseRuler.loadFromConfig(rules)
     const ads = configParser.getAds()
-    if (ads && ads.length > 0) {
-      AdBlocker.loadFromConfig(ads)
-    }
+    if (ads?.length) AdBlocker.loadFromConfig(ads)
+  } else {
+    console.warn('[App] No configUrl set')
   }
 })
 
@@ -166,8 +236,25 @@ const onSiteChange = (val: string) => {
 }
 </script>
 
-<style>
-.el-menu { background: transparent !important; }
-.el-menu-item:hover { background-color: rgba(255,255,255,0.1) !important; }
-.el-menu-item.is-active { background-color: var(--el-color-primary) !important; }
+<style scoped>
+.fade-text-enter-active { transition: opacity 200ms ease 100ms; }
+.fade-text-leave-active { transition: opacity 100ms ease; }
+.fade-text-enter-from, .fade-text-leave-to { opacity: 0; }
+
+/* Navigation items */
+.nav-item {
+  color: var(--color-text-secondary);
+}
+.nav-item:hover {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+}
+.nav-item-active {
+  background: var(--color-primary-soft) !important;
+  color: var(--color-primary) !important;
+}
+.nav-item-active:hover {
+  background: var(--color-primary-soft) !important;
+  color: var(--color-primary) !important;
+}
 </style>

@@ -1,186 +1,188 @@
 <template>
-  <div class="max-w-2xl mx-auto mt-6 mb-10 p-6 bg-white rounded-lg shadow">
-    <h2 class="text-2xl font-bold mb-6 flex items-center gap-2">
-      <el-icon><Setting /></el-icon> 全局设置
-    </h2>
+  <div class="h-full overflow-y-auto" style="background:var(--color-bg-base)">
+    <div class="max-w-2xl mx-auto mt-6 mb-10 p-6 rounded-lg" style="background:var(--color-bg-elevated);border:1px solid var(--color-border)">
+      <h2 class="text-2xl font-bold mb-6 flex items-center gap-2" style="color:var(--color-text-primary)">
+        <el-icon><Setting /></el-icon> 全局设置
+      </h2>
 
-    <el-form label-position="top">
+      <el-form label-position="top">
 
-      <!-- Section 1: 配置源 -->
-      <h3 class="text-lg font-semibold text-gray-700 mb-2">配置源</h3>
-      <el-form-item label="配置地址">
-        <div class="flex w-full gap-2">
-          <el-input
-            v-model="inputUrl"
-            placeholder="请输入 http:// 或 https:// 开头的配置链接"
-            clearable
-          >
-            <template #prefix>
-              <el-icon><Link /></el-icon>
-            </template>
-          </el-input>
-          <el-button type="primary" :loading="configLoading" @click="loadConfig">
-            加载
-          </el-button>
+        <!-- Section 1: 配置源 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">配置源</h3>
+        <el-form-item label="配置地址">
+          <div class="flex w-full gap-2">
+            <el-input
+              v-model="inputUrl"
+              placeholder="请输入 http:// 或 https:// 开头的配置链接"
+              clearable
+            >
+              <template #prefix>
+                <el-icon><Link /></el-icon>
+              </template>
+            </el-input>
+            <el-button type="primary" :loading="configLoading" @click="loadConfig">
+              加载
+            </el-button>
+          </div>
+        </el-form-item>
+
+        <div v-if="store.sites.length > 0" class="mb-4">
+          <p class="text-sm mb-2" style="color:var(--color-text-secondary)">已加载源 (点击切换当前源)：</p>
+          <div class="flex flex-wrap gap-2">
+            <el-tag
+              v-for="site in store.sites"
+              :key="site.key"
+              :type="site.key === store.activeSiteKey ? 'primary' : 'info'"
+              :effect="site.key === store.activeSiteKey ? 'dark' : 'plain'"
+              class="cursor-pointer"
+              @click="store.setActiveSite(site.key)"
+            >
+              {{ site.name }}
+            </el-tag>
+          </div>
         </div>
-      </el-form-item>
 
-      <div v-if="store.sites.length > 0" class="mb-4">
-        <p class="text-sm text-gray-600 mb-2">已加载源 (点击切换当前源)：</p>
-        <div class="flex flex-wrap gap-2">
-          <el-tag
-            v-for="site in store.sites"
-            :key="site.key"
-            :type="site.key === store.activeSiteKey ? 'primary' : 'info'"
-            :effect="site.key === store.activeSiteKey ? 'dark' : 'plain'"
-            class="cursor-pointer"
-            @click="store.setActiveSite(site.key)"
-          >
-            {{ site.name }}
-          </el-tag>
+        <el-divider />
+
+        <!-- Section 2: 解析设置 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">解析设置</h3>
+        <el-form-item label="默认解析">
+          <el-select v-model="parseName" placeholder="选择默认解析" @change="onParseChange">
+            <el-option
+              v-for="p in store.parses"
+              :key="p.name"
+              :label="p.name"
+              :value="p.name"
+            />
+          </el-select>
+        </el-form-item>
+
+        <div v-if="store.parses.length > 0" class="mb-4">
+          <p class="text-sm" style="color:var(--color-text-tertiary)">已加载 {{ store.parses.length }} 个解析器</p>
         </div>
-      </div>
 
-      <el-divider />
+        <el-divider />
 
-      <!-- Section 2: 解析设置 -->
-      <h3 class="text-lg font-semibold text-gray-700 mb-2">解析设置</h3>
-      <el-form-item label="默认解析">
-        <el-select v-model="parseName" placeholder="选择默认解析" @change="onParseChange">
-          <el-option
-            v-for="p in store.parses"
-            :key="p.name"
-            :label="p.name"
-            :value="p.name"
-          />
-        </el-select>
-      </el-form-item>
+        <!-- Section 3: 播放设置 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">播放设置</h3>
+        <el-form-item label="自动播放下一集">
+          <el-switch v-model="autoPlayNext" @change="onAutoPlayNextChange" />
+        </el-form-item>
 
-      <div v-if="store.parses.length > 0" class="mb-4">
-        <p class="text-sm text-gray-500">已加载 {{ store.parses.length }} 个解析器</p>
-      </div>
+        <el-form-item label="屏显信息">
+          <el-switch v-model="screenDisplayValue" @change="onScreenDisplayChange" />
+        </el-form-item>
 
-      <el-divider />
+        <el-form-item label="播放器类型">
+          <el-radio-group v-model="playTypeValue" @change="onPlayTypeChange">
+            <el-radio-button :value="0">系统</el-radio-button>
+            <el-radio-button :value="1">IJK</el-radio-button>
+            <el-radio-button :value="2">Exo</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
 
-      <!-- Section 3: 播放设置 -->
-      <h3 class="text-lg font-semibold text-gray-700 mb-2">播放设置</h3>
-      <el-form-item label="自动播放下一集">
-        <el-switch v-model="autoPlayNext" @change="onAutoPlayNextChange" />
-      </el-form-item>
+        <el-divider />
 
-      <el-form-item label="屏显信息">
-        <el-switch v-model="screenDisplayValue" @change="onScreenDisplayChange" />
-      </el-form-item>
+        <!-- Section: 字幕设置 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">字幕设置</h3>
+        <el-form-item label="字幕字号">
+          <el-slider v-model="subtitleSizeValue" :min="12" :max="48" :step="2" show-input @change="onSubtitleSizeChange" />
+        </el-form-item>
+        <el-form-item label="字幕颜色">
+          <el-color-picker v-model="subtitleColorValue" @change="onSubtitleColorChange" />
+        </el-form-item>
+        <el-form-item label="字幕延迟 (秒)">
+          <el-slider v-model="subtitleDelayValue" :min="-5" :max="5" :step="0.1" show-input @change="onSubtitleDelayChange" />
+        </el-form-item>
 
-      <el-form-item label="播放器类型">
-        <el-radio-group v-model="playTypeValue" @change="onPlayTypeChange">
-          <el-radio-button :value="0">系统</el-radio-button>
-          <el-radio-button :value="1">IJK</el-radio-button>
-          <el-radio-button :value="2">Exo</el-radio-button>
-        </el-radio-group>
-      </el-form-item>
+        <el-divider />
 
-      <el-divider />
+        <!-- Section: 弹幕设置 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">弹幕设置</h3>
+        <el-form-item label="弹幕默认开启">
+          <el-switch v-model="danmuEnabledValue" @change="onDanmuEnabledChange" />
+        </el-form-item>
+        <el-form-item label="弹幕同屏数量">
+          <el-slider v-model="danmuMaxValue" :min="5" :max="50" :step="5" show-input @change="onDanmuMaxChange" />
+        </el-form-item>
 
-      <!-- Section: 字幕设置 -->
-      <h3 class="text-lg font-semibold text-gray-700 mb-2">字幕设置</h3>
-      <el-form-item label="字幕字号">
-        <el-slider v-model="subtitleSizeValue" :min="12" :max="48" :step="2" show-input @change="onSubtitleSizeChange" />
-      </el-form-item>
-      <el-form-item label="字幕颜色">
-        <el-color-picker v-model="subtitleColorValue" @change="onSubtitleColorChange" />
-      </el-form-item>
-      <el-form-item label="字幕延迟 (秒)">
-        <el-slider v-model="subtitleDelayValue" :min="-5" :max="5" :step="0.1" show-input @change="onSubtitleDelayChange" />
-      </el-form-item>
+        <el-divider />
 
-      <el-divider />
+        <!-- Section 4: 直播设置 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">直播设置</h3>
+        <el-form-item label="直播地址">
+          <el-input v-model="liveUrlInput" placeholder="直播源地址" clearable @change="onLiveUrlChange" />
+        </el-form-item>
+        <el-form-item label="EPG 地址">
+          <el-input v-model="epgUrlInput" placeholder="EPG 节目单地址" clearable @change="onEpgUrlChange" />
+        </el-form-item>
 
-      <!-- Section: 弹幕设置 -->
-      <h3 class="text-lg font-semibold text-gray-700 mb-2">弹幕设置</h3>
-      <el-form-item label="弹幕默认开启">
-        <el-switch v-model="danmuEnabledValue" @change="onDanmuEnabledChange" />
-      </el-form-item>
-      <el-form-item label="弹幕同屏数量">
-        <el-slider v-model="danmuMaxValue" :min="5" :max="50" :step="5" show-input @change="onDanmuMaxChange" />
-      </el-form-item>
+        <el-divider />
 
-      <el-divider />
+        <!-- Section 5: 搜索设置 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">搜索设置</h3>
+        <el-form-item label="搜索视图模式">
+          <el-radio-group v-model="searchViewModeValue" @change="onSearchViewModeChange">
+            <el-radio-button :value="0">列表</el-radio-button>
+            <el-radio-button :value="1">缩略图</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
 
-      <!-- Section 4: 直播设置 -->
-      <h3 class="text-lg font-semibold text-gray-700 mb-2">直播设置</h3>
-      <el-form-item label="直播地址">
-        <el-input v-model="liveUrlInput" placeholder="直播源地址" clearable @change="onLiveUrlChange" />
-      </el-form-item>
-      <el-form-item label="EPG 地址">
-        <el-input v-model="epgUrlInput" placeholder="EPG 节目单地址" clearable @change="onEpgUrlChange" />
-      </el-form-item>
+        <el-divider />
 
-      <el-divider />
+        <!-- Section 6: 网络设置 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">网络设置</h3>
+        <el-form-item label="DoH (DNS over HTTPS)">
+          <el-select v-model="dohValue" @change="onDohChange">
+            <el-option v-for="item in dohOptions" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+        </el-form-item>
 
-      <!-- Section 5: 搜索设置 -->
-      <h3 class="text-lg font-semibold text-gray-700 mb-2">搜索设置</h3>
-      <el-form-item label="搜索视图模式">
-        <el-radio-group v-model="searchViewModeValue" @change="onSearchViewModeChange">
-          <el-radio-button :value="0">列表</el-radio-button>
-          <el-radio-button :value="1">缩略图</el-radio-button>
-        </el-radio-group>
-      </el-form-item>
+        <el-divider />
 
-      <el-divider />
+        <!-- Section 7: 数据管理 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">数据管理</h3>
+        <el-form-item label="历史记录">
+          <el-button type="danger" @click="clearHistory">清除历史记录</el-button>
+        </el-form-item>
+        <el-form-item label="配置地址历史">
+          <el-select v-model="inputUrl" placeholder="选择历史配置地址" @change="onHistoryUrlSelect" filterable allow-create>
+            <el-option v-for="url in configUrlHistory" :key="url" :label="url" :value="url" />
+          </el-select>
+        </el-form-item>
 
-      <!-- Section 6: 网络设置 -->
-      <h3 class="text-lg font-semibold text-gray-700 mb-2">网络设置</h3>
-      <el-form-item label="DoH (DNS over HTTPS)">
-        <el-select v-model="dohValue" @change="onDohChange">
-          <el-option v-for="item in dohOptions" :key="item.value" :label="item.label" :value="item.value" />
-        </el-select>
-      </el-form-item>
+        <el-divider />
 
-      <el-divider />
+        <!-- Section: WebDAV 备份 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">WebDAV 备份</h3>
+        <el-form-item label="WebDAV 地址">
+          <el-input v-model="webdavUrl" placeholder="https://dav.example.com/path" clearable />
+        </el-form-item>
+        <el-form-item label="用户名">
+          <el-input v-model="webdavUser" placeholder="WebDAV 用户名" clearable />
+        </el-form-item>
+        <el-form-item label="密码">
+          <el-input v-model="webdavPass" type="password" placeholder="WebDAV 密码" show-password />
+        </el-form-item>
+        <div class="flex gap-2">
+          <el-button @click="webdavBackup" :loading="webdavLoading">备份到 WebDAV</el-button>
+          <el-button @click="webdavRestore" :loading="webdavLoading">从 WebDAV 恢复</el-button>
+          <el-button @click="webdavTest" :loading="webdavLoading">测试连接</el-button>
+        </div>
 
-      <!-- Section 7: 数据管理 -->
-      <h3 class="text-lg font-semibold text-gray-700 mb-2">数据管理</h3>
-      <el-form-item label="历史记录">
-        <el-button type="danger" @click="clearHistory">清除历史记录</el-button>
-      </el-form-item>
-      <el-form-item label="配置地址历史">
-        <el-select v-model="inputUrl" placeholder="选择历史配置地址" @change="onHistoryUrlSelect" filterable allow-create>
-          <el-option v-for="url in configUrlHistory" :key="url" :label="url" :value="url" />
-        </el-select>
-      </el-form-item>
+        <el-divider />
 
-      <el-divider />
+        <!-- Section 8: 关于 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">关于</h3>
+        <div class="text-sm space-y-1" style="color:var(--color-text-secondary)">
+          <p>版本：1.0.0</p>
+          <p>项目地址：<el-link type="primary" href="https://github.com/CatVodTVOfficial/TVBoxOSC" target="_blank">TVBoxOSC</el-link></p>
+          <p>远程控制端口：<el-tag size="small">{{ remotePort }}</el-tag></p>
+          <p>本地代理端口：<el-tag size="small">{{ proxyPort }}</el-tag></p>
+        </div>
 
-      <!-- Section: WebDAV 备份 -->
-      <h3 class="text-lg font-semibold text-gray-700 mb-2">WebDAV 备份</h3>
-      <el-form-item label="WebDAV 地址">
-        <el-input v-model="webdavUrl" placeholder="https://dav.example.com/path" clearable />
-      </el-form-item>
-      <el-form-item label="用户名">
-        <el-input v-model="webdavUser" placeholder="WebDAV 用户名" clearable />
-      </el-form-item>
-      <el-form-item label="密码">
-        <el-input v-model="webdavPass" type="password" placeholder="WebDAV 密码" show-password />
-      </el-form-item>
-      <div class="flex gap-2">
-        <el-button @click="webdavBackup" :loading="webdavLoading">备份到 WebDAV</el-button>
-        <el-button @click="webdavRestore" :loading="webdavLoading">从 WebDAV 恢复</el-button>
-        <el-button @click="webdavTest" :loading="webdavLoading">测试连接</el-button>
-      </div>
-
-      <el-divider />
-
-      <!-- Section 8: 关于 -->
-      <h3 class="text-lg font-semibold text-gray-700 mb-2">关于</h3>
-      <div class="text-sm text-gray-600 space-y-1">
-        <p>版本：1.0.0</p>
-        <p>项目地址：<el-link type="primary" href="https://github.com/CatVodTVOfficial/TVBoxOSC" target="_blank">TVBoxOSC</el-link></p>
-        <p>远程控制端口：<el-tag size="small">{{ remotePort }}</el-tag></p>
-        <p>本地代理端口：<el-tag size="small">{{ proxyPort }}</el-tag></p>
-      </div>
-
-    </el-form>
+      </el-form>
+    </div>
   </div>
 </template>
 

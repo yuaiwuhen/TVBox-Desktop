@@ -1,5 +1,5 @@
 <template>
-  <div class="h-full flex flex-col">
+  <div class="h-full flex flex-col" style="background: var(--color-bg-base)">
     <!-- Search bar -->
     <div class="max-w-3xl mx-auto w-full mt-6 flex gap-2">
       <el-input
@@ -22,42 +22,40 @@
     </div>
 
     <!-- Hot words / Search history -->
-    <div v-if="!hasSearched" class="max-w-3xl mx-auto w-full mt-3">
+    <div v-if="!hasSearched" class="max-w-3xl mx-auto w-full mt-4">
       <!-- Search history -->
-      <div v-if="searchHistory.length > 0" class="mb-4">
+      <div v-if="searchHistory.length > 0" class="mb-5">
         <div class="flex items-center justify-between mb-2">
-          <span class="text-sm text-gray-600 font-medium">搜索历史</span>
-          <el-button text size="small" @click="clearSearchHistory">清除</el-button>
+          <span class="text-sm font-medium" style="color: var(--color-text-secondary)">搜索历史</span>
+          <el-button text size="small" @click="clearSearchHistory" style="color: var(--color-text-tertiary)">清除</el-button>
         </div>
-        <div class="flex flex-wrap gap-2">
-          <el-tag
+        <div class="flex flex-wrap gap-1.5">
+          <button
             v-for="word in searchHistory"
             :key="word"
-            class="cursor-pointer"
-            effect="plain"
-            closable
+            class="history-chip group relative px-3 py-1 rounded-full text-xs transition-all duration-200 cursor-pointer"
             @click="keyword = word; doSearch()"
-            @close="removeSearchHistory(word)"
           >
             {{ word }}
-          </el-tag>
+            <span class="history-chip-close opacity-0 group-hover:opacity-100" @click.stop="removeSearchHistory(word)">x</span>
+          </button>
         </div>
       </div>
       <!-- Hot words -->
       <div>
         <div class="flex items-center mb-2">
-          <span class="text-sm text-gray-600 font-medium">热门搜索</span>
+          <span class="text-sm font-medium" style="color: var(--color-text-secondary)">热门搜索</span>
         </div>
-        <div class="flex flex-wrap gap-2">
-          <el-tag
-            v-for="word in hotWords"
+        <div class="flex flex-wrap gap-1.5">
+          <button
+            v-for="(word, idx) in hotWords"
             :key="word"
-            class="cursor-pointer"
-            effect="plain"
+            class="hot-chip px-3 py-1 rounded-full text-xs transition-all duration-200 cursor-pointer"
             @click="keyword = word; doSearch()"
           >
+            <span class="hot-chip-rank" :class="idx < 3 ? 'hot-chip-rank-top' : ''">{{ idx + 1 }}</span>
             {{ word }}
-          </el-tag>
+          </button>
         </div>
       </div>
     </div>
@@ -80,14 +78,14 @@
     </div>
 
     <!-- Loading state -->
-    <div v-if="store.searchLoading" class="flex-1 flex flex-col items-center justify-center text-gray-400">
+    <div v-if="store.searchLoading" class="flex-1 flex flex-col items-center justify-center" style="color: var(--color-text-tertiary)">
       <el-icon class="is-loading text-5xl mb-4"><Loading /></el-icon>
       <p>正在搜索 {{ selectedSiteKeys.length }} 个源...</p>
     </div>
 
     <!-- Empty state -->
-    <div v-else-if="hasSearched && store.searchResults.length === 0" class="flex-1 flex flex-col items-center justify-center text-gray-400">
-      <el-icon class="text-5xl mb-4"><Warning /></el-icon>
+    <div v-else-if="hasSearched && store.searchResults.length === 0" class="flex-1 flex flex-col items-center justify-center" style="color: var(--color-text-tertiary)">
+      <el-icon class="text-5xl mb-4"><Search /></el-icon>
       <p>未找到结果</p>
     </div>
 
@@ -95,10 +93,10 @@
     <div v-else class="flex-1 overflow-auto mt-6">
       <!-- Fast search mode with sidebar filter -->
       <div v-if="fastSearchMode && store.searchResults.length > 1" class="flex h-full">
-        <div class="w-40 border-r bg-gray-50 overflow-y-auto flex-shrink-0">
+        <div class="w-40 border-r overflow-y-auto flex-shrink-0" style="background: var(--color-bg-surface); border-color: var(--color-border)">
           <div
-            class="px-3 py-2 cursor-pointer text-sm"
-            :class="!filteredSiteKey ? 'bg-blue-500 text-white font-semibold' : 'text-gray-700 hover:bg-gray-100'"
+            class="px-3 py-2 cursor-pointer text-sm transition-colors"
+            :class="!filteredSiteKey ? 'search-sidebar-active' : 'search-sidebar-item'"
             @click="filteredSiteKey = ''"
           >
             全部 ({{ totalCount }})
@@ -106,8 +104,8 @@
           <div
             v-for="group in store.searchResults"
             :key="group.siteKey"
-            class="px-3 py-2 cursor-pointer text-sm"
-            :class="filteredSiteKey === group.siteKey ? 'bg-blue-500 text-white font-semibold' : 'text-gray-700 hover:bg-gray-100'"
+            class="px-3 py-2 cursor-pointer text-sm transition-colors"
+            :class="filteredSiteKey === group.siteKey ? 'search-sidebar-active' : 'search-sidebar-item'"
             @click="filteredSiteKey = group.siteKey"
           >
             {{ group.siteName }} ({{ group.list.length }})
@@ -115,7 +113,7 @@
         </div>
         <div class="flex-1 overflow-auto px-4">
           <template v-for="group in filteredResults" :key="group.siteKey">
-            <ResultGroup :group="group" :list-mode="isListMode" @go-to-detail="goToDetail" />
+            <SearchResultGroup :group="group" :list-mode="isListMode" @go-to-detail="goToDetail" />
           </template>
         </div>
       </div>
@@ -123,7 +121,7 @@
       <!-- Normal grouped results -->
       <div v-else class="px-2">
         <template v-for="group in store.searchResults" :key="group.siteKey">
-          <ResultGroup :group="group" :list-mode="isListMode" @go-to-detail="goToDetail" />
+          <SearchResultGroup :group="group" :list-mode="isListMode" @go-to-detail="goToDetail" />
         </template>
       </div>
     </div>
@@ -131,11 +129,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, reactive, h, defineComponent, onMounted } from 'vue'
+import { ref, computed, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { Search, Loading } from '@element-plus/icons-vue'
 import axios from 'axios'
 import { useAppStore } from '../store/app'
 import type { Movie } from '../core/models'
+import SearchResultGroup from '../components/SearchResultGroup.vue'
 
 const store = useAppStore()
 const router = useRouter()
@@ -185,7 +185,6 @@ async function fetchHotWords() {
   try {
     const resp = await axios.get('https://node.video.qq.com/x/api/hot_search', {
       timeout: 5000,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
     })
     if (resp.data?.data?.mapResult) {
       const list = resp.data.data.mapResult['0']?.listInfo
@@ -259,58 +258,76 @@ async function doSearch() {
   await store.doSearch(keyword.value.trim(), selectedSiteKeys.value)
 }
 
-async function goToDetail(siteKey: string, vod: Movie) {
-  store.setActiveSite(siteKey)
-  await store.loadDetail(vod.vod_id)
-  router.push('/')
+function goToDetail(siteKey: string, vod: Movie) {
+  router.push({ name: 'detail', params: { sourceKey: siteKey, vodId: vod.vod_id } })
+}
+</script>
+
+<style scoped>
+/* Sidebar items */
+.search-sidebar-active {
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  font-weight: 600;
 }
 
-// Inline result group component
-const ResultGroup = defineComponent({
-  props: {
-    group: { type: Object, required: true },
-    listMode: { type: Boolean, default: false },
-  },
-  emits: ['go-to-detail'],
-  setup(props: any, { emit }: any) {
-    return () => h('div', { class: 'mb-8' }, [
-      h('div', { class: 'flex items-center gap-2 mb-3 border-l-4 border-blue-500 pl-3' }, [
-        h('h3', { class: 'text-lg font-bold text-gray-800' }, props.group.siteName),
-        h('span', { class: 'el-tag el-tag--success el-tag--small' }, props.group.list.length),
-      ]),
-      props.listMode
-        ? h('div', { class: 'space-y-2' },
-            props.group.list.map((vod: Movie) =>
-              h('div', {
-                class: 'flex items-center gap-3 p-2 rounded hover:bg-gray-50 cursor-pointer',
-                onClick: () => emit('go-to-detail', props.group.siteKey, vod),
-              }, [
-                h('img', { src: vod.vod_pic, class: 'w-12 h-16 object-cover rounded flex-shrink-0' }),
-                h('div', { class: 'flex-1 min-w-0' }, [
-                  h('span', { class: 'text-sm font-bold text-gray-800' }, vod.vod_name),
-                  vod.vod_remarks ? h('span', { class: 'text-xs text-gray-400 ml-2' }, vod.vod_remarks) : null,
-                  vod.type_name ? h('span', { class: 'text-xs text-gray-500 ml-2' }, vod.type_name) : null,
-                  vod.vod_year ? h('span', { class: 'text-xs text-gray-400 ml-2' }, vod.vod_year) : null,
-                ]),
-              ])
-            )
-          )
-        : h('div', { class: 'grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-4' },
-            props.group.list.map((vod: Movie) =>
-              h('div', {
-                class: 'el-card cursor-pointer hover:shadow-lg transition-all',
-                style: { '--el-card-padding': '0px' },
-                onClick: () => emit('go-to-detail', props.group.siteKey, vod),
-              }, [
-                h('img', { src: vod.vod_pic, class: 'w-full aspect-[3/4] object-cover' }),
-                h('div', { class: 'p-2' }, [
-                  h('span', { class: 'text-sm font-bold text-gray-800 truncate block' }, vod.vod_name),
-                  h('span', { class: 'text-xs text-gray-500 truncate block mt-1' }, vod.vod_remarks || ''),
-                ]),
-              ])
-            )
-          ),
-    ])
-  },
-})
-</script>
+.search-sidebar-item {
+  color: var(--color-text-secondary);
+}
+
+.search-sidebar-item:hover {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+}
+
+/* History chips */
+.history-chip {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+.history-chip:hover {
+  border-color: var(--color-primary-border);
+  color: var(--color-primary);
+}
+
+.history-chip-close {
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  transition: opacity 150ms;
+}
+.history-chip-close:hover {
+  color: var(--color-danger);
+}
+
+/* Hot word chips */
+.hot-chip {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+.hot-chip:hover {
+  border-color: var(--color-primary-border);
+  color: var(--color-text-primary);
+}
+
+.hot-chip-rank {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 3px;
+  margin-right: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--color-bg-overlay);
+  color: var(--color-text-tertiary);
+}
+
+.hot-chip-rank-top {
+  background: var(--color-primary);
+  color: #fff;
+}
+</style>

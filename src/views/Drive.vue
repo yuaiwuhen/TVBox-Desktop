@@ -1,7 +1,7 @@
 <template>
-  <div class="h-full flex flex-col">
-    <div class="px-6 pt-4 pb-2 flex items-center justify-between flex-shrink-0">
-      <h2 class="text-xl font-bold text-gray-800">网盘浏览</h2>
+  <div class="h-full flex flex-col" style="background:var(--color-bg-base)">
+    <div class="px-6 pt-4 pb-2 flex items-center justify-between flex-shrink-0" style="background:var(--color-bg-elevated)">
+      <h2 class="text-xl font-bold" style="color:var(--color-text-primary)">网盘浏览</h2>
       <el-button type="primary" size="small" @click="showAddDrive = true">添加网盘</el-button>
     </div>
 
@@ -36,12 +36,12 @@
     <!-- Drive list sidebar + file browser -->
     <div class="flex-1 flex overflow-hidden">
       <!-- Drive list -->
-      <div class="w-48 bg-gray-50 border-r overflow-y-auto flex-shrink-0">
+      <div class="w-48 border-r overflow-y-auto flex-shrink-0 drive-sidebar">
         <div
           v-for="(drive, idx) in drives"
           :key="idx"
-          class="px-3 py-2.5 cursor-pointer text-sm transition-colors"
-          :class="activeDriveIdx === idx ? 'bg-blue-500 text-white font-semibold' : 'text-gray-700 hover:bg-gray-100'"
+          class="px-3 py-2.5 cursor-pointer text-sm transition-colors drive-item"
+          :class="activeDriveIdx === idx ? 'drive-item-active' : ''"
           @click="selectDrive(idx)"
         >
           <div class="flex items-center justify-between">
@@ -49,38 +49,38 @@
             <el-button size="small" circle type="danger" :icon="Delete" @click.stop="removeDrive(idx)" />
           </div>
         </div>
-        <div v-if="drives.length === 0" class="p-3 text-sm text-gray-400 text-center">
+        <div v-if="drives.length === 0" class="p-3 text-sm text-center" style="color:var(--color-text-tertiary)">
           点击上方按钮添加网盘
         </div>
       </div>
 
       <!-- File browser -->
-      <div class="flex-1 overflow-auto">
+      <div class="flex-1 overflow-auto drive-file-area">
         <div v-if="fileLoading" class="flex items-center justify-center h-full">
-          <el-icon class="is-loading text-4xl text-gray-400"><Loading /></el-icon>
+          <el-icon class="is-loading text-4xl" style="color:var(--color-text-tertiary)"><Loading /></el-icon>
         </div>
-        <div v-else-if="files.length === 0" class="flex items-center justify-center h-full text-gray-400">
+        <div v-else-if="files.length === 0" class="flex items-center justify-center h-full" style="color:var(--color-text-tertiary)">
           <p>选择网盘后浏览文件</p>
         </div>
         <div v-else class="p-4">
           <!-- Breadcrumb -->
           <div class="flex items-center gap-1 mb-4 text-sm">
             <el-button size="small" @click="goUp" :disabled="currentPath === '/'">上级目录</el-button>
-            <span class="text-gray-500">{{ currentPath }}</span>
+            <span style="color:var(--color-text-tertiary)">{{ currentPath }}</span>
           </div>
           <div class="space-y-1">
             <div
               v-for="file in files"
               :key="file.name"
-              class="flex items-center gap-3 px-3 py-2 rounded cursor-pointer hover:bg-gray-100 transition-colors"
+              class="flex items-center gap-3 px-3 py-2 rounded cursor-pointer transition-colors drive-file-item"
               @click="onFileClick(file)"
             >
               <el-icon :size="20">
                 <Folder v-if="file.type === 'dir'" />
                 <VideoPlay v-else />
               </el-icon>
-              <span class="flex-1 truncate text-sm">{{ file.name }}</span>
-              <span v-if="file.size" class="text-xs text-gray-400">{{ formatSize(file.size) }}</span>
+              <span class="flex-1 truncate text-sm" style="color:var(--color-text-primary)">{{ file.name }}</span>
+              <span v-if="file.size" class="text-xs" style="color:var(--color-text-tertiary)">{{ formatSize(file.size) }}</span>
             </div>
           </div>
         </div>
@@ -271,3 +271,34 @@ function formatSize(bytes?: number): string {
   return (bytes / (1024 * 1024 * 1024)).toFixed(1) + 'GB'
 }
 </script>
+
+<style scoped>
+/* Sidebar */
+.drive-sidebar {
+  background: var(--color-bg-surface);
+  border-color: var(--color-border);
+}
+
+.drive-item {
+  color: var(--color-text-secondary);
+}
+
+.drive-item:hover {
+  background: var(--color-bg-elevated);
+}
+
+.drive-item-active {
+  background: var(--color-primary-soft) !important;
+  color: var(--color-primary) !important;
+  font-weight: 600;
+}
+
+/* File area */
+.drive-file-area {
+  background: var(--color-bg-elevated);
+}
+
+.drive-file-item:hover {
+  background: var(--color-bg-surface);
+}
+</style>

@@ -338,10 +338,12 @@ export class ConfigParser {
     }
 
     // 3. Fetch remote config
+    // Note: browsers silently strip the User-Agent header when set via fetch/XHR,
+    // so we omit it and use the browser's default UA (Chrome on Win/Mac/Linux).
+    // The remote config endpoints are public and accept any UA.
     try {
       const response = await axios.get(configUrl, {
         headers: {
-          'User-Agent': 'okhttp/3.15',
           Accept:
             'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
