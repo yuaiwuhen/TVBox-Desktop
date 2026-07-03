@@ -149,6 +149,17 @@ for line in sys.stdin:
             sys.stdout.write(json.dumps({"id": rid, "result": result}) + "\\n")
             sys.stdout.flush()
 
+        elif method == "action":
+            sp = get_spider(name)
+            actionId = params[1] if len(params) > 1 else ""
+            actionData = params[2] if len(params) > 2 else ""
+            if isinstance(actionData, str):
+                try: actionData = json.loads(actionData)
+                except: pass
+            result = sp.action(actionId, actionData) if sp else {}
+            sys.stdout.write(json.dumps({"id": rid, "result": json.dumps(result, ensure_ascii=False)}) + "\\n")
+            sys.stdout.flush()
+
         elif method == "localProxy":
             sp = get_spider(name)
             param = params[1] if len(params) > 1 else {}
@@ -404,6 +415,15 @@ export class PySpider implements ISpider {
   async manualVideoCheck(): Promise<boolean> {
     await this.ensureProcess();
     return await this.rpc('manualVideoCheck', [this.key]);
+  }
+
+  async action(actionId: string, actionData: any): Promise<string> {
+    await this.ensureProcess();
+    return await this.rpc('action', [
+      this.key,
+      actionId,
+      JSON.stringify(actionData),
+    ]);
   }
 
   destroy(): void {

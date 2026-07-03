@@ -434,13 +434,30 @@ export class JsonRuleParser implements ISpider {
       if (!homeUrl) return JSON.stringify({ class: [], list: [] });
 
       const html = await this.fetchPage(homeUrl);
+      let parsed: any = safeParseJson(html);
       console.log(
         `[JsonRuleParser] homeContent: fetched ${html.length} chars from ${homeUrl}`,
       );
-      const parsed = safeParseJson(html);
+      console.log(`[JsonRuleParser] homeContent: parsed content:`, parsed);
 
-      // Build categories from rules.categories string
-      let classes = this.parseCategories();
+      // Build categories from API response (Box Android format: "class" field)
+      let classes: MovieSort[] = [];
+      if (parsed && parsed.class && Array.isArray(parsed.class)) {
+        classes = parsed.class
+          .map((c: any) => ({
+            type_id: String(c.type_id ?? c.id ?? ''),
+            type_name: String(c.type_name ?? c.name ?? ''),
+          }))
+          .filter((c: MovieSort) => c.type_id && c.type_name);
+        console.log(
+          `[JsonRuleParser] homeContent: parsed ${classes.length} categories from API response`,
+        );
+      }
+
+      // If no categories from API, try rules.categories string
+      if (classes.length === 0) {
+        classes = this.parseCategories();
+      }
 
       // Parse video list using cateVod* rules (fall back to scVod* or direct)
       const nodeRule =
@@ -546,12 +563,20 @@ export class JsonRuleParser implements ISpider {
       // Also support {cateId} being referenced as the tid directly
       const url = expandUrl(cateTpl, vars);
 
+      console.log(
+        `[JsonRuleParser] categoryContent: tid=${tid}, pg=${pg}, url=${url}`,
+      );
+
       const html = await this.fetchPage(url);
       const parsed = safeParseJson(html);
 
       const nodeRule =
         this.rules.cateVodNode || this.rules.scVodNode || 'json:list';
       const items = extractNodeList(parsed || html, nodeRule);
+
+      console.log(
+        `[JsonRuleParser] categoryContent: nodeRule=${nodeRule}, items=${items.length}`,
+      );
 
       const list: Movie[] = [];
       for (const item of items) {
@@ -569,6 +594,10 @@ export class JsonRuleParser implements ISpider {
         page = parsed.page || page;
       }
 
+      console.log(
+        `[JsonRuleParser] categoryContent: list=${list.length}, page=${page}, pagecount=${pageCount}, total=${total}`,
+      );
+
       return JSON.stringify({ list, page, pagecount: pageCount, total });
     } catch (e) {
       console.error('[JsonRuleParser] categoryContent error:', e);
@@ -585,6 +614,8 @@ export class JsonRuleParser implements ISpider {
       if (!detailTpl) return JSON.stringify({ list: [] });
 
       const url = expandUrl(detailTpl, { vid: id });
+
+      console.log(`[JsonRuleParser] detailContent: id=${id}, url=${url}`);
 
       const html = await this.fetchPage(url);
       const parsed = safeParseJson(html);
@@ -640,6 +671,10 @@ export class JsonRuleParser implements ISpider {
       }
 
       movie.sourceKey = this.source.key;
+
+      console.log(
+        `[JsonRuleParser] detailContent: vod_name=${movie.vod_name}, vod_id=${movie.vod_id}, vod_play_from=${movie.vod_play_from}`,
+      );
 
       const result: SpiderDetailResult = { list: [movie] };
       return JSON.stringify(result);
@@ -754,6 +789,7 @@ export class JsonRuleParser implements ISpider {
    * so we only set allowed custom headers.
    */
   private async fetchPage(url: string): Promise<string> {
+    console.log(`[JsonRuleParser] fetchPage: url=${url}`);
     const headers: Record<string, string> = {};
     // Only set custom UA when running in Node (Electron main process)
     // Browser will silently drop the header
@@ -767,9 +803,13 @@ export class JsonRuleParser implements ISpider {
       timeout: 15000,
     });
 
-    // Return raw text so we can parse it ourselves
-    if (typeof resp.data === 'string') return resp.data;
-    return JSON.stringify(resp.data);
+    const content =
+      typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+    console.log(
+      `[JsonRuleParser] fetchPage: status=${resp.status}, length=${content.length}`,
+    );
+
+    return content;
   }
 
   /**

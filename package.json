@@ -6,21 +6,25 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc -b && vite build",
+    "build": "vue-tsc -b && vite build && electron-builder",
+    "build:dir": "vue-tsc -b && vite build && electron-builder --dir",
     "preview": "vite preview",
     "test": "vitest run"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@types/qrcode": "^1.5.6",
     "@vueuse/core": "^14.3.0",
     "axios": "^1.18.1",
     "cheerio": "^1.2.0",
     "crypto-js": "^4.2.0",
     "element-plus": "^2.14.2",
     "iconv-lite": "^0.7.2",
+    "java-bridge": "^2.8.1",
     "localforage": "^1.10.0",
     "node-forge": "^1.4.0",
     "pinia": "^3.0.4",
+    "qrcode": "^1.5.4",
     "vue": "^3.5.38",
     "vue-router": "^5.1.0",
     "xgplayer": "^3.0.24",
@@ -28,13 +32,15 @@
     "xgplayer-hls.js": "^3.0.24"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.6",
     "@tailwindcss/vite": "^4.3.2",
     "@types/crypto-js": "^4.2.2",
     "@types/node": "^24.13.2",
     "@vitejs/plugin-vue": "^5.2.4",
     "@vue/test-utils": "^2.4.11",
     "@vue/tsconfig": "^0.9.1",
-    "electron": "^33.4.11",
+    "electron": "33.4.11",
+    "electron-builder": "^25.1.8",
     "jsdom": "^29.1.1",
     "tailwindcss": "^4.3.2",
     "ts-node": "^10.9.2",
@@ -43,5 +49,31 @@
     "vite-plugin-electron": "^1.1.0",
     "vitest": "^4.1.9",
     "vue-tsc": "^3.3.5"
+  },
+  "build": {
+    "appId": "com.github.tvbox.pc",
+    "productName": "TVBox-PC",
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/java-bridge/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "public/icons.svg"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
   }
 }

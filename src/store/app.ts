@@ -8,6 +8,7 @@ import {
   type HistoryRecord,
   type FavoriteRecord,
 } from '../core/Database';
+import { PanLogin, type PanType } from '../core/PanLogin';
 import type {
   SourceBean,
   Movie,
@@ -18,12 +19,29 @@ import type {
   LiveChannelGroup,
 } from '../core/models';
 
+function buildConfigCenterVodList(): Movie[] {
+  const panTypes: PanType[] = ['quark', 'uc', 'aliyun', 'baidu', 'bili'];
+  return panTypes.map((panType) => {
+    const isLoggedIn = PanLogin.isLoggedIn(panType);
+    const info = PanLogin.getLoginInfo(panType);
+    const capName = panType.charAt(0).toUpperCase() + panType.slice(1);
+    const actionPrefix = panType === 'aliyun' ? 'Ali' : capName;
+    const action = isLoggedIn ? `del${actionPrefix}` : `add${actionPrefix}`;
+    return {
+      vod_id: action,
+      vod_name: PanLogin.getDisplayName(panType),
+      vod_pic: `/icons/${panType}.png`,
+      vod_remarks: isLoggedIn
+        ? `已登录: ${info?.nickname || info?.userId || '未知'}`
+        : '点击扫码登录',
+      action,
+    };
+  });
+}
+
 export const useAppStore = defineStore('app', () => {
   // ===== Config =====
-  const configUrl = ref(
-    localStorage.getItem('tvbox_config_url') ||
-      'https://dxawi.github.io/0/0.json',
-  );
+  const configUrl = ref(localStorage.getItem('tvbox_config_url') || '');
   const sites = ref<SourceBean[]>([]);
   const activeSiteKey = ref(localStorage.getItem('tvbox_active_site') || '');
   const parses = ref<ParseBean[]>([]);
@@ -57,6 +75,10 @@ export const useAppStore = defineStore('app', () => {
   const currentEpisodes = ref<{ name: string; url: string }[]>([]);
   const resumeProgress = ref(0);
 
+  // ===== Request cancellation =====
+  let detailAbortController: AbortController | null = null;
+  let playAbortController: AbortController | null = null;
+
   // ===== Search =====
   const searchResults = ref<
     { siteKey: string; siteName: string; list: Movie[] }[]
@@ -82,10 +104,20 @@ export const useAppStore = defineStore('app', () => {
     Number(localStorage.getItem('tvbox_search_view') || '1'),
   );
 
+  function getUniqueKey(source: SourceBean): string {
+    return `${source.key}-${source.name}`;
+  }
+
   // ===== Computed =====
-  const activeSite = computed(
-    () => sites.value.find((s) => s.key === activeSiteKey.value) || null,
-  );
+  const activeSite = computed(() => {
+    const found = sites.value.find(
+      (s) => getUniqueKey(s) === activeSiteKey.value,
+    );
+    if (!found) {
+      return sites.value.find((s) => s.key === activeSiteKey.value) || null;
+    }
+    return found;
+  });
   const activeParse = computed(() => {
     if (!defaultParseName.value && parses.value.length > 0)
       return parses.value[0];
@@ -121,9 +153,9 @@ export const useAppStore = defineStore('app', () => {
 
       if (
         !activeSiteKey.value ||
-        !sites.value.find((s) => s.key === activeSiteKey.value)
+        !sites.value.find((s) => getUniqueKey(s) === activeSiteKey.value)
       ) {
-        if (sites.value.length > 0) setActiveSite(sites.value[0].key);
+        if (sites.value.length > 0) setActiveSite(getUniqueKey(sites.value[0]));
       }
       return true;
     } catch (e) {
@@ -133,11 +165,19 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function setActiveSite(key: string) {
-    activeSiteKey.value = key;
-    localStorage.setItem('tvbox_active_site', key);
-    const site = sites.value.find((s) => s.key === key);
+    const oldKey = activeSiteKey.value;
+    console.log(`[Store] setActiveSite: oldKey=${oldKey}, newKey=${key}`);
+
+    let site = sites.value.find((s) => getUniqueKey(s) === key);
+    if (!site) {
+      site = sites.value.find((s) => s.key === key);
+    }
+
+    const newUniqueKey = site ? getUniqueKey(site) : key;
+    activeSiteKey.value = newUniqueKey;
+    localStorage.setItem('tvbox_active_site', newUniqueKey);
     if (site) configParser.setHomeSource(site);
-    resetHome();
+    resetHome(oldKey);
   }
 
   function setDefaultParse(name: string) {
@@ -147,25 +187,75 @@ export const useAppStore = defineStore('app', () => {
     if (parse) configParser.setDefaultParse(parse);
   }
 
-  function resetHome() {
+  function resetHome(oldKey?: string) {
     classes.value = [];
     filters.value = {};
     homeVodList.value = [];
     categoryVodList.value = [];
     currentVod.value = null;
     currentPlayUrl.value = '';
+    if (oldKey) {
+      console.log(
+        `[Store] resetHome: clearing spider cache for oldKey=${oldKey}`,
+      );
+      spiderEngine.clear(oldKey);
+    }
   }
 
   // ===== Spider Data Actions =====
-  async function loadHome() {
+  async function loadHome(force = false) {
     if (!activeSite.value) {
       console.warn('[Store] loadHome: no active site');
       return;
     }
+    if (!force && homeVodList.value.length > 0) {
+      console.log('[Store] loadHome: using cached data');
+      return;
+    }
+
+    if (force && activeSite.value.key) {
+      console.log(
+        '[Store] loadHome: force reload, clearing spider cache for',
+        activeSite.value.key,
+      );
+      spiderEngine.clear(activeSite.value.key);
+    }
+
     homeLoading.value = true;
     console.log(
-      `[Store] loadHome: site=${activeSite.value.name} key=${activeSite.value.key}`,
+      '[Store] loadHome request:',
+      JSON.stringify(
+        {
+          siteKey: activeSite.value.key,
+          siteName: activeSite.value.name,
+          api: activeSite.value.api,
+          ext: (activeSite.value.ext || '').substring(0, 300),
+          jar: activeSite.value.jar,
+          force,
+        },
+        null,
+        2,
+      ),
     );
+
+    const apiLower = (activeSite.value.api || '').toLowerCase();
+    const keyLower = (activeSite.value.key || '').toLowerCase();
+    const isConfigCenter =
+      keyLower === 'config' ||
+      apiLower.includes('config') ||
+      (activeSite.value.name || '').includes('配置');
+    if (isConfigCenter) {
+      console.log('[Store] loadHome: config center (hardcoded)');
+      try {
+        classes.value = [];
+        filters.value = {};
+        homeVodList.value = buildConfigCenterVodList();
+      } finally {
+        homeLoading.value = false;
+      }
+      return;
+    }
+
     try {
       const spider = await spiderEngine.getSpider(activeSite.value);
       if (!spider) {
@@ -178,35 +268,122 @@ export const useAppStore = defineStore('app', () => {
 
       const rawHome = await spider.homeContent(true);
       console.log(
-        `[Store] loadHome: homeContent raw (first 200 chars): ${rawHome.substring(0, 200)}`,
+        '[Store] loadHome homeContent response:',
+        JSON.stringify(
+          {
+            rawLength: rawHome.length,
+            rawPreview: rawHome.substring(0, 300),
+          },
+          null,
+          2,
+        ),
       );
       const homeResult = JSON.parse(rawHome);
       console.log(
-        `[Store] loadHome: parsed class=${homeResult.class?.length || 0}, list=${homeResult.list?.length || 0}, filters=${homeResult.filters ? Object.keys(homeResult.filters).length : 0}`,
+        '[Store] loadHome parsed response:',
+        JSON.stringify(
+          {
+            classCount:
+              homeResult.class?.length || homeResult.data?.list?.length || 0,
+            listCount: homeResult.list?.length || 0,
+            filterCount: homeResult.filters
+              ? Object.keys(homeResult.filters).length
+              : 0,
+            firstClass:
+              homeResult.class?.[0] || homeResult.data?.list?.[0] || null,
+            firstItem: homeResult.list?.[0] || null,
+          },
+          null,
+          2,
+        ),
       );
+
+      let hasHomeData = false;
+      if (homeResult.list && homeResult.list.length > 0) {
+        homeVodList.value = homeResult.list;
+        hasHomeData = true;
+      }
+
       if (homeResult.class) {
         classes.value = homeResult.class;
+      } else if (homeResult.data?.list && Array.isArray(homeResult.data.list)) {
+        classes.value = homeResult.data.list;
       }
+
+      if (hasHomeData && classes.value.length > 0) {
+        classes.value = [
+          { type_id: '__recommend__', type_name: '推荐' },
+          ...classes.value,
+        ];
+        console.log(
+          '[Store] loadHome: added recommend category at front, total classes:',
+          classes.value.length,
+        );
+      }
+
       if (homeResult.filters) {
         filters.value = homeResult.filters;
       }
-      if (homeResult.list && homeResult.list.length > 0) {
-        homeVodList.value = homeResult.list;
-      } else {
+
+      if (!hasHomeData) {
         const rawVod = await spider.homeVideoContent();
         console.log(
-          `[Store] loadHome: homeVideoContent raw (first 200 chars): ${rawVod.substring(0, 200)}`,
+          '[Store] loadHome homeVideoContent response:',
+          JSON.stringify(
+            {
+              rawLength: rawVod.length,
+              rawPreview: rawVod.substring(0, 300),
+            },
+            null,
+            2,
+          ),
         );
         const vodResult = JSON.parse(rawVod);
         homeVodList.value = vodResult.list || vodResult.vod_list || [];
         console.log(
-          `[Store] loadHome: homeVideoContent list=${homeVodList.value.length}`,
+          '[Store] loadHome homeVideoContent parsed:',
+          JSON.stringify(
+            {
+              listCount: homeVodList.value.length,
+              firstItem: homeVodList.value[0] || null,
+            },
+            null,
+            2,
+          ),
         );
       }
     } catch (e) {
-      console.error('loadHome failed:', e);
+      console.error('[Store] loadHome failed:', e);
     } finally {
       homeLoading.value = false;
+    }
+  }
+
+  async function runSpiderAction(actionId: string, actionData: any) {
+    if (!activeSite.value) return;
+    console.log(
+      `[Store] runSpiderAction: action=${actionId}, site=${activeSite.value.name}`,
+    );
+    try {
+      const spider = await spiderEngine.getSpider(activeSite.value);
+      if (!spider) {
+        console.warn(`[Store] runSpiderAction: spider is null`);
+        return;
+      }
+
+      const result = await spider.action(actionId, actionData);
+      console.log(`[Store] runSpiderAction: result=`, result);
+
+      const parsed = JSON.parse(result);
+      if (parsed.msg) {
+        console.log(`[Store] runSpiderAction: message=${parsed.msg}`);
+      }
+
+      if (parsed.refresh) {
+        await loadHome();
+      }
+    } catch (e) {
+      console.error('runSpiderAction failed:', e);
     }
   }
 
@@ -217,9 +394,13 @@ export const useAppStore = defineStore('app', () => {
   ) {
     if (!activeSite.value) return;
     categoryLoading.value = true;
+    console.log(
+      `[Store] loadCategory: site=${activeSite.value.name} key=${activeSite.value.key}, tid=${tid}, pg=${pg}, filterValues=${JSON.stringify(filterValues)}`,
+    );
     try {
       const spider = await spiderEngine.getSpider(activeSite.value);
       if (!spider) {
+        console.warn(`[Store] loadCategory: spider is null`);
         categoryLoading.value = false;
         return;
       }
@@ -227,11 +408,24 @@ export const useAppStore = defineStore('app', () => {
       const hasFilter =
         activeSite.value.filterable === 1 &&
         Object.keys(filterValues).length > 0;
-      const result = JSON.parse(
-        await spider.categoryContent(tid, pg, hasFilter, filterValues),
+      const rawResult = await spider.categoryContent(
+        tid,
+        pg,
+        hasFilter,
+        filterValues,
+      );
+      let parsedRaw: any;
+      try {
+        parsedRaw = JSON.parse(rawResult);
+      } catch {
+        parsedRaw = rawResult;
+      }
+      console.log(`[Store] loadCategory: raw result:`, parsedRaw);
+      const result = JSON.parse(rawResult);
+      console.log(
+        `[Store] loadCategory: parsed list=${result.list?.length || 0}, page=${result.page || pg}, pagecount=${result.pagecount || 1}`,
       );
 
-      if (result.class) classes.value = result.class;
       categoryVodList.value = result.list || [];
       categoryPage.value = parseInt(result.page || pg);
       categoryPageCount.value = parseInt(result.pagecount || '1');
@@ -244,6 +438,12 @@ export const useAppStore = defineStore('app', () => {
 
   async function loadDetail(vodId: string) {
     if (!activeSite.value) return;
+
+    if (detailAbortController) {
+      detailAbortController.abort();
+    }
+    detailAbortController = new AbortController();
+
     detailLoading.value = true;
     try {
       const spider = await spiderEngine.getSpider(activeSite.value);
@@ -252,17 +452,23 @@ export const useAppStore = defineStore('app', () => {
         return;
       }
 
-      const result = JSON.parse(await spider.detailContent([vodId]));
+      const rawResult = await spider.detailContent([vodId]);
+      const result = JSON.parse(rawResult);
+
       if (result.list && result.list.length > 0) {
+        const vod = result.list[0];
         currentVod.value = {
-          ...result.list[0],
+          ...vod,
           sourceKey: activeSite.value.key,
         };
       }
-    } catch (e) {
-      console.error('loadDetail failed:', e);
+    } catch (e: any) {
+      if (e.name !== 'AbortError') {
+        console.warn('loadDetail failed:', e.message);
+      }
     } finally {
       detailLoading.value = false;
+      detailAbortController = null;
     }
   }
 
@@ -273,6 +479,12 @@ export const useAppStore = defineStore('app', () => {
     episodes?: { name: string; url: string }[],
   ) {
     if (!activeSite.value) return;
+
+    if (playAbortController) {
+      playAbortController.abort();
+    }
+    playAbortController = new AbortController();
+
     playLoading.value = true;
     currentPlayIndex.value = episodeIndex;
     if (episodes) currentEpisodes.value = episodes;
@@ -284,12 +496,10 @@ export const useAppStore = defineStore('app', () => {
       }
 
       const vipFlags = configParser.getVipParseFlags();
-      const result: PlayResult = JSON.parse(
-        await spider.playerContent(flag, id, vipFlags),
-      );
+      const rawResult = await spider.playerContent(flag, id, vipFlags);
+      const result: PlayResult = JSON.parse(rawResult);
 
       if (result.url) {
-        // VIP parse: if parse === 1 or URL matches VIP flags, resolve via ParseEngine
         if (ParseEngine.needsParse(result)) {
           try {
             const resolvedUrl = await ParseEngine.resolve(
@@ -302,10 +512,10 @@ export const useAppStore = defineStore('app', () => {
             );
             if (resolvedUrl && resolvedUrl !== result.url) {
               result.url = resolvedUrl;
-              result.parse = 0; // Mark as resolved
+              result.parse = 0;
             }
           } catch (e) {
-            console.error('[App] VIP parse failed:', e);
+            console.warn('[App] VIP parse failed:', e);
           }
         }
 
@@ -321,14 +531,12 @@ export const useAppStore = defineStore('app', () => {
           currentPlayHeader.value = {};
         }
 
-        // Restore progress from history
         const history = await Database.getHistory(
           activeSite.value.key,
           currentVod.value?.vod_id || '',
         );
         resumeProgress.value = history?.progress || 0;
 
-        // Save to history
         if (currentVod.value) {
           await Database.saveHistory({
             ...currentVod.value,
@@ -342,10 +550,13 @@ export const useAppStore = defineStore('app', () => {
           });
         }
       }
-    } catch (e) {
-      console.error('loadPlay failed:', e);
+    } catch (e: any) {
+      if (e.name !== 'AbortError') {
+        console.warn('loadPlay failed:', e.message);
+      }
     } finally {
       playLoading.value = false;
+      playAbortController = null;
     }
   }
 
@@ -380,33 +591,58 @@ export const useAppStore = defineStore('app', () => {
   async function doSearch(keyword: string, siteKeys?: string[]) {
     searchLoading.value = true;
     searchResults.value = [];
+    console.log(
+      `[Store] doSearch: keyword=${keyword}, siteKeys=${siteKeys?.join(',') || 'all'}`,
+    );
     try {
       const targets =
         siteKeys && siteKeys.length > 0
           ? sites.value.filter(
-              (s) => siteKeys.includes(s.key) && s.searchable !== 0,
+              (s) => siteKeys.includes(getUniqueKey(s)) && s.searchable !== 0,
             )
           : sites.value.filter((s) => s.searchable !== 0);
+
+      console.log(`[Store] doSearch: searching across ${targets.length} sites`);
 
       const promises = targets.map(async (site) => {
         try {
           const spider = await spiderEngine.getSpider(site);
-          if (!spider) return null;
-          const result = JSON.parse(await spider.searchContent(keyword, true));
+          if (!spider) {
+            console.warn(`[Store] doSearch: spider is null for ${site.name}`);
+            return null;
+          }
+          const rawResult = await spider.searchContent(keyword, true);
+          let parsedRaw: any;
+          try {
+            parsedRaw = JSON.parse(rawResult);
+          } catch {
+            parsedRaw = rawResult;
+          }
+          console.log(`[Store] doSearch: ${site.name} raw result:`, parsedRaw);
+          const result = JSON.parse(rawResult);
+          const list = result.list || [];
+          console.log(
+            `[Store] doSearch: ${site.name} found ${list.length} results`,
+          );
           return {
-            siteKey: site.key,
+            siteKey: getUniqueKey(site),
             siteName: site.name,
-            list: result.list || [],
+            list,
           };
-        } catch {
+        } catch (e) {
+          console.error(`[Store] doSearch: ${site.name} failed:`, e);
           return null;
         }
       });
 
       const results = await Promise.all(promises);
-      searchResults.value = results.filter(
+      const validResults = results.filter(
         (r) => r && r.list.length > 0,
       ) as typeof searchResults.value;
+      searchResults.value = validResults;
+      console.log(
+        `[Store] doSearch: completed, total sites with results=${validResults.length}`,
+      );
     } catch (e) {
       console.error('doSearch failed:', e);
     } finally {
@@ -502,6 +738,7 @@ export const useAppStore = defineStore('app', () => {
     setDefaultParse,
     loadHome,
     loadCategory,
+    runSpiderAction,
     loadDetail,
     loadPlay,
     savePlayProgress,

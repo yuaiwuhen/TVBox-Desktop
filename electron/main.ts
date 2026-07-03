@@ -1,6 +1,10 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, Menu } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { registerJarLoaderIPC } from './JarLoader';
+import { QuarkPanService } from './QuarkPanService';
+import { PanLoginService } from './PanLoginService';
+import { proxyServer } from './ProxyServer';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -26,6 +30,7 @@ function createWindow() {
       webSecurity: false,
     },
     show: false,
+    menu: null,
   });
 
   win.once('ready-to-show', () => {
@@ -71,7 +76,9 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  Menu.setApplicationMenu(null);
+
   // DoH (DNS over HTTPS) - prevents ISP DNS hijacking
   app.configureHostResolver({
     enableBuiltInResolver: true,
@@ -81,6 +88,22 @@ app.whenReady().then(() => {
       'https://dns.alidns.com/dns-query',
     ],
   });
+
+  // Register JarLoader IPC handlers
+  registerJarLoaderIPC();
+  QuarkPanService.init();
+  PanLoginService.init();
+
+  // Start local proxy server BEFORE any spider calls.
+  // The spider's Proxy.a() probes ports 9978-9999 with `GET /proxy?do=ck`
+  // expecting "ok"; if the server is not up, playerContent returns URLs with
+  // port -1 and the video stream cannot be played.
+  try {
+    const port = await proxyServer.start();
+    console.log(`[Main] ProxyServer started on port ${port}`);
+  } catch (e: any) {
+    console.error('[Main] ProxyServer failed to start:', e.message);
+  }
 
   createWindow();
 });

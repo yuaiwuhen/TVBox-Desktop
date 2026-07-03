@@ -68,8 +68,8 @@
         </el-checkbox>
         <el-checkbox
           v-for="site in searchableSites"
-          :key="site.key"
-          v-model="checkedMap[site.key]"
+          :key="getSiteUniqueKey(site)"
+          v-model="checkedMap[getSiteUniqueKey(site)]"
           @change="onCheckChange"
         >
           {{ site.name }}
@@ -207,11 +207,15 @@ fetchHotWords()
 
 const searchableSites = computed(() => store.sites.filter(s => s.searchable !== 0))
 
+function getSiteUniqueKey(site: any): string {
+  return `${site.key}-${site.name}`
+}
+
 // Checkbox state
 const checkedMap = reactive<Record<string, boolean>>({})
 
 const selectedSiteKeys = computed(() =>
-  searchableSites.value.filter(s => checkedMap[s.key]).map(s => s.key)
+  searchableSites.value.filter(s => checkedMap[getSiteUniqueKey(s)]).map(s => getSiteUniqueKey(s))
 )
 
 const allChecked = computed(() =>
@@ -234,7 +238,7 @@ const filteredResults = computed(() => {
 function toggleAll(val: boolean | string | number) {
   const checked = !!val
   for (const site of searchableSites.value) {
-    checkedMap[site.key] = checked
+    checkedMap[getSiteUniqueKey(site)] = checked
   }
 }
 
@@ -242,8 +246,8 @@ function onCheckChange() { }
 
 function initChecked() {
   for (const site of searchableSites.value) {
-    if (checkedMap[site.key] === undefined) {
-      checkedMap[site.key] = true
+    if (checkedMap[getSiteUniqueKey(site)] === undefined) {
+      checkedMap[getSiteUniqueKey(site)] = true
     }
   }
 }

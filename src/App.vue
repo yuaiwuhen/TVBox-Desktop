@@ -1,45 +1,37 @@
 <template>
   <div class="h-screen w-full flex" style="background: var(--color-bg-base)">
     <!-- Sidebar -->
-    <aside
-      class="flex flex-col flex-shrink-0 overflow-hidden border-r"
-      :style="{
-        width: sidebarExpanded ? 'var(--spacing-sidebar-expanded)' : 'var(--spacing-sidebar-collapsed)',
-        background: 'var(--color-bg-surface)',
-        borderColor: 'var(--color-border)',
-        transition: 'width var(--transition-slow)',
-      }"
-    >
+    <aside class="flex flex-col flex-shrink-0 overflow-hidden border-r" :style="{
+      width: sidebarExpanded ? 'var(--spacing-sidebar-expanded)' : 'var(--spacing-sidebar-collapsed)',
+      background: 'var(--color-bg-surface)',
+      borderColor: 'var(--color-border)',
+      transition: 'width var(--transition-slow)',
+    }">
       <!-- Logo -->
       <div class="flex items-center h-14 px-4 flex-shrink-0 border-b" style="border-color: var(--color-border)">
-        <el-icon :size="24" style="color: var(--color-primary)"><VideoPlay /></el-icon>
+        <el-icon :size="24" style="color: var(--color-primary)">
+          <VideoPlay />
+        </el-icon>
         <transition name="fade-text">
-          <span v-if="sidebarExpanded" class="ml-3 text-lg font-bold tracking-wide whitespace-nowrap" style="color: var(--color-text-primary)">TVBox</span>
+          <span v-if="sidebarExpanded" class="ml-3 text-lg font-bold tracking-wide whitespace-nowrap"
+            style="color: var(--color-text-primary)">TVBox</span>
         </transition>
       </div>
 
       <!-- Navigation -->
       <nav class="flex-1 py-2 overflow-y-auto overflow-x-hidden">
-        <el-tooltip
-          v-for="item in navItems"
-          :key="item.path"
-          :content="item.label"
-          placement="right"
-          :disabled="sidebarExpanded"
-          :show-after="300"
-        >
-          <router-link
-            :to="item.path"
+        <el-tooltip v-for="item in navItems" :key="item.path" :content="item.label" placement="right"
+          :disabled="sidebarExpanded" :show-after="300">
+          <router-link :to="item.path"
             class="nav-item flex items-center h-10 mx-2 rounded-lg cursor-pointer transition-all duration-200 relative"
-            :class="{ 'nav-item-active': route.path === item.path }"
-          >
-            <div
-              v-if="route.path === item.path"
+            :class="{ 'nav-item-active': route.path === item.path || (item.path === '/' && route.name === 'detail') }">
+            <div v-if="route.path === item.path || (item.path === '/' && route.name === 'detail')"
               class="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r"
-              style="background: var(--color-primary)"
-            />
+              style="background: var(--color-primary)" />
             <div class="flex items-center w-full px-4">
-              <el-icon :size="20"><component :is="item.icon" /></el-icon>
+              <el-icon :size="20">
+                <component :is="item.icon" />
+              </el-icon>
               <transition name="fade-text">
                 <span v-if="sidebarExpanded" class="ml-3 text-sm whitespace-nowrap">{{ item.label }}</span>
               </transition>
@@ -49,7 +41,8 @@
       </nav>
 
       <!-- Collapse toggle -->
-      <div class="flex items-center justify-center h-12 border-t flex-shrink-0" style="border-color: var(--color-border)">
+      <div class="flex items-center justify-center h-12 border-t flex-shrink-0"
+        style="border-color: var(--color-border)">
         <el-button text circle @click="sidebarExpanded = !sidebarExpanded">
           <el-icon :size="18" style="color: var(--color-text-tertiary)">
             <component :is="sidebarExpanded ? 'Fold' : 'Expand'" />
@@ -61,19 +54,12 @@
     <!-- Main Area -->
     <div class="flex-1 flex flex-col h-full overflow-hidden">
       <!-- Topbar -->
-      <header
-        class="flex items-center h-14 px-4 flex-shrink-0 border-b z-10"
-        style="background: var(--color-bg-surface); border-color: var(--color-border)"
-      >
+      <header class="flex items-center h-14 px-4 flex-shrink-0 border-b z-10"
+        style="background: var(--color-bg-surface); border-color: var(--color-border)">
         <div class="flex items-center gap-2">
           <span class="text-xs font-medium" style="color: var(--color-text-tertiary)">当前源</span>
-          <el-select
-            :model-value="store.activeSiteKey"
-            placeholder="选择视频源"
-            class="!w-52"
-            size="small"
-            @change="onSiteChange"
-          >
+          <el-select :model-value="store.activeSiteKey" placeholder="选择视频源" class="!w-52" size="small"
+            @change="onSiteChange">
             <el-option v-for="site in store.sites" :key="site.key" :label="site.name" :value="site.key" />
           </el-select>
         </div>
@@ -82,7 +68,9 @@
           <el-tag v-if="store.sites.length > 0" size="small" type="info">{{ store.sites.length }} 个源</el-tag>
           <div class="text-xs tabular-nums" style="color: var(--color-text-tertiary)">{{ currentTime }}</div>
           <el-button text size="small" @click="$router.push('/search')" style="color: var(--color-text-secondary)">
-            <el-icon class="mr-1"><Search /></el-icon>搜索
+            <el-icon class="mr-1">
+              <Search />
+            </el-icon>搜索
           </el-button>
         </div>
       </header>
@@ -98,12 +86,14 @@
         </router-view>
       </main>
     </div>
+    <LoadingToast />
   </div>
 </template>
 
 <script setup lang="ts">
+import LoadingToast from './components/LoadingToast.vue'
 import { ref, onMounted, onBeforeUnmount } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from './store/app'
 import { localProxy } from './core/LocalProxyServer'
 import { remoteServer } from './core/RemoteServer'
@@ -111,12 +101,14 @@ import { AdBlocker } from './core/AdBlocker'
 import { VideoParseRuler } from './core/VideoParseRuler'
 import { configParser } from './core/ConfigParser'
 import { spiderEngine } from './core/SpiderEngine'
+import { PanLogin } from './core/PanLogin'
 import type { RemoteControlHandler } from './core/RemoteServer'
 import {
   HomeFilled, Search, Monitor, Clock, Star, FolderOpened, Setting, VideoPlay, Fold, Expand,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
+const router = useRouter()
 const store = useAppStore()
 const sidebarExpanded = ref(true)
 const currentTime = ref('')
@@ -218,6 +210,15 @@ onMounted(async () => {
   AdBlocker.loadDefault()
   localProxy.setDohIndex(store.dohIndex)
 
+  // Re-sync all saved pan cookies to the JVM on startup.
+  // The JVM is fresh on each app launch; without this, the user would have
+  // to log in to each pan again before any pan-source video could play.
+  try {
+    await PanLogin.syncAllToJVM()
+  } catch (e) {
+    console.error('[App] PanLogin.syncAllToJVM failed:', e)
+  }
+
   if (store.configUrl) {
     console.log(`[App] Loading config from: ${store.configUrl}`)
     const ok = await store.loadConfig()
@@ -232,27 +233,48 @@ onMounted(async () => {
 })
 
 const onSiteChange = (val: string) => {
+  const wasSameSite = store.activeSiteKey === val
+  console.log(`[App] onSiteChange: val=${val}, wasSameSite=${wasSameSite}, currentActiveSiteKey=${store.activeSiteKey}`)
   store.setActiveSite(val)
+  if (route.name === 'detail') {
+    router.push('/')
+  }
+  if (wasSameSite) {
+    console.log(`[App] wasSameSite=true, calling loadHome(true)`)
+    store.loadHome(true)
+  }
 }
 </script>
 
 <style scoped>
-.fade-text-enter-active { transition: opacity 200ms ease 100ms; }
-.fade-text-leave-active { transition: opacity 100ms ease; }
-.fade-text-enter-from, .fade-text-leave-to { opacity: 0; }
+.fade-text-enter-active {
+  transition: opacity 200ms ease 100ms;
+}
+
+.fade-text-leave-active {
+  transition: opacity 100ms ease;
+}
+
+.fade-text-enter-from,
+.fade-text-leave-to {
+  opacity: 0;
+}
 
 /* Navigation items */
 .nav-item {
   color: var(--color-text-secondary);
 }
+
 .nav-item:hover {
   background: var(--color-bg-elevated);
   color: var(--color-text-primary);
 }
+
 .nav-item-active {
   background: var(--color-primary-soft) !important;
   color: var(--color-primary) !important;
 }
+
 .nav-item-active:hover {
   background: var(--color-primary-soft) !important;
   color: var(--color-primary) !important;

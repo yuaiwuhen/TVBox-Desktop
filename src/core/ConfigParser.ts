@@ -302,12 +302,16 @@ export class ConfigParser {
 
   async load(url: string, useCache = false): Promise<TVBoxConfig> {
     const cacheKey = `tvbox_cache_${computeMd5(url)}`;
+    console.log(`[ConfigParser] load config: url=${url}, useCache=${useCache}`);
 
     // 1. Try loading from cache when useCache is true
     if (useCache) {
       const cached = localStorage.getItem(cacheKey);
       if (cached) {
         try {
+          console.log(
+            `[ConfigParser] loading from cache, size=${cached.length}`,
+          );
           this.parseJson(url, cached);
           return this.config!;
         } catch {
@@ -337,6 +341,10 @@ export class ConfigParser {
       configUrl = 'http://' + configUrl;
     }
 
+    console.log(
+      `[ConfigParser] resolved configUrl=${configUrl}, key=${configKey ? '***' : null}`,
+    );
+
     // 3. Fetch remote config
     // Note: browsers silently strip the User-Agent header when set via fetch/XHR,
     // so we omit it and use the browser's default UA (Chrome on Win/Mac/Linux).
@@ -355,8 +363,27 @@ export class ConfigParser {
           ? response.data
           : JSON.stringify(response.data);
 
+      console.log(
+        `[ConfigParser] fetched config, length=${json.length}, status=${response.status}`,
+      );
+      let parsedJson: any;
+      try {
+        parsedJson = JSON.parse(json);
+      } catch {
+        parsedJson = json;
+      }
+      console.log('[ConfigParser] fetched config content:', parsedJson);
+
       // Decrypt content if needed
       json = ConfigParser.findResult(json, configKey);
+      console.log(`[ConfigParser] after decryption, length=${json.length}`);
+      let parsedDecrypted: any;
+      try {
+        parsedDecrypted = JSON.parse(json);
+      } catch {
+        parsedDecrypted = json;
+      }
+      console.log('[ConfigParser] decrypted config content:', parsedDecrypted);
 
       // Fix clan:// references if original URL was a clan URL
       const originalBase = url.split(pkSeparator)[0];
@@ -379,10 +406,12 @@ export class ConfigParser {
 
       return this.config!;
     } catch (error) {
+      console.error('[ConfigParser] fetch config failed:', error);
       // On network error, attempt cache fallback
       const cached = localStorage.getItem(cacheKey);
       if (cached) {
         try {
+          console.log(`[ConfigParser] fallback to cache`);
           this.parseJson(url, cached);
           return this.config!;
         } catch {
@@ -506,6 +535,7 @@ export class ConfigParser {
 
   private parseJson(apiUrl: string, jsonStr: string): void {
     const infoJson = JSON.parse(jsonStr);
+    console.log(`[ConfigParser] parseJson: apiUrl=${apiUrl}`);
 
     // jarCache
     this.jarCacheStr = safeGetString(infoJson, 'jarCache', 'true');
@@ -528,6 +558,8 @@ export class ConfigParser {
     let firstVisibleSite: SourceBean | null = null;
 
     const sites: any[] = infoJson.video?.sites ?? infoJson.sites ?? [];
+    console.log(`[ConfigParser] sites count: ${sites.length}`);
+
     for (const obj of sites) {
       const siteKey = String(obj.key ?? '').trim();
       if (!siteKey) continue;
@@ -556,6 +588,17 @@ export class ConfigParser {
         firstVisibleSite = sb;
       }
       this.sourceBeanList.set(siteKey, sb);
+    }
+
+    console.log(
+      `[ConfigParser] parsed sites: ${this.sourceBeanList.size}, visible sites: ${Array.from(this.sourceBeanList.values()).filter((s) => s.hide !== 1).length}`,
+    );
+    for (const [key, site] of this.sourceBeanList) {
+      if (site.hide !== 1) {
+        console.log(
+          `[ConfigParser] site: key=${key}, name=${site.name}, type=${site.type}, api=${site.api.substring(0, 100)}`,
+        );
+      }
     }
 
     // Set home source from saved preference

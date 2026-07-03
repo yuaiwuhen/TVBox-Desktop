@@ -2,6 +2,7 @@ import type { SourceBean, ISpider } from './models';
 import { JsSpider } from './JsSpider';
 import { PySpider } from './PySpider';
 import { JsonRuleParser } from './JsonRuleParser';
+import { JarSpider } from './JarSpider';
 
 export class SpiderEngine {
   private spiderCache: Map<string, ISpider> = new Map();
@@ -36,39 +37,64 @@ export class SpiderEngine {
   }
 
   /**
-   * Determine the spider type from the api field format.
+   * Resolve the spider URL for JAR spiders.
+   * Priority (Box Android convention):
+   * 1. If api contains ";md5;" format → extract URL from api
+   * 2. If source has jar field → use source.jar (highest priority for this source)
+   * 3. Otherwise → use global spiderUrl from config
+   *
+   * Returns the PNG/JAR URL without ";md5;hash" suffix.
+   */
+  private resolveJarUrl(source: SourceBean): string {
+    const api = source.api || '';
+    const jar = source.jar || '';
+
+    // Case 1: api field contains spider URL format (like "https://xxx.png;md5;hash")
+    if (api.includes(';md5;')) {
+      return api.split(';md5;')[0];
+    }
+
+    // Case 2: source has jar field (highest priority for this source)
+    // Box Android: jarUrl = source.getJar().isEmpty() ? spider : source.getJar()
+    if (jar) {
+      return jar.includes(';md5;') ? jar.split(';md5;')[0] : jar;
+    }
+
+    // Case 3: use global spiderUrl from config
+    if (this.spiderUrl) {
+      return this.spiderUrl.includes(';md5;')
+        ? this.spiderUrl.split(';md5;')[0]
+        : this.spiderUrl;
+    }
+
+    return '';
+  }
+
+  /**
+   * Determine the spider type and resolve the API URL.
    * Box Android convention:
-   * - api starts with "csp_" → JAR spider (Java class in JAR, not supported)
+   * - api starts with "csp_" → JAR spider (Java class in JAR)
    * - api ends with ".js" → JS spider (remote JS file)
    * - api ends with ".py" or key starts with "py_" → Python spider
    * - type=0/1/2 → JSON/XML采集源 (JsonRuleParser)
    */
   private resolveApiUrl(source: SourceBean): string {
     const api = source.api || '';
-    const jar = source.jar || '';
 
-    // Check if this is a JAR spider (csp_ prefix)
+    // For JAR spiders (csp_ prefix), we return the JAR URL, not the api field
+    // The actual class name is in the api field (e.g., "csp_Duopan")
     if (api.startsWith('csp_')) {
-      // JAR spiders require loading Java classes from JAR files
-      // We don't support JAR parsing, return empty to indicate unsupported
-      console.warn(
-        `[SpiderEngine] JAR spider detected (csp_ prefix): ${api}, JAR support not implemented`,
-      );
-      return '';
+      return this.resolveJarUrl(source);
+    }
+
+    // If api contains spider URL format, extract the URL part
+    if (api.includes(';md5;')) {
+      return api.split(';md5;')[0];
     }
 
     // If api is already a full HTTP URL, return as-is
     if (/^https?:\/\//i.test(api)) {
       return api;
-    }
-
-    // If jar is specified and is a full URL, it might be for JS API loading
-    // (JsLoader can load a JAR for custom JS API before loading the JS spider)
-    // We skip this since we don't support JAR
-    if (jar && /^https?:\/\//i.test(jar)) {
-      console.warn(
-        `[SpiderEngine] Source has jar field but JAR support not implemented: ${jar}`,
-      );
     }
 
     // If api has .js extension but no protocol, prepend spider base URL
@@ -81,33 +107,72 @@ export class SpiderEngine {
       return this.spiderBaseUrl + api;
     }
 
-    // For other cases, return api as-is (will be handled by type-based logic)
+    // For other cases, return api as-is
     return api;
   }
 
   async getSpider(source: SourceBean): Promise<ISpider | null> {
-    const cached = this.spiderCache.get(source.key);
-    if (cached) return cached;
+    const uniqueKey = `${source.key}-${source.name}`;
+    const cached = this.spiderCache.get(uniqueKey);
+    if (cached) {
+      console.log(
+        '[SpiderEngine] getSpider cache hit:',
+        JSON.stringify(
+          {
+            key: source.key,
+            sourceName: source.name,
+            uniqueKey,
+            cachedType: cached.constructor.name,
+          },
+          null,
+          2,
+        ),
+      );
+      if (typeof cached.action === 'function') {
+        return cached;
+      }
+      console.warn(
+        `[SpiderEngine] Cached spider ${uniqueKey} missing action method, recreating`,
+      );
+    }
 
     const api = this.resolveApiUrl(source);
     const key = source.key || '';
     const type = source.type ?? 3;
 
     console.log(
-      `[SpiderEngine] getSpider: key=${key}, type=${type}, api=${api || '(empty)'}, ext=${(source.ext || '').substring(0, 80)}`,
+      '[SpiderEngine] getSpider creating new:',
+      JSON.stringify(
+        {
+          key,
+          sourceName: source.name,
+          uniqueKey,
+          type,
+          api: api || '(empty)',
+          ext: (source.ext || '').substring(0, 150),
+          jar: source.jar,
+        },
+        null,
+        2,
+      ),
     );
 
     let spider: ISpider | null = null;
 
-    // Check for JAR spider (csp_ prefix) - not supported
+    // Check for JAR spider (csp_ prefix)
     if ((source.api || '').startsWith('csp_')) {
-      console.warn(
-        `[SpiderEngine] Source "${source.name || key}" uses JAR spider (api="${source.api}"). JAR parsing is not supported.`,
+      const jarUrl = api; // api is now the spiderUrl from resolveApiUrl
+      if (!jarUrl) {
+        console.warn(
+          `[SpiderEngine] JAR spider "${source.name || key}" has no spider URL`,
+        );
+        return null;
+      }
+      console.log(
+        `[SpiderEngine] Creating JarSpider: key=${uniqueKey}, api=${source.api}, jarUrl=${jarUrl}`,
       );
-      return null;
-    }
-
-    if (api && /\.js(\?|$)/i.test(api)) {
+      spider = new JarSpider(uniqueKey, source.api || '', jarUrl, source.ext);
+    } else if (api && /\.js(\?|$)/i.test(api)) {
       spider = new JsSpider(key, api, source.ext);
     } else if ((api && /\.py(\?|$)/i.test(api)) || key.startsWith('py_')) {
       spider = new PySpider(key, api, source.ext);
@@ -169,12 +234,33 @@ export class SpiderEngine {
       }
     }
 
-    this.spiderCache.set(source.key, spider);
+    this.spiderCache.set(uniqueKey, spider);
     return spider;
   }
 
   getSpiderByKey(key: string): ISpider | null {
     return this.spiderCache.get(key) ?? null;
+  }
+
+  clear(key: string): void {
+    for (const [cacheKey, spider] of this.spiderCache.entries()) {
+      if (cacheKey.startsWith(key + '-')) {
+        try {
+          spider.destroy();
+        } catch {
+          /* ignore */
+        }
+        this.spiderCache.delete(cacheKey);
+        console.log('[SpiderEngine] Cleared spider cache:', cacheKey);
+
+        try {
+          const ipc = window.electronIPC || require('electron').ipcRenderer;
+          ipc.invoke('jar:clearSpiderCache', cacheKey).catch(() => {});
+        } catch {
+          /* ignore */
+        }
+      }
+    }
   }
 
   clearAll(): void {
@@ -186,18 +272,6 @@ export class SpiderEngine {
       }
     }
     this.spiderCache.clear();
-  }
-
-  clear(key: string): void {
-    const spider = this.spiderCache.get(key);
-    if (spider) {
-      try {
-        spider.destroy();
-      } catch {
-        /* ignore */
-      }
-      this.spiderCache.delete(key);
-    }
   }
 }
 

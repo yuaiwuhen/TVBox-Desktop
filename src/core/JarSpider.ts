@@ -1,0 +1,306 @@
+/**
+ * JarSpider - JAR Spider implementation for renderer process
+ *
+ * Implements ISpider interface by communicating with main process via IPC.
+ * Main process uses JarLoader to load JAR files and invoke Spider methods.
+ */
+
+import type { ISpider } from './models';
+import { useLoading } from '../composables/useLoading';
+
+// Electron IPC bridge - available in renderer with contextIsolation=false
+declare global {
+  interface Window {
+    electronIPC?: {
+      invoke: (channel: string, ...args: any[]) => Promise<any>;
+      on: (channel: string, listener: (...args: any[]) => void) => () => void;
+    };
+  }
+}
+
+// Get IPC interface
+function getIPC(): Window['electronIPC'] {
+  if (window.electronIPC) {
+    return window.electronIPC;
+  }
+
+  try {
+    const { ipcRenderer } = require('electron');
+    return {
+      invoke: (channel: string, ...args: any[]) =>
+        ipcRenderer.invoke(channel, ...args),
+      on: (channel: string, listener: (...args: any[]) => void) => {
+        const wrappedListener = (_event: any, ...args: any[]) =>
+          listener(...args);
+        ipcRenderer.on(channel, wrappedListener);
+        return () => ipcRenderer.removeListener(channel, wrappedListener);
+      },
+    };
+  } catch {
+    console.warn('[JarSpider] Electron IPC not available');
+    return undefined;
+  }
+}
+
+export class JarSpider implements ISpider {
+  private key: string;
+  private className: string;
+  private ext: string;
+  private jarUrl: string;
+  private initialized: boolean = false;
+  private progressUnsub: (() => void) | null = null;
+  private abortController: AbortController | null = null;
+
+  constructor(key: string, className: string, jarUrl: string, ext?: string) {
+    this.key = key;
+    this.className = className;
+    this.jarUrl = jarUrl;
+    this.ext = ext || '';
+    console.log(
+      '[JarSpider] Created:',
+      key,
+      'class:',
+      className,
+      'jar:',
+      jarUrl,
+    );
+  }
+
+  /**
+   * Initialize spider
+   */
+  async init(extend: string): Promise<void> {
+    this.ext = extend || this.ext;
+
+    const ipc = getIPC();
+    if (!ipc) {
+      throw new Error('[JarSpider] IPC not available');
+    }
+
+    // Show loading progress
+    const loading = useLoading();
+    const taskId = `jar-${this.key}`;
+    loading.start(taskId, `加载爬虫: ${this.className}`);
+
+    // Listen for progress events
+    if (ipc.on) {
+      this.progressUnsub = ipc.on('jar:progress', (data: any) => {
+        if (data && typeof data === 'object') {
+          loading.update(taskId, data.stage, data.message, data.percent);
+        }
+      });
+    }
+
+    try {
+      // Step 1: Load JAR
+      console.log('[JarSpider] Loading JAR:', this.jarUrl);
+      const loadResult = await ipc.invoke('jar:load', this.jarUrl, '', false);
+      if (!loadResult?.success) {
+        const errorMsg =
+          loadResult?.error || `Failed to load JAR: ${this.jarUrl}`;
+        console.error('[JarSpider] JAR load failed:', errorMsg);
+        loading.fail(taskId, errorMsg);
+        throw new Error(`[JarSpider] ${errorMsg}`);
+      }
+
+      // Step 2: Get Spider instance
+      console.log('[JarSpider] Getting spider:', this.className);
+      const spiderResult = await ipc.invoke(
+        'jar:getSpider',
+        this.key,
+        this.className,
+        this.ext,
+        this.jarUrl,
+      );
+      if (!spiderResult?.success) {
+        const errorMsg =
+          spiderResult?.error || `Failed to get spider: ${this.className}`;
+        console.error('[JarSpider] Spider get failed:', errorMsg);
+        loading.fail(taskId, errorMsg);
+        throw new Error(`[JarSpider] ${errorMsg}`);
+      }
+
+      // Step 3: Initialize spider with ext config
+      console.log(
+        '[JarSpider] Initializing spider with ext:',
+        this.ext.substring(0, 80),
+      );
+      await ipc.invoke('jar:initSpider', this.key, this.ext);
+
+      this.initialized = true;
+      console.log('[JarSpider] Initialized:', this.key);
+
+      // Debug: list all methods
+      try {
+        const methods = await this.listMethods();
+        console.log(
+          `[JarSpider] ${this.key} methods (${methods.length}):`,
+          methods.join(', '),
+        );
+      } catch (e) {
+        console.warn('[JarSpider] Failed to list methods:', e);
+      }
+
+      loading.finish(taskId, true);
+    } catch (e) {
+      console.error('[JarSpider] Init failed:', this.key, e);
+      loading.fail(taskId, e instanceof Error ? e.message : String(e));
+      throw e;
+    } finally {
+      if (this.progressUnsub) {
+        this.progressUnsub();
+        this.progressUnsub = null;
+      }
+    }
+  }
+
+  /**
+   * Call spider method via IPC
+   */
+  private async callMethod(method: string, args: any[]): Promise<string> {
+    if (!this.initialized) {
+      return '{}';
+    }
+
+    const ipc = getIPC();
+    if (!ipc) {
+      return '{}';
+    }
+
+    if (this.abortController) {
+      this.abortController.abort();
+    }
+    this.abortController = new AbortController();
+
+    try {
+      let extraCookies: Record<string, string> | undefined;
+      if (method === 'playerContent' && args.length > 0) {
+        const panTypes = ['quark', 'uc', 'aliyun', 'baidu', 'bili'];
+        extraCookies = {};
+        for (const pt of panTypes) {
+          try {
+            const saved = localStorage.getItem(`pan_login_${pt}`);
+            if (saved) {
+              const parsed = JSON.parse(saved);
+              if (parsed.cookie) {
+                extraCookies[pt] = parsed.cookie;
+              }
+            }
+          } catch {}
+        }
+      }
+
+      const timeoutPromise = new Promise<string>((_, reject) => {
+        setTimeout(() => {
+          if (this.abortController) {
+            this.abortController.abort();
+          }
+          reject(new Error(`${method} timed out`));
+        }, 30000);
+      });
+
+      const resultPromise = ipc.invoke(
+        'jar:callMethod',
+        this.key,
+        method,
+        args,
+        extraCookies,
+      );
+
+      const result = await Promise.race([resultPromise, timeoutPromise]);
+      const resultStr = result || '{}';
+      return resultStr;
+    } catch (e: any) {
+      if (e.name !== 'AbortError') {
+        console.warn(`[JarSpider] callMethod ${method} failed:`, e.message);
+      }
+      return '{}';
+    }
+  }
+
+  async homeContent(filter: boolean): Promise<string> {
+    return this.callMethod('homeContent', [filter]);
+  }
+
+  async homeVideoContent(): Promise<string> {
+    return this.callMethod('homeVideoContent', []);
+  }
+
+  async categoryContent(
+    tid: string,
+    pg: string,
+    filter: boolean,
+    extend: Record<string, string>,
+  ): Promise<string> {
+    return this.callMethod('categoryContent', [tid, pg, filter, extend]);
+  }
+
+  async detailContent(ids: string[]): Promise<string> {
+    return this.callMethod('detailContent', [ids]);
+  }
+
+  async searchContent(
+    key: string,
+    quick: boolean,
+    pg?: string,
+  ): Promise<string> {
+    if (pg !== undefined) {
+      return this.callMethod('searchContent', [key, quick, pg]);
+    }
+    return this.callMethod('searchContent', [key, quick]);
+  }
+
+  async playerContent(
+    flag: string,
+    id: string,
+    vipFlags: string[],
+  ): Promise<string> {
+    return this.callMethod('playerContent', [flag, id, vipFlags]);
+  }
+
+  async listMethods(): Promise<string[]> {
+    try {
+      const ipc = getIPC();
+      if (!ipc) return [];
+      const result = await ipc.invoke('jar:listSpiderMethods', this.key);
+      const parsed = JSON.parse(result);
+      return parsed.methods || [];
+    } catch (e) {
+      console.error('[JarSpider] listMethods failed:', e);
+      return [];
+    }
+  }
+
+  async isVideoFormat(url: string): Promise<boolean> {
+    try {
+      const result = await this.callMethod('isVideoFormat', [url]);
+      const parsed = JSON.parse(result);
+      return parsed === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async manualVideoCheck(): Promise<boolean> {
+    try {
+      const result = await this.callMethod('manualVideoCheck', []);
+      const parsed = JSON.parse(result);
+      return parsed === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async action(actionId: string, actionData: any): Promise<string> {
+    return this.callMethod('action', [actionId, actionData]);
+  }
+
+  destroy(): void {
+    this.initialized = false;
+    if (this.progressUnsub) {
+      this.progressUnsub();
+      this.progressUnsub = null;
+    }
+    console.log('[JarSpider] Destroyed:', this.key);
+  }
+}

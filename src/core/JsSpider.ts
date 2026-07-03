@@ -4,20 +4,33 @@ import * as cheerio from 'cheerio';
 import type { ISpider } from './models';
 
 // Node.js builtins - use require() at runtime since Vite doesn't bundle them
-const vm: typeof import('vm') =
-  (globalThis as any).require?.('vm') || require('vm');
+const vm: typeof import('vm') | undefined = (() => {
+  try {
+    if ((globalThis as any).require) {
+      return (globalThis as any).require('vm');
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+})();
+
 let nodeRequire: ((id: string) => any) | undefined;
 try {
-  nodeRequire =
-    (globalThis as any).require?.('module')?.createRequire?.(import.meta.url) ||
-    require;
+  if ((globalThis as any).require) {
+    nodeRequire =
+      (globalThis as any).require('module')?.createRequire?.(import.meta.url) ||
+      (globalThis as any).require;
+  }
 } catch {
   nodeRequire = undefined;
 }
 
 let forge: any;
 try {
-  forge = require('node-forge');
+  if ((globalThis as any).require) {
+    forge = (globalThis as any).require('node-forge');
+  }
 } catch {
   forge = null;
 }
@@ -1424,6 +1437,10 @@ export class JsSpider implements ISpider {
     }
   }
 
+  async action(actionId: string, actionData: any): Promise<string> {
+    return this.callSpiderMethod('action', actionId, actionData);
+  }
+
   destroy(): void {
     this.context = null;
     this.sandbox = {};
@@ -1689,19 +1706,37 @@ export class JsSpider implements ISpider {
     ...args: any[]
   ): Promise<string> {
     if (!this.spiderObj || typeof this.spiderObj[method] !== 'function') {
+      console.warn(`[JsSpider] ${method}() not found for ${this.key}`);
       return '{}';
     }
     try {
       const argsJson = args.map((a) => JSON.stringify(a)).join(',');
       const expr = `__spider__.${method}(${argsJson})`;
+      console.log(
+        `[JsSpider] calling ${method}() for ${this.key}, args=[${argsJson.substring(0, 200)}${argsJson.length > 200 ? '...' : ''}]`,
+      );
       const result = vm.runInContext(expr, this.context!, { timeout: 30000 });
+      let resolvedResult: any;
       if (result && typeof result.then === 'function') {
-        const resolved = await result;
-        return typeof resolved === 'string'
-          ? resolved
-          : JSON.stringify(resolved);
+        resolvedResult = await result;
+      } else {
+        resolvedResult = result;
       }
-      return typeof result === 'string' ? result : JSON.stringify(result);
+      const output =
+        typeof resolvedResult === 'string'
+          ? resolvedResult
+          : JSON.stringify(resolvedResult);
+      let logResult: any;
+      try {
+        logResult = JSON.parse(output);
+      } catch {
+        logResult = output;
+      }
+      console.log(
+        `[JsSpider] ${method}() for ${this.key} returned:`,
+        logResult,
+      );
+      return output;
     } catch (e) {
       console.error(`[JsSpider] ${method}() error for ${this.key}:`, e);
       return '{}';

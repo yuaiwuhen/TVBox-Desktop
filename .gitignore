@@ -28,3 +28,11 @@ dist-ssr
 .env
 .env.*
 .npmrc
+
+# Build artifacts
+release/
+jar_cache/
+.dbg/
+
+# Tools - decompiled jars/sources are downloaded/generated, not source code
+tools/
