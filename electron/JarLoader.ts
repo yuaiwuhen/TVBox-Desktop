@@ -4273,8 +4273,27 @@ export class JarLoader {
           }
         }
 
-        // Fallback: Try other variations
-        const possibleMethods = ['proxyLocal', 'proxy', 'localProxy'];
+        // Check for obfuscated method names (韩剧源使用混淆后的方法名)
+        // The obfuscated proxyLocal method name pattern: oOoOoOoOoOoOoO0o
+        const obfuscatedProxyLocalSync = 'oOoOoOoOoOoOoO0oSync';
+        if (typeof spiderObj[obfuscatedProxyLocalSync] === 'function') {
+          console.log(
+            '[JarLoader] callSpiderProxyLocal: using obfuscated method',
+            obfuscatedProxyLocalSync,
+          );
+          const result = spiderObj[obfuscatedProxyLocalSync](map);
+          if (result) {
+            return this.parseProxyResult(result);
+          }
+        }
+
+        // Fallback: Try other variations including obfuscated names
+        const possibleMethods = [
+          'proxyLocal',
+          'proxy',
+          'localProxy',
+          'oOoOoOoOoOoOoO0o',
+        ];
         for (const methodName of possibleMethods) {
           if (typeof spiderObj[methodName] === 'function') {
             console.log(
