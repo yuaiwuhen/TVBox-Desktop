@@ -7,7 +7,8 @@
     <title>TVBox Desktop</title>
     
     <!-- 引入h265web.js播放器（支持HEVC/H.265） -->
-    <script src="/public/h265web/h265web.js"></script>
+    <!-- 注意：public目录下的文件在构建后会被复制到根目录，所以路径应该是/h265web/而不是/public/h265web/ -->
+    <script src="/h265web/h265web.js"></script>
   </head>
   <body>
     <div id="app"></div>
