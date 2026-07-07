@@ -4253,54 +4253,101 @@ export class JarLoader {
         params['do'],
       );
 
-      // Call spider instance's proxyLocal method
-      const result = spiderInstance.spider.proxyLocalSync(map);
-      if (!result) {
+      // Debug: Check spider object methods
+      try {
+        const spiderObj = spiderInstance.spider;
+        const methods = Object.keys(spiderObj).filter(
+          (k) => typeof spiderObj[k] === 'function',
+        );
         console.log(
-          '[JarLoader] callSpiderProxyLocal: spider.proxyLocal returned null',
+          '[JarLoader] callSpiderProxyLocal: spider methods=',
+          methods.slice(0, 20).join(', '),
         );
-        return null;
-      }
 
-      const arr = result as any[];
-      if (arr.length < 3) {
-        console.warn(
-          '[JarLoader] callSpiderProxyLocal: array length < 3, insufficient',
-        );
-        return null;
-      }
-
-      const status = typeof arr[0] === 'number' ? arr[0] : 200;
-      const mime =
-        typeof arr[1] === 'string' ? arr[1] : 'application/octet-stream';
-      const stream = arr[2];
-
-      let headers: Record<string, string> | undefined;
-      if (arr.length >= 4 && arr[3]) {
-        try {
-          const headerMap = arr[3];
-          const keys = headerMap.keySetSync().toArraySync();
-          headers = {};
-          for (let i = 0; i < keys.length; i++) {
-            const k = String(keys[i]);
-            headers[k] = String(headerMap.getSync(keys[i]));
+        // Try different method names
+        if (typeof spiderObj.proxyLocalSync === 'function') {
+          console.log('[JarLoader] callSpiderProxyLocal: using proxyLocalSync');
+          const result = spiderObj.proxyLocalSync(map);
+          if (result) {
+            return this.parseProxyResult(result);
           }
-        } catch {
-          // headers optional
         }
-      }
 
-      console.log(
-        '[JarLoader] callSpiderProxyLocal: success, status=',
-        status,
-        'mime=',
-        mime,
-      );
-      return { status, mime, stream, headers };
+        // Fallback: Try other variations
+        const possibleMethods = ['proxyLocal', 'proxy', 'localProxy'];
+        for (const methodName of possibleMethods) {
+          if (typeof spiderObj[methodName] === 'function') {
+            console.log(
+              '[JarLoader] callSpiderProxyLocal: trying method=',
+              methodName,
+            );
+            try {
+              const result = spiderObj[methodName](map);
+              if (result) {
+                return this.parseProxyResult(result);
+              }
+            } catch {}
+          }
+        }
+
+        console.log(
+          '[JarLoader] callSpiderProxyLocal: no suitable method found on spider instance',
+        );
+        return null;
+      } catch (debugError: any) {
+        console.error(
+          '[JarLoader] callSpiderProxyLocal debug error:',
+          debugError.message || debugError,
+        );
+        return null;
+      }
     } catch (e: any) {
       console.error('[JarLoader] callSpiderProxyLocal error:', e.message || e);
       return null;
     }
+  }
+
+  private parseProxyResult(result: any): {
+    status: number;
+    mime: string;
+    stream: any;
+    headers?: Record<string, string>;
+  } | null {
+    const arr = result as any[];
+    if (!arr || arr.length < 3) {
+      console.warn(
+        '[JarLoader] parseProxyResult: array length < 3, insufficient',
+      );
+      return null;
+    }
+
+    const status = typeof arr[0] === 'number' ? arr[0] : 200;
+    const mime =
+      typeof arr[1] === 'string' ? arr[1] : 'application/octet-stream';
+    const stream = arr[2];
+
+    let headers: Record<string, string> | undefined;
+    if (arr.length >= 4 && arr[3]) {
+      try {
+        const headerMap = arr[3];
+        const keys = headerMap.keySetSync().toArraySync();
+        headers = {};
+        for (let i = 0; i < keys.length; i++) {
+          const k = String(keys[i]);
+          headers[k] = String(headerMap.getSync(keys[i]));
+        }
+      } catch {
+        // headers optional
+      }
+    }
+
+    console.log(
+      '[JarLoader] parseProxyResult: success, status=',
+      status,
+      'mime=',
+      mime,
+    );
+    return { status, mime, stream, headers };
   }
 
   /**

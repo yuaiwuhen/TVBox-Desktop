@@ -598,9 +598,51 @@ export class ProxyServer {
     }
 
     if (!result) {
+      // Fallback to streamUnknownProxy when spider methods fail
+      // This happens when:
+      // 1. spider.proxyLocal() not implemented or returns null
+      // 2. Proxy.proxy() fails due to missing DexNative JNI library
+      console.log(
+        '[ProxyServer] invokeSpiderProxy: spider methods failed, falling back to direct proxy for do=',
+        params['do'],
+      );
+
+      const upstreamUrl = params['url'];
+      if (upstreamUrl) {
+        // Extract custom headers from params if present
+        let customHeaders: Record<string, string> = {};
+        try {
+          const headerStr = params['header'];
+          if (headerStr) {
+            customHeaders = JSON.parse(headerStr);
+          }
+        } catch {}
+
+        // Add injected headers (referer, user-agent, cookie)
+        if (params['referer']) {
+          customHeaders['Referer'] = params['referer'];
+        }
+        if (params['user-agent']) {
+          customHeaders['User-Agent'] = params['user-agent'];
+        }
+        if (params['cookie']) {
+          customHeaders['Cookie'] = params['cookie'];
+        }
+
+        void this.streamUnknownProxy(
+          upstreamUrl,
+          req,
+          res,
+          customHeaders,
+          params['do'],
+        );
+        return;
+      }
+
+      // No fallback available
       if (!res.headersSent) {
         res.writeHead(502, { 'Content-Type': 'text/plain' });
-        res.end('Spider proxy returned null');
+        res.end('Spider proxy returned null and no URL available for fallback');
       }
       return;
     }
