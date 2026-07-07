@@ -14,10 +14,201 @@
 import http from 'http';
 import https from 'https';
 import { URL } from 'url';
+import fs from 'fs';
+import path from 'path';
+import { Transform } from 'stream';
 import { jarLoader } from './JarLoader';
 import { QuarkPanService } from './QuarkPanService';
+import { UCPanService } from './UCPanService';
+import { BaiduPanService } from './BaiduPanService';
 
 type PortCallback = (port: number) => void;
+
+// Keep-alive agents so Range requests during video playback reuse the same
+// TCP/TLS connection to the CDN instead of doing a fresh handshake every
+// time (browsers fire multiple Range requests for buffering/seek; without
+// reuse, each one pays 200-500ms TLS handshake latency → stutter).
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 32 });
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 32,
+});
+
+// Persistent debug log for streamPanDirect — written to disk so we can
+// inspect 412/403 errors without relying on vite's stdout capture (which
+// gets truncated/buffered in dev mode). Each entry is timestamped.
+const PROXY_DEBUG_LOG = path.join(
+  process.env.APPDATA ? path.join(process.env.APPDATA, 'tvbox-pc') : __dirname,
+  'proxy-debug.log',
+);
+function debugLog(msg: string): void {
+  try {
+    const dir = path.dirname(PROXY_DEBUG_LOG);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const line = `[${new Date().toISOString()}] ${msg}\n`;
+    fs.appendFileSync(PROXY_DEBUG_LOG, line, { flag: 'a' });
+  } catch {}
+}
+
+/**
+ * Transform stream that rewrites m3u8 paths line by line.
+ * Mirrors Android's chunked response: reads chunks from upstream,
+ * processes them, and immediately pushes to downstream.
+ *
+ * This avoids the "read full m3u8 → rewrite → send" delay that causes
+ * player timeout/cancellation issues.
+ */
+class M3u8Rewriter extends Transform {
+  private buffer: string = '';
+  private baseUrl: string;
+  private baseOrigin: string;
+  private basePath: string;
+  private queryPart: string;
+  private port: number;
+  private doType: string;
+  private customHeaders: Record<string, string>;
+  private rewriteCount: number = 0;
+  private loggedFirstChunk: boolean = false;
+
+  constructor(
+    decodedUrl: string,
+    port: number,
+    doType: string,
+    customHeaders: Record<string, string>,
+  ) {
+    // Don't set encoding - we want to output Buffer, not string
+    // decodeStrings: true converts input Buffer to string for us
+    super({ decodeStrings: true });
+    this.port = port;
+    this.doType = doType;
+    this.customHeaders = customHeaders;
+    this.baseUrl = decodedUrl.split('?')[0];
+    this.baseOrigin =
+      this.baseUrl.match(/^https?:\/\/[^/]+/)?.[0] || this.baseUrl;
+    this.basePath = this.baseUrl.substring(
+      0,
+      this.baseUrl.lastIndexOf('/') + 1,
+    );
+    this.queryPart = decodedUrl.includes('?')
+      ? '?' + decodedUrl.split('?')[1]
+      : '';
+    console.log(
+      '[M3u8Rewriter] constructor: baseOrigin=',
+      this.baseOrigin,
+      'basePath=',
+      this.basePath,
+      'queryPart=',
+      this.queryPart.substring(0, 50),
+    );
+  }
+
+  _transform(chunk: Buffer, encoding: string, callback: Function) {
+    console.log(
+      '[M3u8Rewriter] _transform called, chunk size=',
+      chunk.length,
+      'encoding=',
+      encoding,
+    );
+    const text = chunk.toString('utf8');
+    this.buffer += text;
+
+    // Debug: log first chunk's raw content
+    if (!this.loggedFirstChunk) {
+      console.log(
+        '[M3u8Rewriter] First chunk raw content:',
+        text.substring(0, 300),
+      );
+      this.loggedFirstChunk = true;
+    }
+
+    // Process complete lines (m3u8 is line-oriented)
+    const lines = this.buffer.split('\n');
+    // Keep the last incomplete line in buffer
+    this.buffer = lines.pop() || '';
+
+    // Rewrite and push each complete line immediately (as Buffer)
+    let pushedLines = 0;
+    for (const line of lines) {
+      const rewritten = this.rewriteLine(line);
+      const buf = Buffer.from(rewritten + '\n', 'utf8');
+      this.push(buf);
+      pushedLines++;
+    }
+    console.log('[M3u8Rewriter] pushed', pushedLines, 'lines');
+
+    callback();
+  }
+
+  _flush(callback: Function) {
+    console.log(
+      '[M3u8Rewriter] _flush called, buffer length=',
+      this.buffer.length,
+    );
+    // Process any remaining data in buffer (last line without newline)
+    if (this.buffer.length > 0) {
+      const rewritten = this.rewriteLine(this.buffer);
+      const buf = Buffer.from(rewritten, 'utf8');
+      this.push(buf);
+      console.log(
+        '[M3u8Rewriter] flushed last line:',
+        rewritten.substring(0, 50),
+      );
+    }
+    callback();
+  }
+
+  private rewriteLine(line: string): string {
+    // Skip comments and empty lines
+    if (line.startsWith('#') || line.trim().length === 0) {
+      return line;
+    }
+
+    // Rewrite media segment URLs (.ts, .m3u8, .m4s, .mp4, .key)
+    if (line.match(/\.(ts|m3u8|m4s|mp4|key)$/i)) {
+      let fullUrl: string;
+
+      // Already absolute URL → rewrite to proxy URL with correct UA
+      if (line.startsWith('http://') || line.startsWith('https://')) {
+        fullUrl = line + this.queryPart;
+      } else if (line.startsWith('/')) {
+        // Absolute path (starts with /)
+        fullUrl = this.baseOrigin + line + this.queryPart;
+      } else {
+        // Relative path
+        fullUrl = this.basePath + line + this.queryPart;
+      }
+
+      // Encode URL and headers
+      const encoded = encodeURIComponent(fullUrl);
+      let proxyUrl = `http://127.0.0.1:${this.port}/proxy?do=${this.doType}&url=${encoded}`;
+
+      // Add custom headers to URL params (for TS segments that need specific UA)
+      if (this.customHeaders && Object.keys(this.customHeaders).length > 0) {
+        const headerJson = JSON.stringify(this.customHeaders);
+        proxyUrl += `&header=${encodeURIComponent(headerJson)}`;
+      }
+
+      // Debug: log first few rewrites (FULL URL, not truncated)
+      if (this.rewriteCount < 3) {
+        console.log('[M3u8Rewriter] rewriteLine #' + this.rewriteCount + ':');
+        console.log('  original line (full):', line);
+        console.log('  fullUrl:', fullUrl);
+        console.log('  proxyUrl:', proxyUrl);
+        this.rewriteCount++;
+      }
+
+      // Debug: log the first chunk's raw content to see the m3u8 structure
+      if (!this.loggedFirstChunk && line.startsWith('#EXT')) {
+        console.log('[M3u8Rewriter] First EXT line:', line);
+        this.loggedFirstChunk = true;
+      }
+
+      return proxyUrl;
+    }
+
+    return line;
+  }
+}
 
 /**
  * Default upstream Referer/User-Agent per pan site.
@@ -34,8 +225,9 @@ const UPSTREAM_HEADER_DEFAULTS: Record<
 > = {
   quark: {
     referer: 'https://pan.quark.cn/',
+    // Spider's NewQuark.getHeaders() UA. CDN returns 412 with other UAs.
     userAgent:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/3.0.1 Chrome/100.0.4896.160 Electron/18.3.5.12-a038f7b798 Safari/537.36 Channel/pckk_other_ch',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch',
   },
   uc: {
     referer: 'https://drive.uc.cn/',
@@ -194,10 +386,19 @@ export class ProxyServer {
       params[k] = v;
     }
 
-    // Only GET /proxy is implemented (matches the spider's expectations)
+    // Only GET is implemented (matches the spider's expectations)
     if (method !== 'GET') {
       res.writeHead(405, { 'Content-Type': 'text/plain' });
       res.end('Method Not Allowed');
+      return;
+    }
+
+    // Spider probes /platform?type=androidbro during detailContent and
+    // expects exactly "OK" (no JSON, no trailing newline). Returning
+    // anything else causes the spider to treat the local proxy as offline.
+    if (pathname === '/platform') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('OK');
       return;
     }
 
@@ -214,12 +415,47 @@ export class ProxyServer {
       return;
     }
 
+    // quarkDirect/ucDirect/baiduDirect: stream directly from a pan CDN download
+    // URL. Used by resolveQuarkPlayerContent fallback when the spider's pan
+    // resolver can't resolve the share link. The download URL was already
+    // obtained via the pan service's resolveDownloadUrl; we just need to
+    // inject Cookie + Referer + User-Agent and stream the bytes back,
+    // honoring Range requests for video seeking.
+    // (Aliyun's signed download_url works without auth, so it's returned
+    // directly without going through the proxy.)
+    if (
+      params['do'] === 'quarkDirect' ||
+      params['do'] === 'ucDirect' ||
+      params['do'] === 'baiduDirect'
+    ) {
+      const downloadUrl = params['url'];
+      if (!downloadUrl) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Missing url parameter');
+        return;
+      }
+      const panType =
+        params['do'] === 'quarkDirect'
+          ? 'quark'
+          : params['do'] === 'ucDirect'
+            ? 'uc'
+            : 'baidu';
+      void this.streamPanDirect(downloadUrl, req, res, panType);
+      return;
+    }
+
     // Other do= values → forward to spider
     if (!params['do']) {
       res.writeHead(400, { 'Content-Type': 'text/plain' });
       res.end('Missing "do" parameter');
       return;
     }
+
+    // All proxy requests now go through jarLoader.proxyInvoke which will:
+    // 1. Try spider.proxyLocal() if recentSpiderKey is set (for spider-specific logic)
+    // 2. Fallback to Proxy.proxy() static method if spider.proxyLocal fails
+    // This mirrors Android's ApiConfig.proxyLocal() flow and ensures compatibility
+    // with all spider types (encryption/decryption, CDN scheduling, etc.)
 
     // Merge request headers into params (Android: params.putAll(session.getHeaders()))
     // Header keys come lowercased from Node http.
@@ -284,14 +520,19 @@ export class ProxyServer {
       params['user-agent'] = defaults.userAgent;
     }
 
-    // Inject cookie from the in-memory cache (set by syncCookieToJVM).
-    // This bypasses the spider's SharedPreferences read path, which fails
-    // to send __puus to the CDN (causing 412 Precondition Failed).
+    // Inject cookie from the in-memory cache (set by syncCookieToJVM /
+    // setSyncedCookie). This bypasses the spider's SharedPreferences read
+    // path, which fails to send __puus to the CDN (causing 412).
+    let cookie: string | null = null;
     if (site === 'quark') {
-      const cookie = QuarkPanService.getSyncedCookie();
-      if (cookie) {
-        params['cookie'] = cookie;
-      }
+      cookie = QuarkPanService.getSyncedCookie();
+    } else if (site === 'uc') {
+      cookie = UCPanService.getSyncedCookie();
+    } else if (site === 'baidu') {
+      cookie = BaiduPanService.getSyncedCookie();
+    }
+    if (cookie) {
+      params['cookie'] = cookie;
     }
   }
 
@@ -714,6 +955,448 @@ export class ProxyServer {
         }
         return 'application/octet-stream';
     }
+  }
+
+  /**
+   * Stream a pan-CDN download URL directly to the HTTP response.
+   *
+   * Used by the playerContent fallback path (do=quarkDirect|ucDirect|baiduDirect).
+   * The download URL was pre-resolved by the pan service's resolveDownloadUrl;
+   * we just inject the upstream headers (Cookie/Referer/UA) the browser can't
+   * send and pipe the bytes through, honoring Range requests for seeking.
+   */
+  private async streamPanDirect(
+    downloadUrl: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    panType: 'quark' | 'uc' | 'baidu',
+  ): Promise<void> {
+    let cookie: string | null = null;
+    let referer = '';
+    let userAgent = '';
+    if (panType === 'quark') {
+      cookie = QuarkPanService.getSyncedCookie();
+      referer = 'https://pan.quark.cn/';
+      // Spider's NewQuark.getHeaders() uses the quark-cloud-drive desktop UA.
+      // The video CDN rejects other UAs with 412 Precondition Failed.
+      userAgent = QuarkPanService.getQuarkDesktopUA();
+    } else if (panType === 'uc') {
+      cookie = UCPanService.getSyncedCookie();
+      referer = 'https://drive.uc.cn/';
+      userAgent =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+    } else {
+      cookie = BaiduPanService.getSyncedCookie();
+      referer = 'https://pan.baidu.com/';
+      userAgent =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+    }
+    if (!cookie) {
+      console.warn(
+        '[ProxyServer] streamPanDirect:',
+        panType,
+        'cookie not synced',
+      );
+      if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'text/plain' });
+        res.end(`${panType} cookie not synced`);
+      }
+      return;
+    }
+
+    const upstreamHeaders: Record<string, string> = {
+      Cookie: cookie,
+      'User-Agent': userAgent,
+      Referer: referer,
+      Accept: '*/*',
+      'Accept-Encoding': 'identity',
+    };
+    if (req.headers['range']) {
+      upstreamHeaders['Range'] = String(req.headers['range']);
+    }
+
+    console.log(
+      '[ProxyServer] streamPanDirect:',
+      panType,
+      'url=',
+      downloadUrl,
+      'cookieLen=',
+      cookie.length,
+      'hasRange=',
+      !!req.headers['range'],
+      'cookiePreview=',
+      cookie.substring(0, 80) + '...',
+      'hasPuus=',
+      cookie.includes('__puus'),
+      'ua=',
+      userAgent.substring(0, 60),
+    );
+    debugLog(
+      `streamPanDirect START panType=${panType} url=${downloadUrl} cookieLen=${cookie.length} hasRange=${!!req.headers['range']} hasPuus=${cookie.includes('__puus')} ua=${userAgent}`,
+    );
+    debugLog(`streamPanDirect cookie=${cookie}`);
+    debugLog(
+      `streamPanDirect REQ_HEADERS=${JSON.stringify({ ...upstreamHeaders, Cookie: `<${cookie.length} bytes>` })} clientHeaders=${JSON.stringify(req.headers)}`,
+    );
+
+    let clientGone = false;
+    req.on('close', () => {
+      clientGone = true;
+    });
+    req.on('error', () => {
+      clientGone = true;
+    });
+
+    try {
+      const parsedUrl = new URL(downloadUrl);
+      const isHttps = parsedUrl.protocol === 'https:';
+      const lib = isHttps ? https : http;
+      const upstreamReq = lib.request(
+        downloadUrl,
+        {
+          method: 'GET',
+          headers: upstreamHeaders,
+          agent: isHttps ? httpsAgent : httpAgent,
+        },
+        (upstreamRes) => {
+          if (clientGone) {
+            try {
+              upstreamRes.destroy();
+            } catch {}
+            return;
+          }
+          const status = upstreamRes.statusCode || 200;
+          console.log(
+            '[ProxyServer] streamPanDirect: upstream responded status=',
+            status,
+            'content-type=',
+            upstreamRes.headers['content-type'],
+            'content-length=',
+            upstreamRes.headers['content-length'],
+            'headers=',
+            JSON.stringify(upstreamRes.headers).substring(0, 500),
+            panType,
+          );
+          debugLog(
+            `streamPanDirect UPSTREAM status=${status} content-type=${upstreamRes.headers['content-type']} content-length=${upstreamRes.headers['content-length']} respHeaders=${JSON.stringify(upstreamRes.headers)}`,
+          );
+          // For non-2xx responses, capture the body to see what the CDN
+          // is complaining about (Quark returns a small HTML error page
+          // for 412/403). Without this we only see the status code.
+          if (status >= 400) {
+            const bodyChunks: Buffer[] = [];
+            upstreamRes.on('data', (chunk: Buffer) => {
+              bodyChunks.push(chunk);
+            });
+            upstreamRes.on('end', () => {
+              const body = Buffer.concat(bodyChunks).toString('utf8');
+              console.warn(
+                '[ProxyServer] streamPanDirect: upstream error body (len=' +
+                  body.length +
+                  '):',
+                panType,
+                body.substring(0, 1000),
+              );
+              debugLog(
+                `streamPanDirect ERROR_BODY len=${body.length} body=${body.substring(0, 2000)}`,
+              );
+              if (!res.headersSent) {
+                res.writeHead(status, {
+                  'Content-Type':
+                    upstreamRes.headers['content-type'] || 'text/plain',
+                });
+                res.end(body);
+              }
+            });
+            upstreamRes.on('error', () => {
+              if (!res.headersSent) {
+                try {
+                  res.end();
+                } catch {}
+              }
+            });
+            return;
+          }
+          const respHeaders: Record<string, string> = {
+            'Content-Type': upstreamRes.headers['content-type'] || 'video/mp4',
+            'Accept-Ranges': 'bytes',
+          };
+          if (upstreamRes.headers['content-length']) {
+            respHeaders['Content-Length'] = String(
+              upstreamRes.headers['content-length'],
+            );
+          }
+          if (upstreamRes.headers['content-range']) {
+            respHeaders['Content-Range'] = String(
+              upstreamRes.headers['content-range'],
+            );
+          }
+          // 206 (Partial Content) for Range requests; 200 otherwise.
+          // Browsers require 206 + Content-Range to seek.
+          res.writeHead(status, respHeaders);
+          upstreamRes.on('error', () => {
+            try {
+              res.end();
+            } catch {}
+          });
+          upstreamRes.pipe(res);
+        },
+      );
+      upstreamReq.on('error', (err) => {
+        console.error(
+          '[ProxyServer] streamPanDirect: upstream error:',
+          err.message,
+        );
+        if (!res.headersSent && !clientGone) {
+          res.writeHead(502, { 'Content-Type': 'text/plain' });
+          res.end('Upstream error: ' + err.message);
+        } else {
+          try {
+            res.end();
+          } catch {}
+        }
+      });
+      upstreamReq.end();
+    } catch (e: any) {
+      console.error('[ProxyServer] streamPanDirect: setup error:', e.message);
+      if (!res.headersSent && !clientGone) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Proxy error: ' + e.message);
+      }
+    }
+  }
+
+  /**
+   * Directly proxy unknown do= values (like hxq) that spider's Proxy.proxy()
+   * can't handle. Streams the URL content with custom headers (if provided).
+   * Used when Init.proxyInvoke is missing from the JAR.
+   */
+  private async streamUnknownProxy(
+    upstreamUrl: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    customHeaders: Record<string, string>,
+    doType: string,
+  ): Promise<void> {
+    const decodedUrl = decodeURIComponent(upstreamUrl);
+    console.log(
+      '[ProxyServer] streamUnknownProxy: do=',
+      doType,
+      'decodedUrl=',
+      decodedUrl.substring(0, 100) + '...',
+    );
+
+    let clientGone = false;
+    req.on('close', () => {
+      clientGone = true;
+      console.log(
+        '[ProxyServer] streamUnknownProxy: client closed connection early for do=',
+        doType,
+      );
+    });
+    req.on('error', () => {
+      clientGone = true;
+      console.log(
+        '[ProxyServer] streamUnknownProxy: client connection error for do=',
+        doType,
+      );
+    });
+
+    const u = new URL(decodedUrl);
+    const isHttps = u.protocol === 'https:';
+    const httpModule = isHttps ? https : http;
+
+    const headers: Record<string, string> = {
+      'User-Agent':
+        customHeaders['User-Agent'] ||
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      Accept: '*/*',
+      'Accept-Encoding': 'identity',
+      Connection: 'keep-alive',
+    };
+    // Add custom headers from spider (like Referer)
+    for (const [k, v] of Object.entries(customHeaders)) {
+      if (k.toLowerCase() !== 'user-agent') {
+        headers[k] = v;
+      }
+    }
+    // Add Referer if not present - critical for 51touxiang.com CDN
+    // Android native method may add Referer; use origin as fallback
+    if (!headers['Referer'] && !headers['referer']) {
+      headers['Referer'] = u.origin + '/';
+    }
+    // For m3u8 files, do NOT pass Range header (m3u8 must be fetched completely)
+    // Only add Range for non-m3u8 content (like TS segments)
+    const urlLower = decodedUrl.toLowerCase();
+    const isM3u8Request =
+      urlLower.endsWith('.m3u8') || urlLower.includes('.m3u8?');
+    if (!isM3u8Request) {
+      const rangeHeader = req.headers['range'];
+      if (rangeHeader) {
+        headers['Range'] = rangeHeader as string;
+      }
+    }
+
+    console.log(
+      '[ProxyServer] streamUnknownProxy: requesting with headers=',
+      JSON.stringify(headers),
+      'isM3u8=',
+      isM3u8Request,
+    );
+
+    const upstreamReq = httpModule.request(
+      {
+        hostname: u.hostname,
+        port: u.port || (isHttps ? 443 : 80),
+        path: u.pathname + u.search,
+        method: 'GET',
+        headers,
+      },
+      (upstreamRes) => {
+        if (clientGone) {
+          try {
+            upstreamRes.resume();
+          } catch {}
+          return;
+        }
+        console.log(
+          '[ProxyServer] streamUnknownProxy: upstream status=',
+          upstreamRes.statusCode,
+          'content-type=',
+          upstreamRes.headers['content-type'],
+        );
+
+        // For m3u8 content, rewrite relative paths to absolute URLs
+        const contentType = upstreamRes.headers['content-type'] || '';
+        const isM3u8 =
+          contentType.includes('mpegurl') ||
+          contentType.includes('m3u8') ||
+          decodedUrl.endsWith('.m3u8');
+
+        // Handle upstream error status codes first
+        if (upstreamRes.statusCode && upstreamRes.statusCode >= 400) {
+          console.error(
+            '[ProxyServer] streamUnknownProxy: upstream error status=',
+            upstreamRes.statusCode,
+            'url=',
+            decodedUrl.substring(0, 100),
+          );
+          // Forward the error to the player
+          res.writeHead(upstreamRes.statusCode, {
+            'Content-Type': upstreamRes.headers['content-type'] || 'text/plain',
+            'Access-Control-Allow-Origin': '*',
+          });
+          upstreamRes.pipe(res);
+          return;
+        }
+
+        if (isM3u8 && upstreamRes.statusCode === 200) {
+          // Send response headers immediately (before reading full content)
+          // to reduce latency and prevent player timeout
+          res.writeHead(200, {
+            'Content-Type': 'application/vnd.apple.mpegurl',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'no-cache',
+          });
+          console.log(
+            '[ProxyServer] streamUnknownProxy: headers sent for m3u8, res.headersSent=',
+            res.headersSent,
+          );
+
+          // Use Transform Stream to rewrite m3u8 line by line while streaming
+          // This mirrors Android's chunked response behavior
+          console.log(
+            '[ProxyServer] streamUnknownProxy: creating M3u8Rewriter for streaming rewrite, do=',
+            doType,
+            'port=',
+            this.port,
+            'customHeaders=',
+            JSON.stringify(customHeaders),
+          );
+
+          const m3u8Rewriter = new M3u8Rewriter(
+            decodedUrl,
+            this.port,
+            doType,
+            customHeaders,
+          );
+
+          // Pipeline: upstreamRes → M3u8Rewriter → res
+          // (reads chunks, rewrites line by line, pushes immediately)
+          console.log('[ProxyServer] streamUnknownProxy: starting pipe chain');
+          upstreamRes
+            .pipe(m3u8Rewriter)
+            .on('error', (err: Error) => {
+              console.error(
+                '[ProxyServer] streamUnknownProxy: m3u8 rewriter error:',
+                err.message,
+              );
+            })
+            .pipe(res)
+            .on('error', (err: Error) => {
+              console.error(
+                '[ProxyServer] streamUnknownProxy: response stream error:',
+                err.message,
+              );
+            })
+            .on('finish', () => {
+              console.log(
+                '[ProxyServer] streamUnknownProxy: pipe chain finished for do=',
+                doType,
+              );
+            });
+        } else {
+          // Non-m3u8 content (like TS segments) - pipe directly
+          const statusCode = upstreamRes.statusCode === 206 ? 206 : 200;
+          const responseHeaders: http.OutgoingHttpHeaders = {
+            'Content-Type':
+              upstreamRes.headers['content-type'] || 'application/octet-stream',
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+          };
+          if (upstreamRes.headers['content-length']) {
+            responseHeaders['Content-Length'] =
+              upstreamRes.headers['content-length'];
+          }
+          if (upstreamRes.headers['content-range']) {
+            responseHeaders['Content-Range'] =
+              upstreamRes.headers['content-range'];
+          }
+          console.log(
+            '[ProxyServer] streamUnknownProxy: TS segment headers sent, statusCode=',
+            statusCode,
+            'content-length=',
+            upstreamRes.headers['content-length'],
+            'content-type=',
+            upstreamRes.headers['content-type'],
+          );
+          res.writeHead(statusCode, responseHeaders);
+          upstreamRes.pipe(res).on('finish', () => {
+            console.log(
+              '[ProxyServer] streamUnknownProxy: TS segment pipe finished, do=',
+              doType,
+            );
+          });
+        }
+      },
+    );
+
+    upstreamReq.on('error', (err) => {
+      console.error(
+        '[ProxyServer] streamUnknownProxy: upstream error:',
+        err.message,
+      );
+      if (!res.headersSent && !clientGone) {
+        res.writeHead(502, { 'Content-Type': 'text/plain' });
+        res.end('Upstream error: ' + err.message);
+      } else {
+        try {
+          res.end();
+        } catch {}
+      }
+    });
+
+    upstreamReq.end();
   }
 }
 

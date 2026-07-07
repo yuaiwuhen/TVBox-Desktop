@@ -2,6 +2,9 @@ import axios from 'axios';
 import { ipcMain } from 'electron';
 import QRCode from 'qrcode';
 import { QuarkPanService } from './QuarkPanService';
+import { UCPanService } from './UCPanService';
+import { AliyunPanService } from './AliyunPanService';
+import { BaiduPanService } from './BaiduPanService';
 
 export type PanType = 'quark' | 'uc' | 'aliyun' | 'baidu' | 'bili';
 
@@ -100,27 +103,76 @@ export class PanLoginService {
 
     ipcMain.handle('pan:logout', async (_event, panType: PanType) => {
       log(panType, 'logout');
+      try {
+        switch (panType) {
+          case 'quark':
+            QuarkPanService.clearLoginState();
+            break;
+          case 'uc':
+            UCPanService.setSyncedCookie(null);
+            break;
+          case 'aliyun':
+            AliyunPanService.setLoginInfo({
+              refreshToken: '',
+              accessToken: '',
+            });
+            break;
+          case 'baidu':
+            BaiduPanService.setSyncedCookie(null);
+            break;
+          case 'bili':
+            // Bili has no persisted login state in this service
+            break;
+        }
+      } catch (e: any) {
+        log(panType, 'logout error:', e.message || e);
+      }
       return { success: true };
     });
 
     // 新增：同步 localStorage 中保存的所有网盘 cookie 到 JVM
+    // 接受完整 loginInfo 对象（不只是 cookie 字符串），因为阿里云盘需要 refreshToken/accessToken
     ipcMain.handle(
       'pan:syncAllCookies',
-      async (_event, cookiesData: Record<string, string>) => {
+      async (_event, loginInfoData: Record<string, any>) => {
         console.log(
-          '[PanLoginService] syncAllCookies called with data:',
-          Object.keys(cookiesData),
+          '[PanLoginService] syncAllCookies called with pans:',
+          Object.keys(loginInfoData),
         );
         try {
-          for (const [panType, cookie] of Object.entries(cookiesData)) {
+          for (const [panType, info] of Object.entries(loginInfoData)) {
+            const cookie: string = info?.cookie || '';
             if (panType === 'quark' && cookie) {
               console.log(
                 '[PanLoginService] Syncing quark cookie to JVM, length:',
                 cookie.length,
               );
               await QuarkPanService.syncCookieToJVM(cookie);
+            } else if (panType === 'uc' && cookie) {
+              console.log(
+                '[PanLoginService] Syncing uc cookie, length:',
+                cookie.length,
+              );
+              UCPanService.setSyncedCookie(cookie);
+            } else if (panType === 'aliyun') {
+              const refreshToken: string = info?.refreshToken || '';
+              const accessToken: string = info?.accessToken || '';
+              if (refreshToken || accessToken) {
+                console.log(
+                  '[PanLoginService] Syncing aliyun tokens: refreshToken len=',
+                  refreshToken.length,
+                  'accessToken len=',
+                  accessToken.length,
+                );
+                AliyunPanService.setLoginInfo({ refreshToken, accessToken });
+              }
+            } else if (panType === 'baidu' && cookie) {
+              console.log(
+                '[PanLoginService] Syncing baidu cookie, length:',
+                cookie.length,
+              );
+              BaiduPanService.setSyncedCookie(cookie);
             }
-            // 其他网盘类型可以类似处理
           }
           return { success: true };
         } catch (e: any) {
@@ -568,6 +620,9 @@ export class PanLoginService {
         'cookie length:',
         cookie.length,
       );
+      // Sync cookie to UCPanService so resolveShareToFiles/resolveDownloadUrl
+      // can use it immediately (without requiring app restart).
+      UCPanService.setSyncedCookie(cookie);
       return { success: true, status: 'confirmed', loginInfo };
     } catch (e: any) {
       log('uc', 'pollQRCode failed:', e.message);
@@ -755,6 +810,9 @@ export class PanLoginService {
         loginTime: Date.now(),
       };
       log('aliyun', 'Login success:', nickname || userId);
+      // Sync tokens to AliyunPanService so resolveShareToFiles/resolveDownloadUrl
+      // can use them immediately (without requiring app restart).
+      AliyunPanService.setLoginInfo({ refreshToken, accessToken });
       return { success: true, status: 'confirmed', loginInfo };
     } catch (e: any) {
       log('aliyun', 'pollQRCode failed:', e.message);
@@ -943,10 +1001,14 @@ export class PanLoginService {
             'Login success:',
             loginInfo.nickname || loginInfo.userId,
           );
+          // Sync cookie to BaiduPanService so resolveShareToFiles/resolveDownloadUrl
+          // can use it immediately (without requiring app restart).
+          BaiduPanService.setSyncedCookie(loginInfo.cookie || '');
           return { success: true, status: 'confirmed', loginInfo };
         }
 
         // Fallback: use v as BDUSS
+        BaiduPanService.setSyncedCookie(`BDUSS=${v}`);
         return {
           success: true,
           status: 'confirmed',

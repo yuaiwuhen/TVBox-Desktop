@@ -22,7 +22,8 @@
     <div v-else-if="store.currentVod" class="flex-1 overflow-auto">
       <!-- Video Player at top (shown when playing) -->
       <div v-if="store.currentPlayUrl" class="w-full px-6 pt-4 player-enter-container">
-        <div class="rounded-xl overflow-hidden detail-player-shadow player-enter-animation" style="aspect-ratio: 16/9; background: black">
+        <div class="rounded-xl overflow-hidden detail-player-shadow player-enter-animation"
+          style="aspect-ratio: 16/9; background: black">
           <VideoPlayer ref="videoPlayerRef" :url="store.currentPlayUrl" :headers="store.currentPlayHeader"
             :title="playerTitle" :has-prev="store.currentPlayIndex > 0"
             :has-next="store.currentPlayIndex < store.currentEpisodes.length - 1"
@@ -99,19 +100,24 @@
                 <el-radio-group v-model="activeEpisodeGroup" size="small">
                   <el-radio-button v-for="(group, gi) in getEpisodeGroups(source.episodes)" :key="gi" :value="gi">{{
                     group.label
-                  }}</el-radio-button>
+                    }}</el-radio-button>
                 </el-radio-group>
               </div>
-              <div class="flex flex-wrap gap-1.5 mt-2">
-                <button v-for="(ep, idx) in getVisibleEpisodes(source.episodes)" :key="ep.name"
-                  class="ep-btn px-4 py-2 rounded text-sm transition-all duration-150 cursor-pointer min-w-[60px] text-center"
-                  :class="isEpisodeActive(source.episodes, idx) ? 'ep-btn-active' : ''"
-                  :disabled="store.playLoading && pendingPlayUrl === ep.url" @click="playEpisode(source.name, ep.url)">
-                  <el-icon v-if="store.playLoading && pendingPlayUrl === ep.url" class="is-loading" :size="12">
-                    <Loading />
-                  </el-icon>
-                  <span v-else>{{ ep.name }}</span>
-                </button>
+              <!-- Episode grid: fixed column width ensures vertical alignment -->
+              <div class="ep-grid mt-2">
+                <el-tooltip v-for="(ep, idx) in getVisibleEpisodes(source.episodes)" :key="ep.name" :content="ep.name"
+                  :disabled="ep.name.length <= 8" placement="top" :show-after="300">
+                  <button
+                    class="ep-btn px-3 py-2 rounded text-sm transition-all duration-150 cursor-pointer text-center"
+                    :class="isEpisodeActive(source.episodes, idx) ? 'ep-btn-active' : ''"
+                    :disabled="store.playLoading && pendingPlayUrl === ep.url"
+                    @click="playEpisode(source.name, ep.url)">
+                    <el-icon v-if="store.playLoading && pendingPlayUrl === ep.url" class="is-loading" :size="12">
+                      <Loading />
+                    </el-icon>
+                    <span v-else class="ep-name">{{ ep.name }}</span>
+                  </button>
+                </el-tooltip>
               </div>
             </el-tab-pane>
           </el-tabs>
@@ -257,19 +263,32 @@ function stopLoginPolling() {
 }
 
 async function playEpisode(flag: string, url: string) {
+  console.log('[Detail] playEpisode ENTER:', {
+    flag,
+    urlPreview: url.substring(0, 80),
+    isPan: isPanSource(flag),
+    loginState: panLoginStates[flag],
+    allLoginStates: { ...panLoginStates },
+  })
   // 直接从 panLoginStates 读取状态
   if (isPanSource(flag) && !panLoginStates[flag]) {
+    console.log('[Detail] playEpisode: not logged in, showing login dialog')
     pendingPlayAfterLogin.value = { flag, url }
     showPanLogin.value = true
     return
   }
+  console.log('[Detail] playEpisode: logged in, calling loadPlay')
   pendingPlayUrl.value = url
   const currentSource = playSources.value.find(s => s.name === flag)
   const episodes = currentSource?.episodes || []
   const epIndex = episodes.findIndex(ep => ep.url === url)
   try {
     await store.loadPlay(flag, url, epIndex >= 0 ? epIndex : 0, episodes)
-  } catch { ElMessage.error('播放失败') }
+    console.log('[Detail] playEpisode: loadPlay completed, currentPlayUrl=', store.currentPlayUrl?.substring(0, 80))
+  } catch (e) {
+    console.error('[Detail] playEpisode: loadPlay failed:', e)
+    ElMessage.error('播放失败')
+  }
   finally { pendingPlayUrl.value = '' }
 }
 
@@ -285,18 +304,42 @@ function onPanLoginSuccess() {
 
 const playSources = computed(() => {
   const vod = store.currentVod
-  if (!vod?.vod_play_from || !vod?.vod_play_url) return []
+  if (!vod?.vod_play_from || !vod?.vod_play_url) {
+    console.log('[Detail] playSources empty:', {
+      hasFrom: !!vod?.vod_play_from,
+      hasUrl: !!vod?.vod_play_url,
+      from: vod?.vod_play_from,
+      url: vod?.vod_play_url,
+    })
+    return []
+  }
   const sources = vod.vod_play_from.split('$$$')
   const urls = vod.vod_play_url.split('$$$')
-  return sources.map((name, index) => {
+  const result = sources.map((name, index) => {
     const urlGroup = urls[index] || ''
-    let episodes = urlGroup.split('#').map(ep => {
+    const rawEps = urlGroup.split('#')
+    let episodes = rawEps.map((ep, idx) => {
       const parts = ep.split('$')
-      return { name: parts[0] || '正片', url: parts[1] || '' }
+      // Match Android SourceViewModel.java:962-969 behavior:
+      // - If segment has '$', split into name$url
+      // - If no '$', treat whole segment as URL and use numeric index as name
+      if (parts.length >= 2) {
+        return { name: parts[0] || '正片', url: parts[1] || '' }
+      }
+      return { name: String(idx + 1), url: parts[0] || '' }
     }).filter(ep => ep.url)
     if (sortOrder.value === 'desc') episodes = [...episodes].reverse()
     return { name, episodes }
   })
+  console.log('[Detail] playSources:', {
+    sourcesCount: sources.length,
+    urlGroupCount: urls.length,
+    sources,
+    urlGroupLengths: urls.map(u => u.length),
+    firstUrlGroupPreview: urls[0]?.substring(0, 200),
+    result: result.map(r => ({ name: r.name, epCount: r.episodes.length, firstEp: r.episodes[0] })),
+  })
+  return result
 })
 
 // Currently playing episode name (e.g. "第01集"), empty when nothing is playing
@@ -482,11 +525,38 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
   backdrop-filter: blur(4px);
 }
 
+/* Episode grid: fixed column width for vertical alignment */
+.ep-grid {
+  display: grid;
+  /* Fixed 200px columns for alignment */
+  grid-template-columns: repeat(auto-fill, 200px);
+  gap: 6px;
+  /* Distribute columns evenly when there's empty space on the right */
+  justify-content: space-evenly;
+}
+
 /* Episode buttons */
 .ep-btn {
   background: var(--color-bg-elevated);
   color: var(--color-text-secondary);
   border: 1px solid transparent;
+  /* Fixed dimensions for alignment */
+  width: 200px;
+  height: 36px;
+  /* Prevent text overflow */
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  /* justify-content: center; */
+}
+
+/* Episode name: truncate long names */
+.ep-name {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
 }
 
 .ep-btn:hover:not(:disabled) {
@@ -522,10 +592,12 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
     max-height: 0;
     transform: scaleY(0.3);
   }
+
   50% {
     opacity: 0.8;
     transform: scaleY(1.02);
   }
+
   100% {
     opacity: 1;
     max-height: 100vh;

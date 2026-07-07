@@ -231,12 +231,15 @@ export class PanLogin {
   }
 
   /**
-   * Sync all saved pan cookies from localStorage to the JVM SharedPreferences.
+   * Sync all saved pan login info from localStorage to the main process.
    *
-   * The JAR spider reads cookies from SharedPreferences (e.g. `mi.quark` for
-   * Quark). On app restart, the JVM is fresh and has no cookies — the user
-   * would have to log in again to play any pan video. This method is called
-   * on app startup to re-sync all saved login info to the JVM, so previously
+   * Different pans need different auth:
+   *   - Quark/UC/Baidu: cookie string (Cookie header value)
+   *   - Aliyun: refreshToken + accessToken (Bearer auth)
+   *
+   * On app restart, the main process is fresh and has no cached auth — the
+   * user would have to log in again to play any pan video. This method is
+   * called on app startup to re-sync all saved login info, so previously
    * logged-in pans continue to work after restart.
    */
   static async syncAllToJVM(): Promise<{
@@ -250,24 +253,26 @@ export class PanLogin {
       return { success: false, synced: [], error: 'IPC not available' };
     }
 
-    const cookiesData: Record<string, string> = {};
+    // Send full loginInfo objects keyed by panType. The main process extracts
+    // the fields each pan service needs.
+    const loginInfoData: Record<string, PanLoginInfo> = {};
     const synced: PanType[] = [];
     for (const panType of Object.keys(STORAGE_KEYS) as PanType[]) {
       const info = this.getLoginInfo(panType);
-      if (info?.cookie) {
-        cookiesData[panType] = info.cookie;
+      if (info && (info.cookie || info.refreshToken || info.accessToken)) {
+        loginInfoData[panType] = info;
         synced.push(panType);
       }
     }
 
     if (synced.length === 0) {
-      console.log('[PanLogin] syncAllToJVM: no saved cookies to sync');
+      console.log('[PanLogin] syncAllToJVM: no saved login info to sync');
       return { success: true, synced: [] };
     }
 
     console.log('[PanLogin] syncAllToJVM: syncing pans:', synced);
     try {
-      const result = await ipc.invoke('pan:syncAllCookies', cookiesData);
+      const result = await ipc.invoke('pan:syncAllCookies', loginInfoData);
       console.log('[PanLogin] syncAllToJVM result:', result);
       return {
         success: result?.success !== false,

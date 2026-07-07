@@ -158,12 +158,25 @@ export class JarSpider implements ISpider {
    * Call spider method via IPC
    */
   private async callMethod(method: string, args: any[]): Promise<string> {
+    if (method === 'playerContent') {
+      console.log('[JarSpider] callMethod playerContent ENTER', {
+        initialized: this.initialized,
+        key: this.key,
+        argsPreview: args.map((a) =>
+          typeof a === 'string' ? a.substring(0, 80) : typeof a,
+        ),
+      });
+    }
     if (!this.initialized) {
+      console.warn(
+        `[JarSpider] callMethod ${method}: not initialized, returning {}`,
+      );
       return '{}';
     }
 
     const ipc = getIPC();
     if (!ipc) {
+      console.warn(`[JarSpider] callMethod ${method}: no IPC, returning {}`);
       return '{}';
     }
 
@@ -188,6 +201,10 @@ export class JarSpider implements ISpider {
             }
           } catch {}
         }
+        console.log(
+          '[JarSpider] playerContent extraCookies keys:',
+          Object.keys(extraCookies),
+        );
       }
 
       const timeoutPromise = new Promise<string>((_, reject) => {
@@ -199,6 +216,9 @@ export class JarSpider implements ISpider {
         }, 30000);
       });
 
+      if (method === 'playerContent') {
+        console.log('[JarSpider] invoking jar:callMethod for playerContent...');
+      }
       const resultPromise = ipc.invoke(
         'jar:callMethod',
         this.key,
@@ -209,10 +229,19 @@ export class JarSpider implements ISpider {
 
       const result = await Promise.race([resultPromise, timeoutPromise]);
       const resultStr = result || '{}';
+      if (method === 'playerContent') {
+        console.log('[JarSpider] playerContent result:', {
+          resultLength: resultStr.length,
+          resultPreview: resultStr.substring(0, 200),
+          isEmpty: resultStr === '{}',
+        });
+      }
       return resultStr;
     } catch (e: any) {
       if (e.name !== 'AbortError') {
         console.warn(`[JarSpider] callMethod ${method} failed:`, e.message);
+      } else {
+        console.warn(`[JarSpider] callMethod ${method} aborted`);
       }
       return '{}';
     }

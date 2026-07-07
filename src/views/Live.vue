@@ -31,7 +31,8 @@
     <!-- No data state -->
     <div v-else-if="!groups.length" class="flex-1 flex flex-col items-center justify-center" style="color: var(--color-text-tertiary)">
       <el-icon class="text-5xl mb-4"><VideoPlay /></el-icon>
-      <p>请输入直播源地址或前往设置配置直播源</p>
+      <p v-if="loadError" class="text-red-400 mb-2">加载失败：{{ loadError }}</p>
+      <p v-else>请输入直播源地址或前往设置配置直播源</p>
     </div>
 
     <!-- Main content: sidebar + channel list + player -->
@@ -226,6 +227,7 @@ const currentChannel = ref<LiveChannelItem | null>(null)
 const currentSourceIndex = ref(0)
 const currentLiveUrl = ref('')
 const loading = ref(false)
+const loadError = ref('')
 const showUrlInput = ref(false)
 const liveUrlInput = ref('')
 const showEpg = ref(false)
@@ -382,7 +384,18 @@ onMounted(async () => {
   const lastChannel = localStorage.getItem('tvbox_live_last_channel')
   const lastGroup = localStorage.getItem('tvbox_live_last_group')
 
-  if (store.liveGroups && store.liveGroups.length > 0) {
+  // store.liveGroups may only contain a placeholder group whose groupName is
+  // a proxy URL and channels is empty (ConfigParser pushes such a placeholder
+  // when the config has a live URL). In that case we must re-parse via
+  // store.liveUrl to actually populate the channel list.
+  const hasRealChannels =
+    !!store.liveGroups && store.liveGroups.some(g => g.channels.length > 0)
+  console.log('[Live] onMounted: liveGroups=', store.liveGroups.length,
+    'hasRealChannels=', hasRealChannels,
+    'liveUrl=', store.liveUrl,
+    'epgUrl=', store.epgUrl)
+
+  if (hasRealChannels) {
     groups.value = store.liveGroups
     if (lastGroup && groups.value.find(g => g.groupName === lastGroup)) {
       activeGroupName.value = lastGroup
@@ -407,28 +420,45 @@ onMounted(async () => {
 
 async function loadLiveSource() {
   let url = liveUrlInput.value || store.liveUrl
-  if (!url) return
+  if (!url) {
+    console.warn('[Live] loadLiveSource: no url provided')
+    loadError.value = '未配置直播源地址'
+    return
+  }
 
   loading.value = true
+  loadError.value = ''
+  console.log('[Live] loadLiveSource: original url=', url)
   try {
     // Handle proxy:// URLs by routing through local proxy server
     if (url.startsWith('proxy://')) {
       const proxyHost = `http://127.0.0.1:9978`
       const ext = btoa(url.replace('proxy://', ''))
       url = `${proxyHost}/proxy?do=live&type=txt&ext=${encodeURIComponent(ext)}`
+      console.log('[Live] loadLiveSource: converted proxy url=', url)
     }
 
     const result = await LiveParser.parse(url)
-    groups.value = result
-    if (result.length > 0) {
-      activeGroupName.value = result[0].groupName
+    const totalChannels = result.reduce((s, g) => s + g.channels.length, 0)
+    console.log('[Live] loadLiveSource: parsed groups=', result.length,
+      'total channels=', totalChannels,
+      'first group=', result[0]?.groupName, 'channels=', result[0]?.channels.length)
+    if (result.length === 0 || totalChannels === 0) {
+      loadError.value = '无法解析直播源（URL 不可达或格式错误）'
+      groups.value = []
+    } else {
+      groups.value = result
+      if (result.length > 0) {
+        activeGroupName.value = result[0].groupName
+      }
+      // Save URL to store
+      if (liveUrlInput.value) {
+        store.setLiveUrl(liveUrlInput.value)
+      }
     }
-    // Save URL to store
-    if (liveUrlInput.value) {
-      store.setLiveUrl(liveUrlInput.value)
-    }
-  } catch (e) {
-    console.error('Failed to load live source:', e)
+  } catch (e: any) {
+    console.error('[Live] Failed to load live source:', e)
+    loadError.value = e?.message || String(e) || '未知错误'
   } finally {
     loading.value = false
   }

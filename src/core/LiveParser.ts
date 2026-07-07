@@ -166,26 +166,21 @@ export class LiveParser {
    * Parse a live source URL, auto-detecting the format.
    */
   static async parse(url: string): Promise<LiveChannelGroup[]> {
-    try {
-      // Handle proxy:// URLs
-      if (url.startsWith('proxy://')) {
-        url = this.resolveProxyUrl(url);
-      }
-
-      const { data } = await axios.get(url, {
-        responseType: 'text',
-        timeout: 30000,
-      });
-      const text = typeof data === 'string' ? data : String(data);
-
-      if (url.toLowerCase().includes('.m3u')) {
-        return this.parseM3uContent(text);
-      }
-      return this.parseTxtContent(text);
-    } catch (e) {
-      console.error('[LiveParser] Failed to parse live source:', e);
-      return [];
+    // Handle proxy:// URLs
+    if (url.startsWith('proxy://')) {
+      url = this.resolveProxyUrl(url);
     }
+
+    const { data } = await axios.get(url, {
+      responseType: 'text',
+      timeout: 60000,
+    });
+    const text = typeof data === 'string' ? data : String(data);
+
+    if (url.toLowerCase().includes('.m3u')) {
+      return this.parseM3uContent(text);
+    }
+    return this.parseTxtContent(text);
   }
 
   // ── TXT format ─────────────────────────────────────────────────────────

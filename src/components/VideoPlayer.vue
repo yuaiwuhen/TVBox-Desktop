@@ -51,7 +51,8 @@
     <div v-if="showControls && !screenLocked"
       class="absolute inset-0 flex flex-col justify-between pointer-events-none z-30">
       <!-- Top bar -->
-      <div class="flex items-center justify-between px-4 py-2 pointer-events-auto" @click.stop style="background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent)">
+      <div class="flex items-center justify-between px-4 py-2 pointer-events-auto" @click.stop
+        style="background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent)">
         <span class="text-white text-sm truncate max-w-[60%]">{{ title }}</span>
         <div class="flex gap-1">
           <button class="ctrl-btn" :class="{ active: danmuEnabled }" @click="toggleDanmu" title="弹幕">
@@ -106,8 +107,8 @@
         style="background: linear-gradient(to top, rgba(0,0,0,0.8), transparent)">
         <div class="flex items-center gap-3 mb-2">
           <span class="text-white/80 text-xs w-14 text-right">{{ formatTime(currentTime) }}</span>
-          <el-slider v-model="progressPercent" :show-tooltip="false" class="flex-1"
-        @input="onProgressInput" @change="onProgressChange" />
+          <el-slider v-model="progressPercent" :show-tooltip="false" class="flex-1" @input="onProgressInput"
+            @change="onProgressChange" />
           <span class="text-white/80 text-xs w-14">{{ formatTime(duration) }}</span>
         </div>
         <div class="flex items-center justify-between">
@@ -392,6 +393,8 @@ function hideControlsDelayed() {
   }, 5000)
 }
 
+let onFullscreenChange: (() => void) | null = null
+
 function initPlayer(url: string) {
   console.log(
     `%c[VideoPlayer] 🎬 初始化播放器, url=${url.substring(0, 100)}...`,
@@ -560,7 +563,11 @@ function initPlayer(url: string) {
   playerInstance.on('loadstart', () => {
     isBuffering.value = true
   })
-  const onFullscreenChange = () => {
+  if (onFullscreenChange) {
+    document.removeEventListener('fullscreenchange', onFullscreenChange)
+    document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
+  }
+  onFullscreenChange = () => {
     isFullscreen.value = !!(document.fullscreenElement || document.webkitFullscreenElement)
     if (!isFullscreen.value && playerContainer.value) {
       nextTick(() => {
@@ -648,9 +655,9 @@ function toggleFullscreen() {
   if (!playerContainer.value) return
   const container = playerContainer.value
   if (!document.fullscreenElement) {
-    container.requestFullscreen().catch(() => {})
+    container.requestFullscreen().catch(() => { })
   } else {
-    document.exitFullscreen().catch(() => {})
+    document.exitFullscreen().catch(() => { })
   }
 }
 
@@ -674,11 +681,11 @@ function togglePiP() {
 
 function onProgressInput(percent: number) {
   isSeeking.value = true
-  
+
   if (!playerInstance || !duration.value) return
-  
+
   const targetTime = Math.max(0, Math.min(duration.value, (percent / 100) * duration.value))
-  
+
   if (isNaN(targetTime) || !isFinite(targetTime)) {
     console.warn('[VideoPlayer] Invalid seek time:', targetTime)
     isSeeking.value = false
@@ -688,7 +695,7 @@ function onProgressInput(percent: number) {
   if (seekDebounceTimer) {
     clearTimeout(seekDebounceTimer)
   }
-  
+
   seekDebounceTimer = setTimeout(() => {
     console.log('[VideoPlayer] seeking to', targetTime, 's (duration:', duration.value, ')')
     try {
@@ -703,9 +710,9 @@ function onProgressInput(percent: number) {
 
 function onProgressChange(percent: number) {
   if (!playerInstance || !duration.value) return
-  
+
   const targetTime = Math.max(0, Math.min(duration.value, (percent / 100) * duration.value))
-  
+
   if (isNaN(targetTime) || !isFinite(targetTime)) {
     isSeeking.value = false
     return
@@ -718,7 +725,7 @@ function onProgressChange(percent: number) {
 
   try {
     playerInstance.currentTime = targetTime
-    playerInstance.play().catch(() => {})
+    playerInstance.play().catch(() => { })
   } catch {
     isSeeking.value = false
     return
@@ -851,7 +858,7 @@ function onMouseDown(e: MouseEvent) {
   if (target.closest('.el-slider')) {
     return
   }
-  
+
   mouseDownTime = Date.now()
   mouseDownX = e.clientX
   mouseDownY = e.clientY
@@ -868,10 +875,10 @@ function onMouseDown(e: MouseEvent) {
 
 function onMouseUp(e: MouseEvent) {
   const target = e.target as HTMLElement
-  
-  if (target.closest('.ctrl-btn') || target.closest('.el-slider') || 
-      target.closest('.el-dropdown') || target.closest('.el-dropdown-menu') ||
-      target.closest('.el-switch')) {
+
+  if (target.closest('.ctrl-btn') || target.closest('.el-slider') ||
+    target.closest('.el-dropdown') || target.closest('.el-dropdown-menu') ||
+    target.closest('.el-switch')) {
     if (longPressTimer) {
       clearTimeout(longPressTimer)
       longPressTimer = null
@@ -882,7 +889,7 @@ function onMouseUp(e: MouseEvent) {
     }
     return
   }
-  
+
   if (longPressTimer) {
     clearTimeout(longPressTimer)
     longPressTimer = null
@@ -907,13 +914,13 @@ function onMouseUp(e: MouseEvent) {
 
 function onMouseMove(e: MouseEvent) {
   if (screenLocked.value) return
-  
+
   const target = e.target as HTMLElement
-  if (target.closest('.ctrl-btn') || target.closest('.el-slider') || 
-      target.closest('.el-dropdown') || target.closest('.el-dropdown-menu')) {
+  if (target.closest('.ctrl-btn') || target.closest('.el-slider') ||
+    target.closest('.el-dropdown') || target.closest('.el-dropdown-menu')) {
     return
   }
-  
+
   hideControlsDelayed()
 }
 
@@ -932,7 +939,7 @@ function onKeyDown(e: KeyboardEvent) {
       if (playerInstance) playerInstance.volume = Math.max(0, (playerInstance.volume || 1) - 0.1)
       e.preventDefault(); break
     case 'f':
-      case 'F11': toggleFullscreen(); e.preventDefault(); break
+    case 'F11': toggleFullscreen(); e.preventDefault(); break
     case 'm': toggleMute(); e.preventDefault(); break
     case 'd': toggleDanmu(); e.preventDefault(); break
     case 'c': toggleSubtitle(); e.preventDefault(); break
@@ -1152,8 +1159,11 @@ onBeforeUnmount(() => {
   if (danmuRenderTimer) clearTimeout(danmuRenderTimer)
   if (subtitleUpdateTimer) clearTimeout(subtitleUpdateTimer)
   window.removeEventListener('remote-control', onRemoteControl)
-  document.removeEventListener('fullscreenchange', onFullscreenChange)
-  document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
+  if (onFullscreenChange) {
+    document.removeEventListener('fullscreenchange', onFullscreenChange)
+    document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
+    onFullscreenChange = null
+  }
   if (playerInstance) {
     playerInstance.destroy()
     playerInstance = null

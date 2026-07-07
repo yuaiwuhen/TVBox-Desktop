@@ -164,8 +164,8 @@ const displayClasses = computed(() => {
   return []
 })
 
-watch(displayClasses, (classes) => {
-  if (isMounted.value && classes.length > 0 && store.homeVodList.length === 0 && !store.homeLoading && !activeCategory.value) {
+watch([displayClasses, () => store.homeLoading], ([classes, loading]) => {
+  if (isMounted.value && classes.length > 0 && store.homeVodList.length === 0 && !loading && !activeCategory.value) {
     const firstClass = classes[0]
     console.log('[Home] Auto-selecting first category:', firstClass.type_id)
     activeCategory.value = firstClass.type_id

@@ -142,7 +142,10 @@ export const useAppStore = defineStore('app', () => {
       parses.value = configParser.getParses();
       wallpaper.value = configParser.getWallpaper();
       liveGroups.value = configParser.getLiveChannelGroups();
-      liveUrl.value = localStorage.getItem('tvbox_live_url') || '';
+      liveUrl.value =
+        localStorage.getItem('tvbox_live_url') ||
+        configParser.getConfigLiveUrl() ||
+        '';
       epgUrl.value = localStorage.getItem('tvbox_epg_url') || '';
 
       // Pass the spider base URL to SpiderEngine for resolving api key names
@@ -331,14 +334,23 @@ export const useAppStore = defineStore('app', () => {
           '[Store] loadHome homeVideoContent response:',
           JSON.stringify(
             {
-              rawLength: rawVod.length,
-              rawPreview: rawVod.substring(0, 300),
+              rawLength: rawVod?.length || 0,
+              rawPreview: rawVod ? rawVod.substring(0, 300) : '',
             },
             null,
             2,
           ),
         );
-        const vodResult = JSON.parse(rawVod);
+        let vodResult: any = { list: [] };
+        if (rawVod && rawVod.trim().length > 0) {
+          try {
+            vodResult = JSON.parse(rawVod);
+          } catch (e) {
+            console.warn(
+              '[Store] loadHome: homeVideoContent returned invalid JSON, treating as empty',
+            );
+          }
+        }
         homeVodList.value = vodResult.list || vodResult.vod_list || [];
         console.log(
           '[Store] loadHome homeVideoContent parsed:',
@@ -453,10 +465,22 @@ export const useAppStore = defineStore('app', () => {
       }
 
       const rawResult = await spider.detailContent([vodId]);
+      console.log(
+        '[Store] loadDetail rawResult:',
+        rawResult?.substring?.(0, 1000),
+      );
       const result = JSON.parse(rawResult);
 
       if (result.list && result.list.length > 0) {
         const vod = result.list[0];
+        console.log('[Store] loadDetail vod:', {
+          vod_id: vod.vod_id,
+          vod_name: vod.vod_name,
+          vod_play_from: vod.vod_play_from,
+          vod_play_url: vod.vod_play_url,
+          vod_play_url_length: vod.vod_play_url?.length,
+          vod_keys: Object.keys(vod),
+        });
         currentVod.value = {
           ...vod,
           sourceKey: activeSite.value.key,
@@ -478,6 +502,13 @@ export const useAppStore = defineStore('app', () => {
     episodeIndex: number = 0,
     episodes?: { name: string; url: string }[],
   ) {
+    console.log('[Store] loadPlay ENTER:', {
+      flag,
+      idPreview: id.substring(0, 80),
+      idLength: id.length,
+      episodeIndex,
+      hasActiveSite: !!activeSite.value,
+    });
     if (!activeSite.value) return;
 
     if (playAbortController) {
@@ -490,14 +521,35 @@ export const useAppStore = defineStore('app', () => {
     if (episodes) currentEpisodes.value = episodes;
     try {
       const spider = await spiderEngine.getSpider(activeSite.value);
+      console.log('[Store] loadPlay: got spider:', {
+        spiderType: spider?.constructor?.name,
+        hasPlayerContent: typeof spider?.playerContent,
+      });
       if (!spider) {
         playLoading.value = false;
         return;
       }
 
       const vipFlags = configParser.getVipParseFlags();
+      console.log('[Store] loadPlay: calling playerContent...', {
+        flag,
+        idPreview: id.substring(0, 80),
+        vipFlagsCount: vipFlags?.length || 0,
+      });
       const rawResult = await spider.playerContent(flag, id, vipFlags);
+      console.log('[Store] loadPlay playerContent returned:', {
+        rawLength: rawResult?.length || 0,
+        rawPreview: rawResult ? rawResult.substring(0, 300) : '(empty)',
+        flag,
+        idPreview: id.substring(0, 80),
+      });
       const result: PlayResult = JSON.parse(rawResult);
+      console.log('[Store] loadPlay parsed result:', {
+        hasUrl: !!result.url,
+        hasHeader: !!result.header,
+        parse: result.parse,
+        urlPreview: result.url ? result.url.substring(0, 100) : '(none)',
+      });
 
       if (result.url) {
         if (ParseEngine.needsParse(result)) {

@@ -297,6 +297,7 @@ export class ConfigParser {
   private livePlayHeadersVal: any = null;
   private parseRules: ParseRule[] = [];
   private adDomains: string[] = [];
+  private configLiveUrl = '';
 
   // ========== Config Loading ==========
 
@@ -667,6 +668,7 @@ export class ConfigParser {
 
     // ---- Lives ----
     this.liveChannelGroupList = [];
+    this.configLiveUrl = '';
     const savedLiveUrl = localStorage.getItem('tvbox_live_url') || '';
     const savedEpgUrl = localStorage.getItem('tvbox_epg_url') || '';
     let liveURL_final: string | null = null;
@@ -713,6 +715,7 @@ export class ConfigParser {
             } else {
               extUrl = savedLiveUrl;
             }
+            this.configLiveUrl = extUrl;
             liveURL_final = extUrl;
           }
 
@@ -758,6 +761,7 @@ export class ConfigParser {
               } else {
                 furl = savedLiveUrl;
               }
+              this.configLiveUrl = furl;
               liveURL_final = furl;
             }
           }
@@ -1021,6 +1025,10 @@ export class ConfigParser {
 
   getLiveChannelGroups(): LiveChannelGroup[] {
     return this.liveChannelGroupList;
+  }
+
+  getConfigLiveUrl(): string {
+    return this.configLiveUrl;
   }
 
   getWallpaper(): string {

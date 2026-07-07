@@ -3,6 +3,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { registerJarLoaderIPC } from './JarLoader';
 import { QuarkPanService } from './QuarkPanService';
+import { UCPanService } from './UCPanService';
+import { AliyunPanService } from './AliyunPanService';
+import { BaiduPanService } from './BaiduPanService';
 import { PanLoginService } from './PanLoginService';
 import { proxyServer } from './ProxyServer';
 
@@ -92,6 +95,9 @@ app.whenReady().then(async () => {
   // Register JarLoader IPC handlers
   registerJarLoaderIPC();
   QuarkPanService.init();
+  UCPanService.init();
+  AliyunPanService.init();
+  BaiduPanService.init();
   PanLoginService.init();
 
   // Start local proxy server BEFORE any spider calls.
