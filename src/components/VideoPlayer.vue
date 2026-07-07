@@ -536,7 +536,7 @@ function initPlayer(url: string) {
   // 配置播放器
   const config: any = {
     player_id: containerId,
-    base_url: '/public/h265web/', // WASM文件基础路径
+    base_url: '/h265web/', // WASM文件基础路径（public目录下的文件会被复制到根目录）
     wasm_js_uri: 'h265web_wasm.js',
     wasm_wasm_uri: 'h265web_wasm.wasm',
     ext_src_js_uri: 'extjs.js',
