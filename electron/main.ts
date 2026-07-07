@@ -72,7 +72,9 @@ function createWindow() {
       const { responseHeaders } = details;
       // Add required headers for SharedArrayBuffer support
       responseHeaders['Cross-Origin-Opener-Policy'] = ['same-origin'];
-      responseHeaders['Cross-Origin-Embedder-Policy'] = ['require-corp'];
+      // Use 'credentialless' instead of 'require-corp' to avoid blocking cross-origin resources
+      // 'credentialless' enables SharedArrayBuffer but doesn't require CORP headers on all resources
+      responseHeaders['Cross-Origin-Embedder-Policy'] = ['credentialless'];
       callback({ responseHeaders });
     },
   );

@@ -5,10 +5,11 @@ import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
   // 启用SharedArrayBuffer支持（h265web.js多线程解码需要）
+  // 使用credentialless策略，既启用SharedArrayBuffer又不阻止跨域资源加载
   server: {
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
+      'Cross-Origin-Embedder-Policy': 'credentialless', // 不阻止跨域资源，但启用SharedArrayBuffer
     },
   },
   plugins: [
