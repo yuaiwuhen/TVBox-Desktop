@@ -252,12 +252,13 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import Player from 'xgplayer'
+import 'xgplayer/dist/index.min.css'
+import HlsPlugin from 'xgplayer-hls.js'
+import FlvPlugin from 'xgplayer-flv.js'
 import axios from 'axios'
 import { SubtitleEngine, type SubtitleCue } from '../core/SubtitleEngine'
 import { DanmuEngine, type DanmuItem } from '../core/DanmuEngine'
-
-// h265web.js PRO全局类型声明
-declare const H265webjsPlayer: any
 
 const props = withDefaults(defineProps<{
   url: string
@@ -292,7 +293,7 @@ const emit = defineEmits<{
 
 const playerContainer = ref<HTMLElement | null>(null)
 const danmuContainer = ref<HTMLElement | null>(null)
-let playerInstance: any = null
+let playerInstance: Player | null = null
 
 const isPlaying = ref(false)
 const isFullscreen = ref(false)
@@ -304,7 +305,7 @@ const playbackRate = ref(1)
 const showControls = ref(true)
 let controlsTimer: ReturnType<typeof setTimeout> | null = null
 
-// Seeking state
+// Seeking state — prevents timeupdate from overriding slider during user drag
 const isSeeking = ref(false)
 const isBuffering = ref(false)
 let seekDebounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -323,7 +324,7 @@ const aspectRatios = [
   { label: '裁剪', value: 'crop' },
 ]
 
-// Time step
+// Time step (5-30s configurable)
 const timeStep = ref(Number(localStorage.getItem('tvbox_time_step') || '10'))
 
 // Skip intro/outro
@@ -377,7 +378,7 @@ const danmuOpacity = ref(Number(localStorage.getItem('tvbox_danmu_opacity') || '
 const danmuLines = ref(Number(localStorage.getItem('tvbox_danmu_lines') || '8'))
 const danmuColorMode = ref(localStorage.getItem('tvbox_danmu_color') || 'default')
 
-// Initialize engine settings
+// Initialize engine settings from stored preferences
 danmuEngine.setEnabled(danmuEnabled.value)
 danmuEngine.setMaxOnScreen(danmuMaxOnScreen.value)
 subtitleEngine.setFontSize(subtitleFontSize.value)
@@ -396,239 +397,258 @@ let onFullscreenChange: (() => void) | null = null
 
 function initPlayer(url: string) {
   console.log(
-    `%c[VideoPlayer-h265web] 🎬 初始化播放器, url=${url.substring(0, 100)}...`,
+    `%c[VideoPlayer] 🎬 初始化播放器, url=${url.substring(0, 100)}...`,
     'color: #1890ff; font-weight: bold;',
   );
   if (playerInstance) {
-    playerInstance.release()
+    playerInstance.destroy()
     playerInstance = null
   }
   if (!playerContainer.value || !url) {
-    console.warn('[VideoPlayer-h265web] 容器或URL为空，跳过初始化');
+    console.warn('[VideoPlayer] 容器或URL为空，跳过初始化');
     return
   }
 
-  const containerId = 'h265web-player-' + Date.now()
-  playerContainer.value.id = containerId
+  const isM3u8 = url.includes('.m3u8') || url.includes('format=m3u8')
+  const isFlv = url.includes('.flv') || url.includes('format=flv')
+  const isDash = url.includes('.mpd') || url.includes('format=dash')
+  console.log(`[VideoPlayer] 视频格式: m3u8=${isM3u8}, flv=${isFlv}, dash=${isDash}`);
 
-  console.log(`[VideoPlayer-h265web] 创建h265web.js PRO播放器，容器ID=${containerId}`);
+  const config: any = {
+    el: playerContainer.value,
+    url,
+    width: '100%',
+    height: '100%',
+    autoplay: props.autoplay,
+    videoInit: true,
+    volume: 1,
+    playbackRate: [0.5, 0.75, 1, 1.25, 1.5, 2, 3],
+    pip: true,
+    screenShot: true,
+    keyShortcut: false,
+    cssFullscreen: false,
+    buffer: true,
+    fluid: false,
+    videoAttributes: {
+      preload: 'auto',
+      playsinline: true,
+    },
+    playbackTimeout: 30000,
+    networkTimeout: 30000,
+  }
 
-  // 创建h265web.js PRO播放器实例
-  playerInstance = H265webjsPlayer()
+  if (isM3u8) {
+    config.plugins = [HlsPlugin]
+    config.hlsJsPlugin = { hlsOpts: { debug: false } }
+  } else if (isFlv) {
+    config.plugins = [FlvPlugin]
+  } else if (isDash) {
+    console.warn('[VideoPlayer] DASH format detected. Native playback may not support all DASH features.')
+  }
 
-  // 绑定回调函数
-  playerInstance.on_ready_show_done_callback = function () {
-    console.log('%c[VideoPlayer-h265web] ✅ 播放器准备好，第一帧已显示', 'color: green; font-weight: bold;');
+  if (props.headers && Object.keys(props.headers).length > 0) {
+    config.hlsJsPlugin = config.hlsJsPlugin || {}
+    config.hlsJsPlugin.xhrSetup = (xhr: XMLHttpRequest) => {
+      for (const [k, v] of Object.entries(props.headers!)) {
+        xhr.setRequestHeader(k, v)
+      }
+    }
+  }
+
+  playerInstance = new Player(config)
+
+  playerInstance.on('playing', () => {
+    console.log('%c[VideoPlayer] ✅ 播放成功', 'color: green; font-weight: bold;');
+    isPlaying.value = true
     isBuffering.value = false
     hideControlsDelayed()
-
-    // Resume progress (skip intro if needed)
-    if (props.resumeProgress > 0) {
-      const startPos = Math.max(props.resumeProgress, skipIntro.value)
-      playerInstance.seek(startPos)
-    } else if (skipIntro.value > 0) {
-      playerInstance.seek(skipIntro.value)
-    }
-  }
-
-  playerInstance.video_probe_callback = function (mediaInfo: any) {
-    console.log('[VideoPlayer-h265web] 媒体信息:', mediaInfo);
-    if (mediaInfo && mediaInfo.duration) {
-      duration.value = mediaInfo.duration
-    }
-  }
-
-  playerInstance.on_play_time = function (pts: number) {
-    currentTime.value = pts
-    if (!isSeeking.value && duration.value > 0) {
-      progressPercent.value = (currentTime.value / duration.value) * 100
-    }
-    emit('timeupdate', currentTime.value)
-    emit('progress', currentTime.value, duration.value)
-
-    // Subtitle - debounced
-    if (subtitleEnabled.value && !subtitleUpdateTimer) {
-      subtitleUpdateTimer = setTimeout(() => {
-        currentSubtitle.value = subtitleEngine.getCueAtTime(currentTime.value)
-        subtitleUpdateTimer = null
-      }, 100)
-    }
-
-    // Danmu - debounced
-    if (danmuEnabled.value && !danmuRenderTimer) {
-      danmuRenderTimer = setTimeout(() => {
-        renderDanmu(currentTime.value)
-        danmuRenderTimer = null
-      }, 100)
-    }
-
-    // Auto-skip outro
-    if (skipOutro.value > 0 && duration.value > 0 && props.hasNext &&
-      (currentTime.value + skipOutro.value) >= duration.value) {
-      emit('next')
-      skipOutro.value = 0
-      localStorage.setItem('tvbox_skip_outro', '0')
-    }
-
-    // Show skip intro indicator
-    if (skipIntro.value > 0 && currentTime.value < skipIntro.value && currentTime.value > 2) {
-      skipIndicator.value = '跳过片头'
-    } else if (skipOutro.value > 0 && duration.value > 0 && (currentTime.value + skipOutro.value) >= duration.value) {
-      skipIndicator.value = '跳过片尾'
-    } else {
-      skipIndicator.value = ''
-    }
-  }
-
-  playerInstance.on_play_finished = function () {
-    console.log('[VideoPlayer-h265web] 播放结束');
-    isPlaying.value = false
-    emit('ended')
-  }
-
-  playerInstance.on_seek_start_callback = function (seekTarget: number) {
-    console.log('[VideoPlayer-h265web] 开始跳转到', seekTarget);
+  })
+  playerInstance.on('pause', () => { isPlaying.value = false; showControls.value = true })
+  playerInstance.on('ended', () => { isPlaying.value = false; emit('ended') })
+  playerInstance.on('waiting', () => {
+    isBuffering.value = true
+  })
+  playerInstance.on('stalled', () => {
+    isBuffering.value = true
+  })
+  playerInstance.on('seeking', () => {
     wasPlayingBeforeSeek = isPlaying.value
     isBuffering.value = true
     if (wasPlayingBeforeSeek && playerInstance) {
       playerInstance.pause()
     }
-  }
-
-  playerInstance.on_seek_done_callback = function (seekTarget: number) {
-    console.log('[VideoPlayer-h265web] 跳转完成', seekTarget);
+  })
+  playerInstance.on('seeked', () => {
     isSeeking.value = false
     if (seekSafetyTimer) {
       clearTimeout(seekSafetyTimer)
       seekSafetyTimer = null
     }
     if (wasPlayingBeforeSeek && playerInstance) {
-      playerInstance.play()
-      isBuffering.value = false
+      const tryPlay = () => {
+        try {
+          playerInstance!.play().then(() => {
+            isBuffering.value = false
+          }).catch(() => {
+            setTimeout(tryPlay, 500)
+          })
+        } catch {
+          setTimeout(tryPlay, 500)
+        }
+      }
+      tryPlay()
     } else {
       isBuffering.value = false
     }
-  }
+  })
+  playerInstance.on('canplay', () => {
+    isBuffering.value = false
+  })
+  playerInstance.on('canplaythrough', () => {
+    isBuffering.value = false
+  })
+  playerInstance.on('timeupdate', () => {
+    if (playerInstance) {
+      currentTime.value = playerInstance.currentTime || 0
+      duration.value = playerInstance.duration || 0
+      if (!isSeeking.value && duration.value > 0) {
+        progressPercent.value = (currentTime.value / duration.value) * 100
+      }
+      emit('timeupdate', currentTime.value)
+      emit('progress', currentTime.value, duration.value)
 
-  playerInstance.on_cache_process_callback = function (timestamp: number) {
-    // 缓冲进度更新
-  }
+      // Subtitle - debounced
+      if (subtitleEnabled.value && !subtitleUpdateTimer) {
+        subtitleUpdateTimer = setTimeout(() => {
+          currentSubtitle.value = subtitleEngine.getCueAtTime(currentTime.value)
+          subtitleUpdateTimer = null
+        }, 100)
+      }
+      // Danmu - debounced
+      if (danmuEnabled.value && !danmuRenderTimer) {
+        danmuRenderTimer = setTimeout(() => {
+          renderDanmu(currentTime.value)
+          danmuRenderTimer = null
+        }, 100)
+      }
 
-  playerInstance.on_load_caching_callback = function () {
-    console.log('[VideoPlayer-h265web] 加载缓冲中');
-    isBuffering.value = true
-  }
+      // Auto-skip outro: if within skipOutro seconds of end, auto next
+      if (skipOutro.value > 0 && duration.value > 0 && props.hasNext &&
+        (currentTime.value + skipOutro.value) >= duration.value) {
+        emit('next')
+        skipOutro.value = 0
+        localStorage.setItem('tvbox_skip_outro', '0')
+      }
 
-  // 错误回调（如果有的话）
-  if (playerInstance.on_error_callback) {
-    playerInstance.on_error_callback = function (err: any) {
-      console.error(
-        '%c[VideoPlayer-h265web] ❌ 播放失败!',
-        'color: red; font-weight: bold; font-size: 14px;',
-      );
-      console.error('[VideoPlayer-h265web] 错误详情:', err);
-      isBuffering.value = false
-      isPlaying.value = false
-      emit('error', err)
+      // Show skip intro indicator
+      if (skipIntro.value > 0 && currentTime.value < skipIntro.value && currentTime.value > 2) {
+        skipIndicator.value = '跳过片头'
+      } else if (skipOutro.value > 0 && duration.value > 0 && (currentTime.value + skipOutro.value) >= duration.value) {
+        skipIndicator.value = '跳过片尾'
+      } else {
+        skipIndicator.value = ''
+      }
     }
-  }
-
-  // 配置播放器
-  const config: any = {
-    player_id: containerId,
-    base_url: '/public/h265web/', // WASM文件基础路径
-    wasm_js_uri: 'h265web_wasm.js',
-    wasm_wasm_uri: 'h265web_wasm.wasm',
-    ext_src_js_uri: 'extjs.js',
-    ext_wasm_js_uri: 'extwasm.js',
-    width: '100%',
-    height: '100%',
-    color: '#000000',
-    auto_play: props.autoplay,
-    core: undefined, // 自动选择（优先硬解码）
-    ignore_audio: false,
-  }
-
-  // 如果有自定义headers，可能需要通过其他方式处理（h265web.js可能不支持直接设置headers）
-  // 这里可以考虑通过ProxyServer代理来注入headers
-
-  playerInstance.build(config)
-
-  // 加载媒体
-  console.log('[VideoPlayer-h265web] 加载媒体:', url.substring(0, 100));
-  playerInstance.load_media(url)
-
-  // Fullscreen event listener
+  })
+  playerInstance.on('error', (err: any) => {
+    console.error(
+      '%c[VideoPlayer] ❌ 播放失败!',
+      'color: red; font-weight: bold; font-size: 14px;',
+    );
+    console.error('[VideoPlayer] 错误详情:', err);
+    isBuffering.value = false
+    isPlaying.value = false
+    emit('error', err)
+  })
+  playerInstance.on('loadstart', () => {
+    isBuffering.value = true
+  })
   if (onFullscreenChange) {
     document.removeEventListener('fullscreenchange', onFullscreenChange)
     document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
   }
   onFullscreenChange = () => {
     isFullscreen.value = !!(document.fullscreenElement || document.webkitFullscreenElement)
+    if (!isFullscreen.value && playerContainer.value) {
+      nextTick(() => {
+        const video = playerContainer.value.querySelector('video') as HTMLVideoElement | null
+        if (video) {
+          video.style.width = ''
+          video.style.height = ''
+          video.style.objectFit = 'contain'
+        }
+      })
+    }
   }
   document.addEventListener('fullscreenchange', onFullscreenChange)
   document.addEventListener('webkitfullscreenchange', onFullscreenChange)
 
-  // Net speed tracking
+  // Net speed tracking via performance API
   netSpeedBytes = 0
   netSpeedLastTime = Date.now()
   if (netSpeedInterval) clearInterval(netSpeedInterval)
   netSpeedInterval = setInterval(() => {
     try {
-      const now = new Date()
-      screenDisplayTime.value = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
-      
-      // h265web.js可能没有直接的网速统计，这里可以尝试通过performance API获取
-      const entries = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
-      let bytesInPeriod = 0
-      const nowMs = Date.now()
-      for (const entry of entries) {
-        if (entry.transferSize > 0 && (nowMs - entry.responseEnd) < 2000) {
-          bytesInPeriod += entry.transferSize
+      const video = playerContainer.value?.querySelector('video') as HTMLVideoElement | null
+      if (video) {
+        const entries = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
+        let bytesInPeriod = 0
+        const now = Date.now()
+        for (const entry of entries) {
+          if (entry.transferSize > 0 && (now - entry.responseEnd) < 2000) {
+            bytesInPeriod += entry.transferSize
+          }
+        }
+        netSpeedBytes += bytesInPeriod
+        const elapsed = (now - netSpeedLastTime) / 1000
+        if (elapsed >= 1) {
+          const bps = netSpeedBytes / elapsed
+          const speed = bps > 1048576
+            ? (bps / 1048576).toFixed(1) + ' MB/s'
+            : bps > 1024
+              ? (bps / 1024).toFixed(0) + ' KB/s'
+              : bps.toFixed(0) + ' B/s'
+          emit('netSpeed', speed)
+          netSpeedDisplay.value = speed
+          netSpeedBytes = 0
+          netSpeedLastTime = now
         }
       }
-      netSpeedBytes += bytesInPeriod
-      const elapsed = (nowMs - netSpeedLastTime) / 1000
-      if (elapsed >= 1) {
-        const bps = netSpeedBytes / elapsed
-        const speed = bps > 1048576
-          ? (bps / 1048576).toFixed(1) + ' MB/s'
-          : bps > 1024
-            ? (bps / 1024).toFixed(0) + ' KB/s'
-            : bps.toFixed(0) + ' B/s'
-        emit('netSpeed', speed)
-        netSpeedDisplay.value = speed
-        netSpeedBytes = 0
-        netSpeedLastTime = nowMs
-      }
+      const now = new Date()
+      screenDisplayTime.value = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
     } catch { /* ignore */ }
   }, 1000)
+
+  // Resume progress (skip intro if needed)
+  if (props.resumeProgress > 0) {
+    playerInstance.on('loadeddata', () => {
+      if (playerInstance && props.resumeProgress > 0) {
+        const startPos = Math.max(props.resumeProgress, skipIntro.value)
+        playerInstance.currentTime = startPos
+      }
+    })
+  } else if (skipIntro.value > 0) {
+    playerInstance.on('loadeddata', () => {
+      if (playerInstance && skipIntro.value > 0) {
+        playerInstance.currentTime = skipIntro.value
+      }
+    })
+  }
 }
 
 // --- Controls ---
 function togglePlay() {
-  console.log('[VideoPlayer-h265web] togglePlay clicked, playerInstance=', !!playerInstance, 'isPlaying=', isPlaying.value)
+  console.log('[VideoPlayer] togglePlay clicked, playerInstance=', !!playerInstance, 'isPlaying=', isPlaying.value)
   if (!playerInstance) return
-  if (isPlaying.value) {
-    playerInstance.pause()
-    isPlaying.value = false
-    showControls.value = true
-  } else {
-    playerInstance.play()
-    isPlaying.value = true
-    hideControlsDelayed()
-  }
+  if (isPlaying.value) playerInstance.pause()
+  else playerInstance.play()
 }
 
 function toggleMute() {
-  console.log('[VideoPlayer-h265web] toggleMute clicked')
+  console.log('[VideoPlayer] toggleMute clicked')
   if (!playerInstance) return
   isMuted.value = !isMuted.value
-  if (isMuted.value) {
-    playerInstance.set_mute()
-  } else {
-    playerInstance.set_voice(1) // 取消静音，恢复音量
-  }
+  playerInstance.volume = isMuted.value ? 0 : 1
 }
 
 function toggleFullscreen() {
@@ -636,23 +656,27 @@ function toggleFullscreen() {
   const container = playerContainer.value
   if (!document.fullscreenElement) {
     container.requestFullscreen().catch(() => { })
-    // h265web.js也有fullScreen方法，但可能需要配合容器使用
-    if (playerInstance && playerInstance.fullScreen) {
-      playerInstance.fullScreen()
-    }
   } else {
     document.exitFullscreen().catch(() => { })
-    if (playerInstance && playerInstance.closeFullScreen) {
-      playerInstance.closeFullScreen()
-    }
   }
 }
 
 function togglePiP() {
-  console.log('[VideoPlayer-h265web] togglePiP clicked')
-  // h265web.js渲染到Canvas，不支持标准PiP API
-  // 可以考虑其他方案，如缩小窗口等
-  console.warn('[VideoPlayer-h265web] h265web.js不支持标准画中画模式')
+  console.log('[VideoPlayer] togglePiP clicked, playerInstance=', !!playerInstance)
+  if (!playerInstance) return
+  try {
+    const pipPlugin = (playerInstance as any).pip
+    if (pipPlugin) {
+      pipPlugin.switchPIP()
+    } else if (document.pictureInPictureEnabled) {
+      const video = playerContainer.value?.querySelector('video')
+      if (video && video.requestPictureInPicture) {
+        video.requestPictureInPicture()
+      }
+    }
+  } catch (e) {
+    console.warn('[VideoPlayer] PiP failed:', e)
+  }
 }
 
 function onProgressInput(percent: number) {
@@ -663,7 +687,7 @@ function onProgressInput(percent: number) {
   const targetTime = Math.max(0, Math.min(duration.value, (percent / 100) * duration.value))
 
   if (isNaN(targetTime) || !isFinite(targetTime)) {
-    console.warn('[VideoPlayer-h265web] Invalid seek time:', targetTime)
+    console.warn('[VideoPlayer] Invalid seek time:', targetTime)
     isSeeking.value = false
     return
   }
@@ -673,11 +697,11 @@ function onProgressInput(percent: number) {
   }
 
   seekDebounceTimer = setTimeout(() => {
-    console.log('[VideoPlayer-h265web] seeking to', targetTime, 's (duration:', duration.value, ')')
+    console.log('[VideoPlayer] seeking to', targetTime, 's (duration:', duration.value, ')')
     try {
-      playerInstance.seek(targetTime)
+      playerInstance!.currentTime = targetTime
     } catch (e) {
-      console.warn('[VideoPlayer-h265web] seek failed:', e)
+      console.warn('[VideoPlayer] seek failed:', e)
       isSeeking.value = false
     }
     seekDebounceTimer = null
@@ -700,8 +724,8 @@ function onProgressChange(percent: number) {
   }
 
   try {
-    playerInstance.seek(targetTime)
-    playerInstance.play()
+    playerInstance.currentTime = targetTime
+    playerInstance.play().catch(() => { })
   } catch {
     isSeeking.value = false
     return
@@ -718,21 +742,21 @@ function onProgressChange(percent: number) {
 }
 
 function skipForward() {
-  console.log('[VideoPlayer-h265web] skipForward clicked, timeStep=', timeStep.value)
+  console.log('[VideoPlayer] skipForward clicked, timeStep=', timeStep.value)
   if (!playerInstance) return
-  playerInstance.seek(Math.min(currentTime.value + timeStep.value, duration.value))
+  playerInstance.currentTime = Math.min((playerInstance.currentTime || 0) + timeStep.value, duration.value)
 }
 
 function skipBackward() {
-  console.log('[VideoPlayer-h265web] skipBackward clicked, timeStep=', timeStep.value)
+  console.log('[VideoPlayer] skipBackward clicked, timeStep=', timeStep.value)
   if (!playerInstance) return
-  playerInstance.seek(Math.max(currentTime.value - timeStep.value, 0))
+  playerInstance.currentTime = Math.max((playerInstance.currentTime || 0) - timeStep.value, 0)
 }
 
 function changeSpeed(rate: number) {
   if (!playerInstance) return
   playbackRate.value = rate
-  playerInstance.set_playback_rate(rate)
+  playerInstance.playbackRate = rate
 }
 
 function setTimeStep(step: number) {
@@ -742,16 +766,15 @@ function setTimeStep(step: number) {
 
 function changeAspectRatio(mode: string) {
   aspectRatio.value = mode
-  // h265web.js渲染到Canvas，调整Canvas的样式
-  const canvas = playerContainer.value?.querySelector('canvas') as HTMLCanvasElement | null
-  if (!canvas) return
+  const video = playerContainer.value?.querySelector('video') as HTMLVideoElement | null
+  if (!video) return
   switch (mode) {
-    case '16:9': canvas.style.objectFit = 'contain'; canvas.style.aspectRatio = '16/9'; break
-    case '4:3': canvas.style.objectFit = 'contain'; canvas.style.aspectRatio = '4/3'; break
-    case 'fill': canvas.style.objectFit = 'fill'; canvas.style.aspectRatio = ''; break
-    case 'original': canvas.style.objectFit = 'none'; canvas.style.aspectRatio = ''; break
-    case 'crop': canvas.style.objectFit = 'cover'; canvas.style.aspectRatio = ''; break
-    default: canvas.style.objectFit = 'contain'; canvas.style.aspectRatio = ''
+    case '16:9': video.style.objectFit = 'contain'; video.style.aspectRatio = '16/9'; break
+    case '4:3': video.style.objectFit = 'contain'; video.style.aspectRatio = '4/3'; break
+    case 'fill': video.style.objectFit = 'fill'; video.style.aspectRatio = ''; break
+    case 'original': video.style.objectFit = 'none'; video.style.aspectRatio = ''; break
+    case 'crop': video.style.objectFit = 'cover'; video.style.aspectRatio = ''; break
+    default: video.style.objectFit = 'contain'; video.style.aspectRatio = ''
   }
 }
 
@@ -760,6 +783,7 @@ function toggleSkipIntro() {
   if (skipIntro.value > 0) {
     skipIntro.value = 0
   } else {
+    // Set to current position (skip to here next time)
     skipIntro.value = Math.floor(currentTime.value)
   }
   localStorage.setItem('tvbox_skip_intro', String(skipIntro.value))
@@ -769,6 +793,7 @@ function toggleSkipOutro() {
   if (skipOutro.value > 0) {
     skipOutro.value = 0
   } else {
+    // Set to remaining time as outro
     const remaining = duration.value - currentTime.value
     skipOutro.value = Math.floor(remaining)
   }
@@ -777,13 +802,13 @@ function toggleSkipOutro() {
 
 function skipToIntroEnd() {
   if (playerInstance && skipIntro.value > 0) {
-    playerInstance.seek(skipIntro.value)
+    playerInstance.currentTime = skipIntro.value
   }
 }
 
 function skipToOutroEnd() {
   if (playerInstance && duration.value > 0) {
-    playerInstance.seek(duration.value)
+    playerInstance.currentTime = duration.value
     emit('next')
   }
 }
@@ -808,12 +833,15 @@ function onDoubleClick(e: MouseEvent) {
   const third = rect.width / 3
 
   if (x < third) {
+    // Left third: backward
     skipBackward()
     showClickFeedback(e.offsetX, e.offsetY, '⏪')
   } else if (x > third * 2) {
+    // Right third: forward
     skipForward()
     showClickFeedback(e.offsetX, e.offsetY, '⏩')
   } else {
+    // Center: play/pause
     togglePlay()
     showClickFeedback(e.offsetX, e.offsetY, isPlaying.value ? '⏸' : '▶')
   }
@@ -905,10 +933,10 @@ function onKeyDown(e: KeyboardEvent) {
     case 'ArrowRight': skipForward(); e.preventDefault(); break
     case 'ArrowLeft': skipBackward(); e.preventDefault(); break
     case 'ArrowUp':
-      if (playerInstance) playerInstance.set_voice(Math.min(1, (playerInstance.get_voice?.() || 1) + 0.1))
+      if (playerInstance) playerInstance.volume = Math.min(1, (playerInstance.volume || 1) + 0.1)
       e.preventDefault(); break
     case 'ArrowDown':
-      if (playerInstance) playerInstance.set_voice(Math.max(0, (playerInstance.get_voice?.() || 1) - 0.1))
+      if (playerInstance) playerInstance.volume = Math.max(0, (playerInstance.volume || 1) - 0.1)
       e.preventDefault(); break
     case 'f':
     case 'F11': toggleFullscreen(); e.preventDefault(); break
@@ -934,7 +962,7 @@ async function loadSubtitle(url: string) {
     subtitleEnabled.value = true
     localStorage.setItem('tvbox_subtitle_enabled', 'true')
   } catch (e) {
-    console.warn('[VideoPlayer-h265web] Failed to load subtitle:', e)
+    console.warn('[VideoPlayer] Failed to load subtitle:', e)
   }
 }
 
@@ -959,12 +987,12 @@ async function loadDanmu(url: string) {
     danmuEngine.setEnabled(true)
     localStorage.setItem('tvbox_danmu_enabled', 'true')
   } catch (e) {
-    console.warn('[VideoPlayer-h265web] Failed to load danmu:', e)
+    console.warn('[VideoPlayer] Failed to load danmu:', e)
   }
 }
 
 function toggleDanmu() {
-  console.log('[VideoPlayer-h265web] toggleDanmu clicked, danmuEnabled=', danmuEnabled.value)
+  console.log('[VideoPlayer] toggleDanmu clicked, danmuEnabled=', danmuEnabled.value)
   danmuEnabled.value = !danmuEnabled.value
   danmuEngine.setEnabled(danmuEnabled.value)
   localStorage.setItem('tvbox_danmu_enabled', String(danmuEnabled.value))
@@ -975,7 +1003,7 @@ function toggleDanmu() {
 }
 
 function onSearchSubtitleClick() {
-  console.log('[VideoPlayer-h265web] searchSubtitle clicked')
+  console.log('[VideoPlayer] searchSubtitle clicked')
   emit('searchSubtitle')
 }
 
@@ -1137,7 +1165,7 @@ onBeforeUnmount(() => {
     onFullscreenChange = null
   }
   if (playerInstance) {
-    playerInstance.release()
+    playerInstance.destroy()
     playerInstance = null
   }
 })
@@ -1155,43 +1183,79 @@ defineExpose({
 </script>
 
 <style scoped>
-.video-player-wrapper :deep(canvas) {
+.video-player-wrapper :deep(.xgplayer) {
   background: #000;
+  z-index: 0 !important;
+}
+
+.video-player-wrapper :deep(.xgplayer video) {
   z-index: 0 !important;
   pointer-events: none;
 }
 
+.video-player-wrapper :deep(.xgplayer-controls) {
+  display: none;
+}
+
+/* Control buttons */
 .ctrl-btn {
-  background: transparent;
-  border: none;
-  color: white;
-  padding: 6px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.2s;
-  display: flex;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: background 200ms ease, color 200ms ease;
+  flex-shrink: 0;
 }
 
 .ctrl-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .ctrl-btn.active {
-  background: var(--color-primary);
+  color: var(--color-primary);
 }
 
-.play-btn {
-  padding: 8px;
+.ctrl-btn.active:hover {
+  background: var(--color-primary-soft);
+}
+
+.ctrl-btn.play-btn {
+  width: 44px;
+  height: 44px;
+}
+
+/* Progress slider */
+.el-slider :deep(.el-slider__runway) {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+.el-slider :deep(.el-slider__bar) {
+  background-color: var(--color-primary);
+}
+
+.el-slider :deep(.el-slider__button) {
+  border-color: var(--color-primary);
+  width: 12px;
+  height: 12px;
+}
+
+.el-slider :deep(.el-slider__button-wrapper) {
+  top: -16px;
 }
 
 @keyframes danmu-scroll {
   from {
     transform: translateX(0);
   }
+
   to {
-    transform: translateX(calc(-100% - 100vw));
+    transform: translateX(calc(-100vw - 200px));
   }
 }
 </style>
