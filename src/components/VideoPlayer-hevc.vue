@@ -13,7 +13,7 @@
 
 import { ref, onMounted, onUnmounted, watch, computed } from 'vue';
 import Hls from 'hls.js';
-import initialize from '@hevcjs/core';
+import { HEVCDecoder } from '@hevcjs/core';
 
 // ==================== Props ====================
 const props = defineProps<{
@@ -61,8 +61,7 @@ const subtitleEnabled = ref(false);
 const currentSubtitleIndex = ref(-1);
 
 // ==================== HEVC Decoder ====================
-let hevcDecoder: any = null;
-let hevcModule: any = null;
+let hevcDecoder: HEVCDecoder | null = null;
 let hlsPlayer: Hls | null = null;
 let decoderInitialized = false;
 
@@ -81,8 +80,8 @@ const initPlayer = async () => {
     // 初始化HEVC解码器
     if (!decoderInitialized) {
       console.log('[VideoPlayer-hevc] 初始化HEVC解码器...');
-      hevcModule = await initialize();
-      hevcDecoder = new hevcModule.Decoder();
+      // Use wasmBinaryUrl to load .wasm file directly (public files can't be imported)
+      hevcDecoder = await HEVCDecoder.create({ wasmBinaryUrl: '/wasm/hevc-decode.wasm' });
       decoderInitialized = true;
       console.log('[VideoPlayer-hevc] ✅ HEVC解码器初始化成功');
     }
@@ -151,7 +150,7 @@ const initPlayer = async () => {
 
 // ==================== HEVC解码处理 ====================
 const setupHevcDecoding = async () => {
-  if (!videoElement.value || !hevcModule) return;
+  if (!videoElement.value || !hevcDecoder) return;
 
   try {
     // 检测原生HEVC支持

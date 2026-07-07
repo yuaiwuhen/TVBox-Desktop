@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { registerJarLoaderIPC } from './JarLoader';
@@ -74,6 +74,21 @@ function createWindow() {
     return { action: 'deny' };
   });
 }
+
+// Window control IPC handlers
+ipcMain.handle('window-toggle-maximize', () => {
+  if (win) {
+    if (win.isMaximized()) {
+      win.unmaximize();
+    } else {
+      win.maximize();
+    }
+  }
+});
+
+ipcMain.handle('window-is-maximized', () => {
+  return win ? win.isMaximized() : false;
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

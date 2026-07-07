@@ -432,6 +432,11 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopLoginPolling()
+  // 清除播放状态，避免下一个视频显示错误的"播放到第X集"
+  store.currentPlayUrl = ''
+  store.currentPlayIndex = 0
+  store.currentEpisodes = []
+  store.resumeProgress = 0
 })
 
 async function onPrevEpisode() {

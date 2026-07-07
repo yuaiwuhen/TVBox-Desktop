@@ -81,4 +81,6 @@ export default defineConfig({
       // Ensure Node.js modules resolve correctly in Electron
     },
   },
+  // Removed optimizeDeps.exclude for @hevcjs/core
+  // Vite needs to pre-build this package to resolve exports correctly
 });
