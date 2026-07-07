@@ -17,10 +17,12 @@ import { URL } from 'url';
 import fs from 'fs';
 import path from 'path';
 import { Transform } from 'stream';
+import dns from 'dns';
 import { jarLoader } from './JarLoader';
 import { QuarkPanService } from './QuarkPanService';
 import { UCPanService } from './UCPanService';
 import { BaiduPanService } from './BaiduPanService';
+import { dnsOptimizer } from './DnsOptimizer';
 
 type PortCallback = (port: number) => void;
 
@@ -258,6 +260,7 @@ export class ProxyServer {
   private static readonly START_PORT = 9978;
   private static readonly END_PORT = 9999;
   private contentLengthCache = new Map<string, number>();
+  private dnsOptimized: boolean = false; // DNS优化是否已初始化
 
   /**
    * Set callback fired when the actual listening port is determined.
@@ -283,10 +286,65 @@ export class ProxyServer {
   }
 
   /**
+   * 初始化DNS优化
+   * 启动时自动测速DoH服务器并选择最快的
+   */
+  async initDnsOptimization(): Promise<void> {
+    console.log('[ProxyServer] 初始化DNS-over-HTTPS优化...');
+
+    try {
+      // 测速DoH服务器
+      const results = await dnsOptimizer.testDohServers();
+
+      // 输出测速结果
+      console.log('[ProxyServer] DoH测速结果:');
+      for (const result of results) {
+        if (result.success) {
+          console.log(`  ${result.name}: ${result.latency}ms`);
+        } else {
+          console.log(`  ${result.name}: 失败 (${result.error})`);
+        }
+      }
+
+      this.dnsOptimized = true;
+      console.log('[ProxyServer] DNS优化已启用');
+    } catch (e: any) {
+      console.warn('[ProxyServer] DNS优化初始化失败:', e.message);
+      this.dnsOptimized = false;
+    }
+  }
+
+  /**
+   * 使用DNS优化解析域名并建立HTTP连接
+   * 优先使用DoH，失败则使用系统DNS
+   */
+  async resolveWithDnsOptimization(hostname: string): Promise<string[]> {
+    if (!this.dnsOptimized) {
+      // DNS优化未启用，直接返回域名
+      return [hostname];
+    }
+
+    try {
+      // 使用DNS优化解析域名
+      const ips = await dnsOptimizer.resolve(hostname);
+      console.log(
+        `[ProxyServer] DNS优化解析: ${hostname} -> ${ips.join(', ')}`,
+      );
+      return ips;
+    } catch (e: any) {
+      console.warn(`[ProxyServer] DNS优化解析失败: ${hostname}`, e.message);
+      return [hostname];
+    }
+  }
+
+  /**
    * Start the server. Tries ports 9978-9999 in order.
    * Resolves with the actual port in use.
    */
-  start(): Promise<number> {
+  async start(): Promise<number> {
+    // 启动前初始化DNS优化
+    await this.initDnsOptimization();
+
     return new Promise<number>((resolve, reject) => {
       if (this.server) {
         resolve(this.port);
