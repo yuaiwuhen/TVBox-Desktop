@@ -6,9 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TVBox Desktop</title>
     
-    <!-- 引入h265web.js播放器（支持HEVC/H.265） -->
-    <!-- 注意：public目录下的文件在构建后会被复制到根目录，所以路径应该是/h265web/而不是/public/h265web/ -->
-    <script src="/h265web/h265web.js"></script>
+    <!-- hevc.js播放器不需要script引入，通过npm包导入（@hevcjs/core） -->
   </head>
   <body>
     <div id="app"></div>

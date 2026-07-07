@@ -150,7 +150,7 @@
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item v-for="s in [0.5, 0.75, 1, 1.25, 1.5, 2, 3]" :key="s" :command="s">{{ s
-                    }}x</el-dropdown-item>
+                  }}x</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -159,7 +159,7 @@
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item v-for="s in [5, 10, 15, 20, 25, 30]" :key="s" :command="s">{{ s
-                  }}s</el-dropdown-item>
+                    }}s</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -186,7 +186,7 @@
                       <template #dropdown>
                         <el-dropdown-menu>
                           <el-dropdown-item v-for="r in aspectRatios" :key="r.value" :command="r.value">{{ r.label
-                            }}</el-dropdown-item>
+                          }}</el-dropdown-item>
                         </el-dropdown-menu>
                       </template>
                     </el-dropdown>
@@ -536,7 +536,7 @@ function initPlayer(url: string) {
   // 配置播放器
   const config: any = {
     player_id: containerId,
-    base_url: '/h265web/', // WASM文件基础路径（public目录下的文件会被复制到根目录）
+    base_url: '/public/h265web/', // WASM文件基础路径
     wasm_js_uri: 'h265web_wasm.js',
     wasm_wasm_uri: 'h265web_wasm.wasm',
     ext_src_js_uri: 'extjs.js',
@@ -577,7 +577,7 @@ function initPlayer(url: string) {
     try {
       const now = new Date()
       screenDisplayTime.value = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
-      
+
       // h265web.js可能没有直接的网速统计，这里可以尝试通过performance API获取
       const entries = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
       let bytesInPeriod = 0
@@ -1190,6 +1190,7 @@ defineExpose({
   from {
     transform: translateX(0);
   }
+
   to {
     transform: translateX(calc(-100% - 100vw));
   }

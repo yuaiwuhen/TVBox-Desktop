@@ -65,19 +65,8 @@ function createWindow() {
     },
   );
 
-  // Enable SharedArrayBuffer for h265web.js multi-threaded WASM decoding
-  win.webContents.session.webRequest.onHeadersReceived(
-    filter,
-    (details, callback) => {
-      const { responseHeaders } = details;
-      // Add required headers for SharedArrayBuffer support
-      responseHeaders['Cross-Origin-Opener-Policy'] = ['same-origin'];
-      // Use 'credentialless' instead of 'require-corp' to avoid blocking cross-origin resources
-      // 'credentialless' enables SharedArrayBuffer but doesn't require CORP headers on all resources
-      responseHeaders['Cross-Origin-Embedder-Policy'] = ['credentialless'];
-      callback({ responseHeaders });
-    },
-  );
+  // hevc.js不需要SharedArrayBuffer和COOP/COEP headers（单线程解码）
+  // 移除headers拦截器配置，简化部署
 
   // Open external links in default browser
   win.webContents.setWindowOpenHandler(({ url }) => {

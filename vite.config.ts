@@ -4,12 +4,10 @@ import electron from 'vite-plugin-electron';
 import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
-  // 启用SharedArrayBuffer支持（h265web.js多线程解码需要）
-  // 使用credentialless策略，既启用SharedArrayBuffer又不阻止跨域资源加载
+  // hevc.js不需要SharedArrayBuffer和COOP/COEP headers（单线程解码）
   server: {
     headers: {
-      'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'credentialless', // 不阻止跨域资源，但启用SharedArrayBuffer
+      // 移除COOP/COEP headers，hevc.js不需要这些配置
     },
   },
   plugins: [
