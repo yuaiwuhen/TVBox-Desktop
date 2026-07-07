@@ -65,6 +65,18 @@ function createWindow() {
     },
   );
 
+  // Enable SharedArrayBuffer for h265web.js multi-threaded WASM decoding
+  win.webContents.session.webRequest.onHeadersReceived(
+    filter,
+    (details, callback) => {
+      const { responseHeaders } = details;
+      // Add required headers for SharedArrayBuffer support
+      responseHeaders['Cross-Origin-Opener-Policy'] = ['same-origin'];
+      responseHeaders['Cross-Origin-Embedder-Policy'] = ['require-corp'];
+      callback({ responseHeaders });
+    },
+  );
+
   // Open external links in default browser
   win.webContents.setWindowOpenHandler(({ url }) => {
     require('electron').shell.openExternal(url);

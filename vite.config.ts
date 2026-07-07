@@ -4,6 +4,13 @@ import electron from 'vite-plugin-electron';
 import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
+  // 启用SharedArrayBuffer支持（h265web.js多线程解码需要）
+  server: {
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    },
+  },
   plugins: [
     vue(),
     tailwindcss(),
