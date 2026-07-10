@@ -2696,6 +2696,93 @@ export class JarLoader {
   }
 
   /**
+   * Replace a Quark download URL (dl-pc-zb, always 412s) with a streaming
+   * URL (video-play-*, from /file/v2/play) obtained via
+   * QuarkPanService.resolveQuarkDownloadUrl.
+   *
+   * The spider's playerContent generates download URLs that the Quark CDN
+   * rejects with 412 Precondition Failed. This method:
+   * 1. Decodes the vod_id (Base64 JSON) to extract shareId and fid
+   * 2. Populates shareFidTokenCache from the vod_id's shareFidToken
+   * 3. Calls resolveQuarkDownloadUrl to get a working streaming URL
+   * 4. Rebuilds the proxy URL around the streaming URL
+   *
+   * Returns the modified JSON string, or the original on any failure.
+   */
+  private async replaceQuarkDownloadUrl(
+    jsonStr: string,
+    vodIdBase64: string,
+  ): Promise<string> {
+    try {
+      const parsed = JSON.parse(jsonStr);
+      if (!parsed?.url || typeof parsed.url !== 'string') return jsonStr;
+      if (!parsed.url.includes('dl-pc')) return jsonStr;
+
+      const vodInfo = QuarkPanService.cacheShareFidTokenFromVodId(vodIdBase64);
+      if (!vodInfo) {
+        console.warn(
+          '[JarLoader] replaceQuarkDownloadUrl: failed to decode vod_id',
+        );
+        return jsonStr;
+      }
+
+      console.log(
+        '[JarLoader] replaceQuarkDownloadUrl: replacing dl-pc URL for shareId=',
+        vodInfo.shareId,
+        'fid=',
+        vodInfo.fid,
+      );
+
+      const streamingUrl = await QuarkPanService.resolveQuarkDownloadUrl(
+        vodInfo.shareId,
+        vodInfo.fid,
+      );
+      if (!streamingUrl) {
+        console.warn(
+          '[JarLoader] replaceQuarkDownloadUrl: resolveQuarkDownloadUrl returned null',
+        );
+        return jsonStr;
+      }
+
+      const domain = streamingUrl.match(/https?:\/\/([^/]+)/)?.[1] || 'unknown';
+      console.log(
+        '[JarLoader] replaceQuarkDownloadUrl: got streaming URL, domain=',
+        domain,
+        'length=',
+        streamingUrl.length,
+      );
+
+      let proxyPort = 9978;
+      try {
+        const { proxyServer } = require('./ProxyServer');
+        const p = proxyServer.getPort();
+        if (p > 0) proxyPort = p;
+      } catch {}
+
+      const encodedUrl = encodeURIComponent(streamingUrl);
+      let newProxyUrl = `http://127.0.0.1:${proxyPort}/proxy?do=quarkDirect&url=${encodedUrl}`;
+
+      if (parsed.header) {
+        const headerStr =
+          typeof parsed.header === 'string'
+            ? parsed.header
+            : JSON.stringify(parsed.header);
+        newProxyUrl += '&header=' + encodeURIComponent(headerStr);
+      }
+
+      parsed.url = newProxyUrl;
+      console.log(
+        '[JarLoader] replaceQuarkDownloadUrl: rebuilt proxy URL, length=',
+        newProxyUrl.length,
+      );
+      return JSON.stringify(parsed);
+    } catch (e: any) {
+      console.warn('[JarLoader] replaceQuarkDownloadUrl error:', e.message);
+      return jsonStr;
+    }
+  }
+
+  /**
    * Call Spider method
    * All methods return JSON string
    *
@@ -3323,6 +3410,20 @@ export class JarLoader {
               '[JarLoader] playerContent: translatePlayerContent returned unchanged',
             );
           }
+          // Quark download URLs (dl-pc-zb.drive.quark.cn, sp=100) always
+          // return 412 Precondition Failed — verified by direct PowerShell
+          // testing with and without Cookie. The spider's playerContent
+          // generates these download URLs, but only streaming URLs
+          // (video-play-*, from /file/v2/play) work. When we detect a
+          // dl-pc URL, call resolveQuarkDownloadUrl to get a working
+          // streaming URL and rebuild the proxy URL around it.
+          if (
+            typeof args[1] === 'string' &&
+            (args[0].includes('夸克') || args[0].includes('夸父')) &&
+            result.includes('dl-pc')
+          ) {
+            result = await this.replaceQuarkDownloadUrl(result, args[1]);
+          }
           console.log(
             '[JarLoader] ========== end playerContent debug ==========',
           );
@@ -3410,7 +3511,7 @@ export class JarLoader {
         // spider entirely. If homeContent fails, log diagnostics so we can
         // fix the jar issue, then return empty.
         console.error(
-          `[JarLoader] ${clsKey} ${method} exhausted all retries and failed`,
+          `[JarLoader] ${key} ${method} exhausted all retries and failed`,
         );
 
         return '{}';
@@ -3847,7 +3948,15 @@ export class JarLoader {
       // HTTP call should succeed within 5s. Even if it times out, the method
       // has a catch block that returns "ys" as fallback, so class loading
       // still succeeds.
-      this.triggerGuardStaticInit(spider);
+      //
+      // MUST be awaited (async) — the <clinit> makes an HTTP request to
+      // 127.0.0.1:9978/platform which is served by this same Node.js event
+      // loop. If we use forNameSync, the event loop blocks waiting for
+      // <clinit> to finish, but <clinit> is waiting for ProxyServer to
+      // respond to /platform, which can't run because the event loop is
+      // blocked → deadlock → 5s timeout → VodBean class init fails → NPE.
+      // Using async forName frees the event loop so ProxyServer can respond.
+      await this.triggerGuardStaticInit(spider);
     } catch (e: any) {
       console.warn(
         '[JarLoader] preWarmForDetailContent failed:',
@@ -4039,7 +4148,7 @@ export class JarLoader {
    * spider.getClass().getClassLoader() and use loadClass() to trigger
    * static initialization.
    */
-  private triggerGuardStaticInit(spider: JavaObject): void {
+  private async triggerGuardStaticInit(spider: JavaObject): Promise<void> {
     if (!this.java) return;
     const classesToWarm = [
       // Class with static initializer that calls the 5s-timeout HTTP method.
@@ -4050,12 +4159,18 @@ export class JarLoader {
     ];
     let classLoader: any = null;
     try {
-      const spiderClass = spider.getClassSync
-        ? spider.getClassSync()
-        : spider.getClass();
-      classLoader = spiderClass.getClassLoaderSync
-        ? spiderClass.getClassLoaderSync()
-        : spiderClass.getClassLoader();
+      // Use async variants (getClass / getClassLoader) instead of Sync
+      // versions. Although these are quick JVM calls, keeping the event loop
+      // free is a good habit. More importantly, the forName call below MUST
+      // be async.
+      const spiderClass =
+        typeof spider.getClassSync === 'function'
+          ? spider.getClassSync()
+          : spider.getClass();
+      classLoader =
+        typeof spiderClass.getClassLoaderSync === 'function'
+          ? spiderClass.getClassLoaderSync()
+          : spiderClass.getClassLoader();
     } catch (e: any) {
       console.warn(
         '[JarLoader] preWarm: failed to get spider classloader:',
@@ -4063,35 +4178,44 @@ export class JarLoader {
       );
       return;
     }
+    const ClassClass = this.java.importClass('java.lang.Class');
     for (const className of classesToWarm) {
       try {
         // loadClass(name) loads but doesn't initialize. Use the 3-arg
         // Class.forName(name, initialize, classloader) to trigger <clinit>.
-        const ClassClass = this.java.importClass('java.lang.Class');
-        if (typeof ClassClass.forNameSync === 'function') {
-          // forName(String, boolean, ClassLoader) — java-bridge may not
-          // auto-match overloads, so try the 3-arg form first.
+        //
+        // CRITICAL: Must use ASYNC forName, NOT forNameSync. The <clinit>
+        // makes an HTTP request to 127.0.0.1:9978/platform which is served
+        // by this Node.js process. forNameSync blocks the event loop →
+        // ProxyServer can't respond to /platform → <clinit> times out after
+        // 5s → class init fails → detailContent returns no vod_play_url.
+        // Async forName yields the event loop so ProxyServer can handle
+        // the /platform request immediately.
+        if (typeof ClassClass.forName === 'function') {
           try {
-            ClassClass.forNameSync(className, true, classLoader);
+            await ClassClass.forName(className, true, classLoader);
             console.log(
               '[JarLoader] preWarm: triggered static init for',
               className,
             );
             continue;
-          } catch (_) {
-            /* fall through to loadClass approach */
+          } catch (e: any) {
+            // <clinit> may throw RuntimeException wrapping TimeoutException
+            // if /platform still times out. Log and fall through to loadClass
+            // (which at least loads the class without initializing).
+            console.warn(
+              '[JarLoader] preWarm: forName threw for',
+              className,
+              ':',
+              e?.message || e,
+            );
           }
         }
-        // Fallback: use classloader.loadClass(name) then Class.newInstance()
-        // to force initialization.
+        // Fallback: loadClass without initialization. Avoids the <clinit>
+        // HTTP call entirely; <clinit> will run on first real use.
         const loaded = classLoader.loadClassSync
           ? classLoader.loadClassSync(className)
-          : classLoader.loadClass(className);
-        // loadClass doesn't initialize. Trigger <clinit> by accessing a field
-        // via reflection. ForName with initialize=true is the clean way, but
-        // java-bridge overload matching may fail. Just logging that we loaded
-        // the class is enough — the spider's detailContent will trigger
-        // <clinit> on first access anyway, and the connection is now warm.
+          : await classLoader.loadClass(className);
         console.log(
           '[JarLoader] preWarm: loaded class (clinit deferred to first use):',
           className,

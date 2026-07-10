@@ -182,36 +182,56 @@ export class QuarkPanService {
     if (!cookie) {
       return { valid: false };
     }
+    const commonHeaders = {
+      Cookie: cookie,
+      'User-Agent': this.QUARK_DESKTOP_UA,
+      'Content-Type': 'application/json;charset=UTF-8',
+      Referer: 'https://pan.quark.cn/',
+      Origin: 'https://pan.quark.cn',
+    };
     try {
+      // /auth/pc/flush now returns 405 Method Not Allowed (endpoint deprecated).
+      // Use /share/sharepage/token as the canonical validity probe: it requires
+      // a valid __puus cookie and returns code:0 + stoken when the cookie is
+      // valid, or code:31001 "require login" when expired. The pwd_id value
+      // here is a dummy — Quark returns code 41006 "分享不存在" for an invalid
+      // share, but crucially that response only comes back after cookie
+      // validation, so code 41006 still proves the cookie is valid.
       const resp = await axios.post(
-        'https://drive-pc.quark.cn/1/clouddrive/auth/pc/flush?pr=ucpro&fr=pc&uc_param_str=',
-        null,
+        'https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
         {
-          headers: {
-            Cookie: cookie,
-            'User-Agent': this.QUARK_DESKTOP_UA,
-            'Content-Type': 'application/json;charset=UTF-8',
-            Referer: 'https://pan.quark.cn/',
-            Origin: 'https://pan.quark.cn',
-          },
+          pwd_id: '00000000',
+          passcode: '',
+          support_visit_limit_private_share: true,
+        },
+        {
+          headers: commonHeaders,
           timeout: 10000,
           validateStatus: () => true,
         },
       );
       const body = resp.data;
       if (
-        body &&
-        typeof body === 'object' &&
-        typeof body.code === 'number' &&
-        body.code !== 0
+        resp.status === 401 ||
+        (body && typeof body === 'object' && body.code === 31001)
       ) {
         console.warn(
-          '[QuarkPanService] checkTokenValid: token expired, code=',
-          body.code,
+          '[QuarkPanService] checkTokenValid: token expired, status=',
+          resp.status,
+          'code=',
+          body?.code,
+          'message=',
+          body?.message,
         );
         return { valid: false };
       }
-      console.log('[QuarkPanService] checkTokenValid: token valid');
+      console.log(
+        '[QuarkPanService] checkTokenValid: token valid (status=',
+        resp.status,
+        'code=',
+        body?.code,
+        ')',
+      );
       return { valid: true, nickname: this.loginInfo?.nickname };
     } catch (e: any) {
       console.warn('[QuarkPanService] checkTokenValid error:', e.message);
@@ -499,6 +519,47 @@ export class QuarkPanService {
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch';
 
   /**
+   * Decode the spider's vod_id (Base64-encoded JSON) and populate
+   * shareFidTokenCache so resolveQuarkDownloadUrl's transfer fallback can
+   * use the correct shareFidToken.
+   *
+   * The spider stores per-file shareFidToken in vod_play_url as Base64 JSON.
+   * resolveShareToFiles normally populates the cache when scanning the share,
+   * but playerContent is called with a vod_id that already contains the token
+   * — so we can populate the cache directly without re-scanning.
+   *
+   * Returns { shareId, fid } on success, or null if vod_id can't be decoded.
+   */
+  static cacheShareFidTokenFromVodId(
+    vodIdBase64: string,
+  ): { shareId: string; fid: string } | null {
+    try {
+      const jsonStr = Buffer.from(vodIdBase64, 'base64').toString('utf8');
+      const data = JSON.parse(jsonStr);
+      const fid = data?.fid;
+      const shareId = data?.shareId;
+      const shareFidToken = data?.shareFidToken || '';
+      if (!fid || !shareId) return null;
+      this.shareFidTokenCache.set(`${shareId}:${fid}`, {
+        token: shareFidToken,
+        shareUrl: `https://pan.quark.cn/s/${shareId}`,
+      });
+      console.log(
+        '[QuarkPanService] cacheShareFidTokenFromVodId: cached token for',
+        `${shareId}:${fid}`,
+        '(token len=' + shareFidToken.length + ')',
+      );
+      return { shareId, fid };
+    } catch (e: any) {
+      console.warn(
+        '[QuarkPanService] cacheShareFidTokenFromVodId error:',
+        e.message,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Resolve a single Quark share file to a playable streaming URL.
    *
    * Mirrors NewQuark.java's playerContent → allloadurl flow:
@@ -686,8 +747,14 @@ export class QuarkPanService {
    * the ProxyServer will send. Without this, the spider uses a stale JVM
    * cookie → stale auth_key → CDN 412.
    *
-   * Also detects true login expiry: if /clouddrive/auth/pc/flush returns a
-   * non-zero code (auth failure), the user must re-scan the QR code.
+   * Also detects true login expiry: if /share/sharepage/token returns code
+   * 31001 "require login", the user must re-scan the QR code.
+   *
+   * NOTE: /clouddrive/auth/pc/flush is now deprecated (returns 405). We
+   * refresh __puus via GET /1/clouddrive/file/sort instead — this is the
+   * same endpoint the login flow calls in fetchPuusCookie(), and the server
+   * returns a fresh __puus in set-cookie on every call. Verified by test:
+   * stale __puus → CDN 412; fresh __puus from /file/sort → CDN 206.
    *
    * Returns:
    *   - refreshed: true if __puus was updated
@@ -703,55 +770,119 @@ export class QuarkPanService {
     if (!cookie) {
       return { refreshed: false, expired: false, cookie: null };
     }
-    const commonHeaders = {
-      Cookie: cookie,
+    const requestHeaders = {
       'User-Agent': this.QUARK_DESKTOP_UA,
-      'Content-Type': 'application/json;charset=UTF-8',
       Referer: 'https://pan.quark.cn/',
-      Origin: 'https://pan.quark.cn',
+      Cookie: cookie,
+      Accept: 'application/json, text/plain, */*',
     };
     try {
-      const resp = await axios.post(
-        'https://drive-pc.quark.cn/1/clouddrive/auth/pc/flush?pr=ucpro&fr=pc&uc_param_str=',
-        null,
-        { headers: commonHeaders, timeout: 10000, validateStatus: () => true },
+      // Step 1: Refresh __puus via /file/sort. The server issues a fresh
+      // __puus in set-cookie on every call. This is the canonical refresh
+      // path now that /auth/pc/flush is deprecated.
+      const resp = await axios.get(
+        'https://drive-pc.quark.cn/1/clouddrive/file/sort',
+        {
+          params: {
+            pr: 'ucpro',
+            fr: 'pc',
+            pdir_fid: 0,
+            _page: 1,
+            _size: 50,
+            _fetch_total: 1,
+            _fetch_sub_dirs: 0,
+            _sort: 'file_type:asc,updated_at:desc',
+          },
+          headers: requestHeaders,
+          timeout: 10000,
+          validateStatus: () => true,
+        },
       );
-      // Detect true login expiry: Quark API returns code != 0 when the cookie
-      // is no longer valid (e.g., 31001 "account not logged in"). A successful
-      // flush returns code 0 even if no new __puus is set.
       const body = resp.data;
-      if (body && typeof body === 'object' && typeof body.code === 'number') {
-        if (body.code !== 0) {
-          console.warn(
-            '[QuarkPanService] refreshCookieForPlayback: login expired, code=',
-            body.code,
-            'message=',
-            body.message,
+      // Login expired: /file/sort returns code 31001 "require login [guest]"
+      // when __puus is no longer valid.
+      if (
+        resp.status === 401 ||
+        (body && typeof body === 'object' && body.code === 31001)
+      ) {
+        console.warn(
+          '[QuarkPanService] refreshCookieForPlayback: login expired, status=',
+          resp.status,
+          'code=',
+          body?.code,
+          'message=',
+          body?.message,
+        );
+        return { refreshed: false, expired: true, cookie: null };
+      }
+      // Try to extract fresh __puus from set-cookie.
+      const setCookie = resp.headers?.['set-cookie'];
+      if (setCookie) {
+        const cookies = Array.isArray(setCookie) ? setCookie : [setCookie];
+        const puusEntry = cookies.find((c: string) => c.startsWith('__puus='));
+        if (puusEntry) {
+          const newPuus = puusEntry.split(';')[0]; // "__puus=..."
+          const parts = cookie
+            .split(';')
+            .map((s) => s.trim())
+            .filter((s) => s && !s.startsWith('__puus='));
+          parts.push(newPuus);
+          this.syncedCookie = parts.join('; ');
+          console.log(
+            '[QuarkPanService] refreshCookieForPlayback: refreshed __puus via /file/sort, cookie len=',
+            this.syncedCookie.length,
           );
-          return { refreshed: false, expired: true, cookie: null };
+          return {
+            refreshed: true,
+            expired: false,
+            cookie: this.syncedCookie,
+          };
         }
       }
-      const setCookie = resp.headers?.['set-cookie'];
-      if (!setCookie) {
-        return { refreshed: false, expired: false, cookie };
-      }
-      const cookies = Array.isArray(setCookie) ? setCookie : [setCookie];
-      const puusEntry = cookies.find((c: string) => c.startsWith('__puus='));
-      if (!puusEntry) {
-        return { refreshed: false, expired: false, cookie };
-      }
-      const newPuus = puusEntry.split(';')[0];
-      const parts = cookie
-        .split(';')
-        .map((s) => s.trim())
-        .filter((s) => s && !s.startsWith('__puus='));
-      parts.push(newPuus);
-      this.syncedCookie = parts.join('; ');
-      console.log(
-        '[QuarkPanService] refreshCookieForPlayback: updated __puus, cookie len=',
-        this.syncedCookie.length,
+      // No set-cookie: server might be in a degraded state. Verify cookie
+      // is still valid via /share/sharepage/token before proceeding — the
+      // spider will use the existing cookie, and if it's stale the CDN
+      // will return 412. Better to detect expiry here.
+      const verifyResp = await axios.post(
+        'https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc',
+        {
+          pwd_id: '00000000',
+          passcode: '',
+          support_visit_limit_private_share: true,
+        },
+        {
+          headers: {
+            Cookie: cookie,
+            'User-Agent': this.QUARK_DESKTOP_UA,
+            'Content-Type': 'application/json;charset=UTF-8',
+            Referer: 'https://pan.quark.cn/',
+            Origin: 'https://pan.quark.cn',
+          },
+          timeout: 10000,
+          validateStatus: () => true,
+        },
       );
-      return { refreshed: true, expired: false, cookie: this.syncedCookie };
+      const verifyBody = verifyResp.data;
+      if (
+        verifyResp.status === 401 ||
+        (verifyBody &&
+          typeof verifyBody === 'object' &&
+          verifyBody.code === 31001)
+      ) {
+        console.warn(
+          '[QuarkPanService] refreshCookieForPlayback: login expired (verified via /share/sharepage/token), code=',
+          verifyBody?.code,
+          'message=',
+          verifyBody?.message,
+        );
+        return { refreshed: false, expired: true, cookie: null };
+      }
+      console.log(
+        '[QuarkPanService] refreshCookieForPlayback: no set-cookie from /file/sort, cookie still valid (code=',
+        verifyBody?.code,
+        ')',
+      );
+      return { refreshed: false, expired: false, cookie };
     } catch (e: any) {
       console.warn(
         '[QuarkPanService] refreshCookieForPlayback failed (continuing with existing cookie):',
@@ -762,28 +893,53 @@ export class QuarkPanService {
   }
 
   /**
-   * Refresh the __puus cookie by calling /clouddrive/auth/pc/flush.
+   * Refresh the __puus cookie by calling /1/clouddrive/file/sort.
    *
-   * Mirrors NewQuark.java refreshCookie(). The spider calls this before
-   * every playerContent() to ensure __puus is fresh. The CDN validates
-   * __puus against the auth_key in download URLs — a stale __puus causes
-   * 412 Precondition Failed.
+   * Mirrors NewQuark.java refreshCookie() intent: ensure __puus is fresh
+   * before playerContent(). The CDN validates __puus against the auth_key
+   * in download URLs — a stale __puus causes 412 Precondition Failed.
+   *
+   * NOTE: NewQuark.java originally called /clouddrive/auth/pc/flush, but
+   * that endpoint is now deprecated (returns 405). The /file/sort endpoint
+   * triggers the server to issue a fresh __puus in set-cookie on every
+   * call, achieving the same goal. Verified by test: stale __puus → CDN
+   * 412; fresh __puus from /file/sort → CDN 206.
    *
    * Updates this.syncedCookie in-place if a new __puus is returned.
+   * Also updates commonHeaders.Cookie so the caller uses the fresh cookie
+   * for subsequent API calls in the same request.
    */
   private static async refreshCookie(
     commonHeaders: Record<string, string>,
   ): Promise<void> {
     try {
-      const resp = await axios.post(
-        'https://drive-pc.quark.cn/1/clouddrive/auth/pc/flush?pr=ucpro&fr=pc&uc_param_str=',
-        null,
-        { headers: commonHeaders, timeout: 10000, validateStatus: () => true },
+      const resp = await axios.get(
+        'https://drive-pc.quark.cn/1/clouddrive/file/sort',
+        {
+          params: {
+            pr: 'ucpro',
+            fr: 'pc',
+            pdir_fid: 0,
+            _page: 1,
+            _size: 50,
+            _fetch_total: 1,
+            _fetch_sub_dirs: 0,
+            _sort: 'file_type:asc,updated_at:desc',
+          },
+          headers: {
+            'User-Agent': this.QUARK_DESKTOP_UA,
+            Referer: 'https://pan.quark.cn/',
+            Cookie: this.syncedCookie || '',
+            Accept: 'application/json, text/plain, */*',
+          },
+          timeout: 10000,
+          validateStatus: () => true,
+        },
       );
       const setCookie = resp.headers?.['set-cookie'];
       if (!setCookie) {
         console.log(
-          '[QuarkPanService] refreshCookie: no set-cookie header, keeping existing cookie',
+          '[QuarkPanService] refreshCookie: no set-cookie from /file/sort, keeping existing cookie',
         );
         return;
       }
@@ -806,7 +962,7 @@ export class QuarkPanService {
       parts.push(newPuus);
       this.syncedCookie = parts.join('; ');
       console.log(
-        '[QuarkPanService] refreshCookie: updated __puus, cookie len=',
+        '[QuarkPanService] refreshCookie: refreshed __puus via /file/sort, cookie len=',
         this.syncedCookie.length,
       );
       // Update commonHeaders in-place so callers use the fresh cookie.
@@ -843,6 +999,70 @@ export class QuarkPanService {
         { headers: commonHeaders, timeout: 15000, validateStatus: () => true },
       );
       const d = resp.data;
+      // Dump the response structure (minus the actual URL contents) so we can
+      // see what URL fields the API actually returned. The CDN may return a
+      // direct MP4 URL (video_list[0]) that 412s, while the HLS m3u8 URL
+      // (video_url) plays correctly. Without this log we can't tell which
+      // field the URL came from when playback fails.
+      try {
+        const dataKeys = d?.data ? Object.keys(d.data) : [];
+        const urlSummary: Record<string, any> = {};
+        for (const k of dataKeys) {
+          const v = (d.data as any)[k];
+          if (typeof v === 'string' && v.length > 0) {
+            urlSummary[k] = { len: v.length, preview: v.substring(0, 80) };
+          } else if (Array.isArray(v) && v.length > 0) {
+            urlSummary[k] = {
+              arrayLen: v.length,
+              firstItemKeys: v[0] ? Object.keys(v[0]) : [],
+            };
+          } else if (v && typeof v === 'object') {
+            urlSummary[k] = { keys: Object.keys(v) };
+          } else {
+            urlSummary[k] = v;
+          }
+        }
+        console.log(
+          '[QuarkPanService] tryFileV2Play: response structure for fid=',
+          fid,
+          'code=',
+          d?.code,
+          'message=',
+          d?.message,
+          'dataKeys=',
+          dataKeys,
+          'urlSummary=',
+          JSON.stringify(urlSummary),
+        );
+        // Dump every video_list entry's URL + resolution + supports_format
+        // so we can see if there's an m3u8 (HLS) URL we should prefer over
+        // the MP4 direct URL (which 412s).
+        const vlist = d?.data?.video_list;
+        if (Array.isArray(vlist)) {
+          vlist.forEach((item: any, i: number) => {
+            const url: string = item?.video_info?.url || '';
+            const supportsFormat = item?.supports_format;
+            const resolution = item?.resolution;
+            const accessable = item?.accessable;
+            console.log(
+              '[QuarkPanService] tryFileV2Play: video_list[',
+              i,
+              '] resolution=',
+              resolution,
+              'accessable=',
+              accessable,
+              'supports_format=',
+              supportsFormat,
+              'urlLen=',
+              url.length,
+              'urlPreview=',
+              url.substring(0, 120),
+              'isM3u8=',
+              url.includes('.m3u8'),
+            );
+          });
+        }
+      } catch {}
       if (d?.code === 0 && d?.data?.video_url) {
         const url: string = d.data.video_url;
         console.log(
@@ -863,16 +1083,44 @@ export class QuarkPanService {
         );
         return url;
       }
-      // Some responses have video_list array (like UC API)
-      if (d?.code === 0 && d?.data?.video_list?.[0]?.video_info?.url) {
-        const url: string = d.data.video_list[0].video_info.url;
-        console.log(
-          '[QuarkPanService] tryFileV2Play: OK (video_list[0]), length=',
-          url.length,
-          'for fid=',
-          fid,
-        );
-        return url;
+      // video_list contains multiple resolutions. The "super" resolution
+      // entry is a direct MP4 URL that the CDN rejects with 412 (verified
+      // by direct testing — both with and without Cookie). The "high" and
+      // "low" resolution entries are HLS m3u8 URLs that play correctly.
+      // Always prefer an m3u8 URL over a direct MP4 URL.
+      if (d?.code === 0 && Array.isArray(d?.data?.video_list)) {
+        const vlist = d.data.video_list;
+        let mp4Fallback: string | null = null;
+        for (let i = 0; i < vlist.length; i++) {
+          const entry = vlist[i];
+          const url: string = entry?.video_info?.url || '';
+          if (!url) continue;
+          if (url.includes('.m3u8')) {
+            console.log(
+              '[QuarkPanService] tryFileV2Play: OK (video_list[',
+              i,
+              '] m3u8), length=',
+              url.length,
+              'for fid=',
+              fid,
+              'resolution=',
+              entry?.resolution,
+            );
+            return url;
+          }
+          if (!mp4Fallback) {
+            mp4Fallback = url;
+          }
+        }
+        if (mp4Fallback) {
+          console.log(
+            '[QuarkPanService] tryFileV2Play: OK (video_list mp4 fallback, no m3u8 found), length=',
+            mp4Fallback.length,
+            'for fid=',
+            fid,
+          );
+          return mp4Fallback;
+        }
       }
       console.warn(
         '[QuarkPanService] tryFileV2Play: failed for fid=',

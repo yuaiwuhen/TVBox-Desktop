@@ -1600,17 +1600,8 @@ export class ProxyServer {
       Referer: referer,
       Accept: '*/*',
       'Accept-Encoding': 'identity',
+      Cookie: cookie,
     };
-    // Quark CDN auth_key is self-contained — sending Cookie with __puus causes
-    // CDN to validate __puus against auth_key, and any mismatch → 412.
-    // Browsers play the URL without any cookie, proving cookie is unnecessary.
-    // UC/Baidu CDNs still require Cookie for auth, so keep it for them.
-
-    upstreamHeaders['User-Agent'] = userAgent;
-    upstreamHeaders['Referer'] = referer;
-    upstreamHeaders['Accept'] = '*/*';
-    upstreamHeaders['Accept-Encoding'] = 'identity';
-    upstreamHeaders.Cookie = cookie;
     if (req.headers['range']) {
       upstreamHeaders['Range'] = String(req.headers['range']);
     }
@@ -1636,7 +1627,7 @@ export class ProxyServer {
     );
     debugLog(`streamPanDirect cookie=${cookie}`);
     debugLog(
-      `streamPanDirect REQ_HEADERS=${JSON.stringify({ ...upstreamHeaders, Cookie: `<${cookie.length} bytes>` })} clientHeaders=${JSON.stringify(req.headers)}`,
+      `streamPanDirect REQ_HEADERS=${JSON.stringify({ ...upstreamHeaders, Cookie: `<${cookie.length} bytes>` })} actualCookieSent=${upstreamHeaders.Cookie ? 'YES' : 'NO'} clientHeaders=${JSON.stringify(req.headers)}`,
     );
 
     let clientGone = false;
@@ -1688,7 +1679,7 @@ export class ProxyServer {
             upstreamRes.on('data', (chunk: Buffer) => {
               bodyChunks.push(chunk);
             });
-            upstreamRes.on('end', () => {
+            upstreamRes.on('end', async () => {
               const body = Buffer.concat(bodyChunks).toString('utf8');
               console.warn(
                 '[ProxyServer] streamPanDirect: upstream error body (len=' +
@@ -1700,33 +1691,52 @@ export class ProxyServer {
               debugLog(
                 `streamPanDirect ERROR_BODY len=${body.length} body=${body.substring(0, 2000)}`,
               );
-              // 412 from Quark CDN means __puus is stale or the download
-              // URL's auth_key has expired. Emit pan:loginExpired so the
-              // renderer prompts the user to re-scan the QR code. This is
-              // a safety net for the case where pre-playback refresh in
-              // JarLoader didn't catch the expiry (e.g., cookie revoked
-              // between refresh and the CDN request).
-              if (status === 412 && panType === 'quark') {
-                console.warn(
-                  '[ProxyServer] streamPanDirect: Quark 412 detected, emitting pan:loginExpired',
-                );
-                try {
-                  BrowserWindow.getAllWindows().forEach((w) =>
-                    w.webContents.send('pan:loginExpired', 'quark'),
-                  );
-                } catch (e: any) {
-                  console.warn(
-                    '[ProxyServer] Failed to emit pan:loginExpired:',
-                    e.message,
-                  );
-                }
-              }
+              // Send the error response to the browser FIRST, so the video
+              // player doesn't wait for the login validity check below.
               if (!res.headersSent) {
                 res.writeHead(status, {
                   'Content-Type':
                     upstreamRes.headers['content-type'] || 'text/plain',
                 });
                 res.end(body);
+              }
+              // 412 from Quark CDN can mean: (1) __puus is stale, (2) the
+              // download URL's auth_key has expired, or (3) Cookie was sent
+              // when it shouldn't be. Only case (1) warrants a login prompt —
+              // the others just need a fresh playerContent call. So verify
+              // login validity before popping up the QR code dialog.
+              if (status === 412 && panType === 'quark') {
+                let loginActuallyExpired = false;
+                try {
+                  const validity = await QuarkPanService.checkTokenValid();
+                  loginActuallyExpired = !validity.valid;
+                  console.warn(
+                    '[ProxyServer] streamPanDirect: Quark 412 detected, checkTokenValid=',
+                    validity.valid,
+                    loginActuallyExpired
+                      ? '-> emitting pan:loginExpired'
+                      : '-> login still valid, 412 is likely expired auth_key',
+                  );
+                } catch (e: any) {
+                  console.warn(
+                    '[ProxyServer] streamPanDirect: checkTokenValid failed:',
+                    e.message,
+                    '-> treating as expired (safer)',
+                  );
+                  loginActuallyExpired = true;
+                }
+                if (loginActuallyExpired) {
+                  try {
+                    BrowserWindow.getAllWindows().forEach((w) =>
+                      w.webContents.send('pan:loginExpired', 'quark'),
+                    );
+                  } catch (e: any) {
+                    console.warn(
+                      '[ProxyServer] Failed to emit pan:loginExpired:',
+                      e.message,
+                    );
+                  }
+                }
               }
             });
             upstreamRes.on('error', () => {
