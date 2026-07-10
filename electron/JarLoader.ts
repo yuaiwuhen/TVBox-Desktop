@@ -2947,9 +2947,13 @@ export class JarLoader {
     try {
       const parsed = JSON.parse(result);
       const list = parsed.list;
-      if (!Array.isArray(list) || list.length === 0) return false;
+      // Empty result {} or empty list — the spider's pan resolver likely
+      // timed out (5s internal Quark API timeout on cold connection) and
+      // returned nothing. Retry: the first call warmed the JVM DNS cache
+      // and OkHttp connection pool, so the next call usually completes.
+      if (!Array.isArray(list) || list.length === 0) return true;
       const vod = list[0];
-      if (!vod || typeof vod !== 'object') return false;
+      if (!vod || typeof vod !== 'object') return true;
       const hasPlayUrl =
         vod.vod_play_url !== undefined &&
         vod.vod_play_url !== null &&
@@ -2958,7 +2962,6 @@ export class JarLoader {
         vod.vod_play_from !== undefined &&
         vod.vod_play_from !== null &&
         vod.vod_play_from !== '';
-      // Only retry if we have video metadata but are missing play fields.
       // If vod_name is also missing, the spider failed entirely — retry
       // won't help and we'd just delay the error.
       const hasMetadata = vod.vod_name || vod.vod_pic;
