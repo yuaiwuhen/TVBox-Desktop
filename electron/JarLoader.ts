@@ -6,13 +6,15 @@
  * Based on Box Android's ApiConfig.java and JarLoader.java implementation.
  */
 
-import { ipcMain } from 'electron';
+import { ipcMain, BrowserWindow } from 'electron';
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
+import { exec as execCb, execFile as execFileCb } from 'child_process';
+import { promisify } from 'util';
 import { DexConverter, dexConverter } from './DexConverter';
 // Top-level imports instead of dynamic require() — vite bundles dynamic
 // require('./QuarkPanService') as createRequire(import.meta.url) which points
@@ -21,9 +23,6 @@ import { DexConverter, dexConverter } from './DexConverter';
 // because neither QuarkPanService nor ProxyServer uses jarLoader at
 // module-load time — only inside method bodies.
 import { QuarkPanService } from './QuarkPanService';
-import { UCPanService } from './UCPanService';
-import { AliyunPanService } from './AliyunPanService';
-import { BaiduPanService } from './BaiduPanService';
 import { proxyServer } from './ProxyServer';
 
 // Create require for loading CommonJS modules in ESM
@@ -71,6 +70,9 @@ interface SpiderInstance {
   initPromise: Promise<void> | null;
 }
 
+const execAsync = promisify(execCb);
+const execFileAsync = promisify(execFileCb);
+
 export class JarLoader {
   private classLoaders: Map<string, boolean> = new Map();
   private spiders: Map<string, SpiderInstance> = new Map();
@@ -99,6 +101,27 @@ export class JarLoader {
   private recentSpiderKey: string | null = null;
   private recentSpiderType: 'jar' | 'js' | 'py' | null = null;
 
+  // Custom headers for direct video URLs (not proxied). Keyed by URL origin
+  // (scheme://host:port). When translatePlayerContent encounters a direct
+  // video URL (e.g. https://vd.wmvbo.com/.../index.m3u8) with custom headers,
+  // it registers them here. The webRequest interceptor in main.ts reads this
+  // map to inject User-Agent/Referer that the browser would otherwise block.
+  private videoUrlHeaders: Map<string, Record<string, string>> = new Map();
+
+  // Source isolation: per-source configuration and native libraries
+  // Map from className (e.g. "WexGuaZiGuard") to source-specific data
+  private sourceIsolation: Map<
+    string,
+    { nativeLibPath?: string; needsUnidbg?: boolean }
+  > = new Map();
+
+  // Background pre-loading of Guard spider JAR to avoid blocking getSpider.
+  // When the app starts, we kick off loadGuardSpiderJar() in the background.
+  // getSpider() awaits this promise if it's still running, so the UI stays
+  // responsive (the blocking Java calls run on libuv worker threads via
+  // java-bridge async methods, not on the Node.js event loop).
+  private guardSpiderJarPromise: Promise<boolean> | null = null;
+
   constructor() {
     // Install global error handlers to capture all Java-related errors
     this.installGlobalErrorHandlers();
@@ -115,6 +138,476 @@ export class JarLoader {
     // Without this, QuarkPanService.syncCookieToJVM() fails on app startup
     // because Init.context() returns null until a spider JAR is loaded.
     this.ensureSpiderContext();
+  }
+
+  /**
+   * Check if a spider class needs special handling (e.g. unidbg for native methods).
+   * This is determined by the className pattern and is isolated per-source.
+   * Source isolation: each source has its own configuration and doesn't affect others.
+   */
+  private needsSourceSpecificHandling(clsKey: string): boolean {
+    // WexGuaZiGuard needs unidbg for LoadNiMa.decode() native method
+    // Other sources may have different requirements - this mapping is isolated
+    const specialSources = new Set([
+      'WexGuaZiGuard', // 瓜子源：需要 unidbg 加载 libLoadNiMa.so
+      // Add other sources here as needed - each source is isolated
+    ]);
+    return specialSources.has(clsKey);
+  }
+
+  /**
+   * Get source-specific directory based on className (isolated per-source).
+   * Uses className instead of jarUrl because domains may change.
+   * Directory structure: jar_cache/<className>/
+   */
+  private getSourceIsolationDir(clsKey: string): string {
+    const sourceDir = path.join(this.jarCacheDir, clsKey);
+    if (!fs.existsSync(sourceDir)) {
+      fs.mkdirSync(sourceDir, { recursive: true });
+    }
+    return sourceDir;
+  }
+
+  /**
+   * Extract native library from JAR file (source-isolated).
+   * Downloads JAR from jarUrl, extracts native .so files to source-specific directory.
+   * Each source maintains its own native library cache.
+   */
+  private async extractNativeFromJar(
+    jarUrl: string,
+    clsKey: string,
+    libName: string,
+  ): Promise<string | null> {
+    const sourceDir = this.getSourceIsolationDir(clsKey);
+    const libPath = path.join(sourceDir, libName);
+
+    // Check if already extracted
+    if (fs.existsSync(libPath)) {
+      console.log(
+        `[JarLoader] Native lib already extracted for ${clsKey}:`,
+        libPath,
+      );
+      return libPath;
+    }
+
+    try {
+      console.log(
+        `[JarLoader] Extracting native lib from JAR for ${clsKey}:`,
+        libName,
+      );
+
+      // Download JAR directly using axios
+      const jarKey = crypto.createHash('md5').update(jarUrl).digest('hex');
+      const jarPath = path.join(this.jarCacheDir, `${jarKey}.jar`);
+
+      // Check if JAR is already downloaded
+      if (!fs.existsSync(jarPath)) {
+        console.log(`[JarLoader] Downloading JAR from:`, jarUrl);
+        const response = await axios.get(jarUrl, {
+          responseType: 'arraybuffer',
+          timeout: 30000,
+        });
+
+        fs.writeFileSync(jarPath, response.data);
+        console.log(`[JarLoader] JAR downloaded to:`, jarPath);
+      } else {
+        console.log(`[JarLoader] JAR already cached:`, jarPath);
+      }
+
+      // Extract native library from JAR (using jar command)
+      // Native libs are typically in lib/arm64-v8a/ or assets/ directory.
+      // Use async exec (libuv thread pool) so the Node.js event loop stays
+      // responsive — execSync would block the main window.
+      let fileList: string;
+      try {
+        const { stdout } = await execAsync(`jar tf "${jarPath}"`, {
+          encoding: 'utf8',
+        });
+        fileList = stdout;
+      } catch (listErr: any) {
+        console.warn(
+          `[JarLoader] Failed to list JAR contents:`,
+          listErr?.message || listErr,
+        );
+        return null;
+      }
+
+      // Find the native lib in JAR
+      const libEntryMatch = fileList.match(
+        new RegExp(`(lib/.*${libName}|assets/${libName})`, 'm'),
+      );
+
+      if (!libEntryMatch) {
+        console.warn(
+          `[JarLoader] Native lib ${libName} not found in JAR ${jarPath}`,
+        );
+        return null;
+      }
+
+      // Extract the specific file
+      const libEntryPath = libEntryMatch[0];
+      await execAsync(`jar xf "${jarPath}" "${libEntryPath}"`, {
+        cwd: sourceDir,
+      });
+
+      // Move to final location
+      const extractedPath = path.join(sourceDir, libEntryPath);
+      if (fs.existsSync(extractedPath)) {
+        fs.renameSync(extractedPath, libPath);
+        console.log(`[JarLoader] Extracted native lib to:`, libPath);
+        return libPath;
+      } else {
+        console.warn(`[JarLoader] Failed to move extracted lib`);
+        return null;
+      }
+    } catch (e: any) {
+      console.error(
+        `[JarLoader] Failed to extract native lib for ${clsKey}:`,
+        e.message,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Verify if libLoadNiMa.so was downloaded by InitOrigin.init(),
+   * and if not, manually download it from the newgo.txt URLs.
+   */
+  private async verifyAndDownloadLibLoadNiMa(): Promise<void> {
+    try {
+      // Get filesDir where InitOrigin downloads libs
+      const InitOrigin = this.java.importClass(
+        'com.github.catvod.spider.InitOrigin',
+      );
+      const filesDir = InitOrigin.oOoOoOo0O0O0oO0o;
+      if (!filesDir) {
+        console.warn(
+          '[JarLoader] InitOrigin.oOoOoOo0O0O0oO0o (filesDir) is null',
+        );
+        return;
+      }
+
+      const libPath = path.join(String(filesDir), 'libLoadNiMa.so');
+      console.log('[JarLoader] Checking libLoadNiMa.so at:', libPath);
+
+      if (fs.existsSync(libPath)) {
+        const stat = fs.statSync(libPath);
+        console.log(
+          '[JarLoader] libLoadNiMa.so found, size:',
+          stat.size,
+          'bytes',
+        );
+        return;
+      }
+
+      console.warn(
+        '[JarLoader] libLoadNiMa.so NOT found! Attempting manual download...',
+      );
+
+      // Manually download from newgo.txt URLs
+      await this.downloadLibLoadNiMaManually(filesDir);
+    } catch (e: any) {
+      console.error(
+        '[JarLoader] verifyAndDownloadLibLoadNiMa failed:',
+        e.message,
+      );
+    }
+  }
+
+  /**
+   * Manually download libLoadNiMa.so from newgo.txt URLs.
+   */
+  private async downloadLibLoadNiMaManually(filesDir: string): Promise<void> {
+    try {
+      const newgoUrl =
+        'http://upload.baicanuc.cn/ossfiles/1768320816/newgo.txt';
+      console.log('[JarLoader] Fetching newgo.txt from:', newgoUrl);
+
+      const response = await axios.get(newgoUrl, { timeout: 30000 });
+      const newgoData = response.data;
+
+      // Determine ABI - we use arm64-v8a for unidbg
+      const abiKey = 'wex_v8_url';
+      const sizeKey = 'wex_v8_size';
+
+      if (!newgoData[abiKey] || !newgoData[sizeKey]) {
+        console.warn('[JarLoader] newgo.txt missing wex_v8_url or wex_v8_size');
+        return;
+      }
+
+      const urls = newgoData[abiKey];
+      const expectedSize = newgoData[sizeKey];
+
+      console.log(
+        '[JarLoader] Found',
+        urls.length,
+        'download URLs for libLoadNiMa.so',
+      );
+
+      const libPath = path.join(String(filesDir), 'libLoadNiMa.so');
+
+      // Try each URL
+      for (const entry of urls) {
+        const url = entry.url;
+        console.log('[JarLoader] Trying URL:', url);
+
+        try {
+          const libResponse = await axios.get(url, {
+            responseType: 'arraybuffer',
+            timeout: 60000,
+          });
+
+          if (libResponse.data.length === expectedSize) {
+            fs.writeFileSync(libPath, libResponse.data);
+            console.log(
+              '[JarLoader] Successfully downloaded libLoadNiMa.so to:',
+              libPath,
+            );
+            return;
+          } else {
+            console.warn(
+              '[JarLoader] File size mismatch:',
+              libResponse.data.length,
+              'vs expected',
+              expectedSize,
+            );
+          }
+        } catch (urlErr: any) {
+          console.warn(
+            '[JarLoader] Download failed from:',
+            url,
+            '-',
+            urlErr.message,
+          );
+        }
+      }
+
+      console.error(
+        '[JarLoader] Failed to download libLoadNiMa.so from all URLs',
+      );
+    } catch (e: any) {
+      console.error(
+        '[JarLoader] downloadLibLoadNiMaManually failed:',
+        e.message,
+      );
+    }
+  }
+
+  /**
+   * Download JAR file from URL (cached by MD5 hash).
+   * Returns path to downloaded JAR file.
+   */
+  /**
+   * Setup source-specific handling (isolated per-source).
+   * For WexGuaZiGuard: download JAR, extract libLoadNiMa.so, prepare unidbg loader.
+   */
+  private async setupSourceSpecificHandling(
+    clsKey: string,
+    jarUrl: string,
+  ): Promise<void> {
+    if (!this.needsSourceSpecificHandling(clsKey)) {
+      return; // No special handling needed for this source
+    }
+
+    console.log(`[JarLoader] Setting up source-specific handling for:`, clsKey);
+
+    try {
+      // For WexGuaZiGuard: extract libLoadNiMa.so from JAR or use InitOrigin download
+      if (clsKey === 'WexGuaZiGuard') {
+        let libPath = await this.extractNativeFromJar(
+          jarUrl,
+          clsKey,
+          'libLoadNiMa.so',
+        );
+
+        // If not found in JAR, check InitOrigin.init() download location
+        if (!libPath) {
+          try {
+            const InitOrigin = this.java.importClass(
+              'com.github.catvod.spider.InitOrigin',
+            );
+            const filesDir = InitOrigin.oOoOoOo0O0O0oO0o;
+            if (filesDir) {
+              const initOriginLibPath = path.join(
+                String(filesDir),
+                'libLoadNiMa.so',
+              );
+              console.log(
+                '[JarLoader] Checking InitOrigin download location:',
+                initOriginLibPath,
+              );
+              if (fs.existsSync(initOriginLibPath)) {
+                const stat = fs.statSync(initOriginLibPath);
+                console.log(
+                  '[JarLoader] Found libLoadNiMa.so from InitOrigin.init(), size:',
+                  stat.size,
+                  'bytes',
+                );
+                libPath = initOriginLibPath;
+              }
+            }
+          } catch (e: any) {
+            console.warn(
+              '[JarLoader] Failed to check InitOrigin lib path:',
+              e.message,
+            );
+          }
+        }
+
+        if (libPath) {
+          // Store in source isolation map
+          this.sourceIsolation.set(clsKey, {
+            nativeLibPath: libPath,
+            needsUnidbg: true,
+          });
+
+          // Set Java system property so stub can find the native library
+          // LoadNiMa-stub reads this property to locate libLoadNiMa.so
+          try {
+            const SystemClass = this.java.importClass('java.lang.System');
+            SystemClass.setPropertySync(
+              'tvbox.nativelib.WexGuaZiGuard',
+              libPath,
+            );
+            console.log(
+              `[JarLoader] Set System property for native lib path:`,
+              libPath,
+            );
+          } catch (e: any) {
+            console.warn(
+              '[JarLoader] Failed to set System property:',
+              e.message,
+            );
+          }
+
+          console.log(
+            `[JarLoader] WexGuaZiGuard ready with native lib:`,
+            libPath,
+          );
+        } else {
+          console.warn(
+            `[JarLoader] WexGuaZiGuard: native lib not found, will use stub`,
+          );
+        }
+      }
+
+      // Add other source-specific setups here - each source is isolated
+    } catch (e: any) {
+      console.error(
+        `[JarLoader] Failed to setup source-specific handling for ${clsKey}:`,
+        e.message,
+      );
+    }
+  }
+
+  /**
+   * Call LoadNiMa.decode() via unidbg emulator (source-isolated).
+   * This is only called for sources that need native decoding (e.g. WexGuaZiGuard).
+   * Each source maintains its own native library cache.
+   *
+   * @param clsKey Source identifier (className without 'csp_' prefix)
+   * @param input Encrypted input data (typically hex string from API response)
+   * @returns Decoded JSON string, or original input if decoding failed
+   */
+  private async callLoadNiMaDecode(
+    clsKey: string,
+    input: string,
+  ): Promise<string> {
+    const sourceConfig = this.sourceIsolation.get(clsKey);
+
+    // Check if source has native library configured
+    if (!sourceConfig?.nativeLibPath) {
+      console.log(
+        `[JarLoader] No native lib for ${clsKey}, returning original input (stub)`,
+      );
+      return input;
+    }
+
+    console.log(`[JarLoader] Calling LoadNiMa.decode via unidbg for ${clsKey}`);
+    console.log(`[JarLoader] Input length:`, input.length);
+    console.log(
+      `[JarLoader] Input preview:`,
+      input.substring(0, Math.min(100, input.length)),
+    );
+
+    try {
+      // Call unidbg loader via Java subprocess
+      const unidbgJarPath = path.join(
+        process.cwd(),
+        'tools/unidbg-loader/target/unidbg-loader-1.0.0.jar',
+      );
+
+      if (!fs.existsSync(unidbgJarPath)) {
+        console.warn(`[JarLoader] Unidbg loader JAR not found:`, unidbgJarPath);
+        return input;
+      }
+
+      // Use async execFile (libuv thread pool) to avoid blocking the Node.js
+      // event loop while the unidbg subprocess runs (can take several seconds).
+      // execFile (not exec) avoids shell interpretation and Windows 8191-char
+      // command line limits — the hex input can be tens of thousands of chars.
+      const { stdout } = await execFileAsync(
+        'java',
+        [
+          '-cp',
+          unidbgJarPath,
+          'com.tvbox.LoadNiMaDecryptor',
+          sourceConfig.nativeLibPath,
+          input,
+        ],
+        {
+          encoding: 'utf8',
+          maxBuffer: 50 * 1024 * 1024, // 50MB buffer for large responses
+          timeout: 30000, // 30 second timeout
+        },
+      );
+      const result = stdout;
+
+      // Parse output: find the last line that looks like JSON
+      const lines = result.trim().split('\n');
+      let decodedJson = '';
+
+      // Scan from bottom to top to find the JSON output
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (line.startsWith('{') || line.startsWith('[')) {
+          decodedJson = line;
+          break;
+        }
+      }
+
+      if (decodedJson) {
+        console.log(
+          `[JarLoader] ✅ LoadNiMa decode success for ${clsKey}, output length:`,
+          decodedJson.length,
+        );
+        console.log(
+          `[JarLoader] Output preview:`,
+          decodedJson.substring(0, Math.min(200, decodedJson.length)),
+        );
+        return decodedJson;
+      } else {
+        console.warn(
+          `[JarLoader] ⚠️  LoadNiMa decode returned non-JSON, using stub`,
+        );
+        return input;
+      }
+    } catch (e: any) {
+      console.error(
+        `[JarLoader] ❌ LoadNiMa decode failed for ${clsKey}:`,
+        e.message,
+      );
+
+      // Check if it's a timeout error
+      if (e.message.includes('timeout') || e.message.includes('ETIMEDOUT')) {
+        console.warn(
+          `[JarLoader] Decode timeout, using stub (native method may be slow)`,
+        );
+      }
+
+      // Fallback to stub (return original input)
+      return input;
+    }
   }
 
   /**
@@ -298,11 +791,17 @@ export class JarLoader {
         // implemented by anonymous classes which dex2jar/enjarify don't preserve.
         const created = java.ensureJvm({
           classpath: stubPaths,
-          opts: ['-Xverify:none'],
+          opts: [
+            '-Xverify:none',
+            '-Dfile.encoding=UTF-8',
+            '-Dsun.stdout.encoding=UTF-8',
+            '-Dsun.stderr.encoding=UTF-8',
+          ],
         });
         if (created) {
           console.log('[JarLoader] JVM started with stubs on system classpath');
           this.stubsLoaded = true;
+          this.diagnoseJSONObject(java);
         } else {
           console.warn(
             '[JarLoader] JVM already started, system classpath not set. Stubs will be added via appendClasspath.',
@@ -373,14 +872,14 @@ export class JarLoader {
       'json.jar',
       'gson.jar',
       'bcprov-jdk18on.jar',
-      'tvbox-spider-stubs.jar',
+      'tvbox-spider-stubs-complete.jar',
     ];
 
     for (const toolsDir of toolsDirs) {
-      const stubPath = path.join(toolsDir, 'tvbox-spider-stubs.jar');
+      const stubPath = path.join(toolsDir, 'tvbox-spider-stubs-complete.jar');
       const exists = fs.existsSync(stubPath);
       console.log(
-        `[JarLoader] Checking tools dir: ${toolsDir} | tvbox-spider-stubs.jar exists: ${exists}`,
+        `[JarLoader] Checking tools dir: ${toolsDir} | tvbox-spider-stubs-complete.jar exists: ${exists}`,
       );
       if (!exists) {
         continue;
@@ -669,6 +1168,7 @@ export class JarLoader {
         '[JarLoader] Stubs already on system classpath (verified Intrinsics)',
       );
       this.stubsLoaded = true;
+      this.diagnoseJSONObject(this.java);
       return;
     } catch {
       // Stubs not on system classpath, need to add via appendClasspath
@@ -693,11 +1193,14 @@ export class JarLoader {
       'json.jar',
       'gson.jar',
       'bcprov-jdk18on.jar',
-      'tvbox-spider-stubs.jar',
+      'tvbox-spider-stubs-complete.jar',
     ];
 
     for (const toolsDir of toolsDirs) {
-      const stubJarPath = path.join(toolsDir, 'tvbox-spider-stubs.jar');
+      const stubJarPath = path.join(
+        toolsDir,
+        'tvbox-spider-stubs-complete.jar',
+      );
       if (!fs.existsSync(stubJarPath)) {
         continue;
       }
@@ -724,6 +1227,7 @@ export class JarLoader {
         this.updateContextClassLoader();
         this.stubsLoaded = true;
         console.log('[JarLoader] All stubs loaded via appendClasspath');
+        this.diagnoseJSONObject(this.java);
         return;
       } catch (appendErr) {
         console.warn(
@@ -754,6 +1258,44 @@ export class JarLoader {
     console.warn(
       '[JarLoader] Required stub JARs not found. JAR spiders may fail to load.',
     );
+  }
+
+  private diagnoseJSONObject(java: JavaBridge): void {
+    try {
+      const JSONObject = java.importClass('org.json.JSONObject');
+      const jo = new JSONObject();
+      jo.putSync('480', 'a');
+      jo.putSync('720', 'b');
+      jo.putSync('1080', 'c');
+      const keys = jo.keysSync();
+      const order: string[] = [];
+      while (keys.hasNextSync()) {
+        order.push(keys.nextSync());
+      }
+      console.log(
+        '[JarLoader] Diagnostic JSONObject keys order:',
+        order.join(', '),
+      );
+      const cls = jo.getClassSync();
+      const loader = cls.getClassLoaderSync();
+      console.log(
+        '[JarLoader] JSONObject ClassLoader:',
+        loader ? loader.toStringSync() : 'null (bootstrap)',
+      );
+      const codeSource = cls.getProtectionDomainSync().getCodeSourceSync();
+      if (codeSource) {
+        const location = codeSource.getLocationSync();
+        console.log(
+          '[JarLoader] JSONObject source JAR:',
+          location ? location.toStringSync() : 'unknown',
+        );
+      }
+    } catch (diagErr: any) {
+      console.warn(
+        '[JarLoader] JSONObject diagnostic failed:',
+        diagErr.message,
+      );
+    }
   }
 
   /**
@@ -1256,7 +1798,27 @@ export class JarLoader {
    *
    * Idempotent: only loads once per process.
    */
-  private loadGuardSpiderJar(): boolean {
+  /**
+   * Kick off Guard spider JAR loading in the background.
+   * Called during app startup so the heavy InitOrigin.init() (which downloads
+   * native libraries over the network) completes before the user selects a
+   * Guard spider source. getSpider() will await this promise if still running.
+   */
+  public preloadGuardSpiderJar(): void {
+    if (this.guardSpiderJarPromise) {
+      return; // Already started
+    }
+    console.log('[JarLoader] Pre-loading Guard spider JAR in background...');
+    this.guardSpiderJarPromise = this.loadGuardSpiderJar().catch((e) => {
+      console.warn(
+        '[JarLoader] Background Guard spider JAR preload failed:',
+        e?.message || e,
+      );
+      return false;
+    });
+  }
+
+  private async loadGuardSpiderJar(): Promise<boolean> {
     if (!this.java) return false;
     if (this.classLoaders.has('wexguard-spider')) {
       return true;
@@ -1313,9 +1875,8 @@ export class JarLoader {
           'android.app.Application',
         );
         const app = new ApplicationClass();
-        const instance = InitOrigin.getSync
-          ? InitOrigin.getSync()
-          : InitOrigin.get();
+        // Use async variant (libuv worker thread) to avoid blocking the main thread
+        const instance = await InitOrigin.get();
         try {
           instance.oOoOoOo0oOo0o0oO = app;
           console.log(
@@ -1329,10 +1890,61 @@ export class JarLoader {
         }
 
         // Verify context
-        const ctx = InitOrigin.contextSync
-          ? InitOrigin.contextSync()
-          : InitOrigin.context();
+        const ctx = await InitOrigin.context();
         console.log('[JarLoader] InitOrigin.context() =', ctx ? 'OK' : 'null');
+
+        // Verify targetSdkVersion from stub PackageManager
+        // This is critical to avoid infinite recursion in InitOrigin.checkPermission()
+        // which checks: if (targetSdkVersion <= 28) { checkPermission(); } - recursion!
+        try {
+          const pm = await ctx.getPackageManager();
+          const packageName = await ctx.getPackageName();
+          const pkgInfo = await pm.getPackageInfo(packageName, 0);
+          const appInfo = pkgInfo.applicationInfo;
+          const targetSdk = appInfo.targetSdkVersion;
+          console.log(
+            '[JarLoader] Stub targetSdkVersion =',
+            targetSdk,
+            '(must be > 28 to avoid recursion)',
+          );
+          if (targetSdk <= 28) {
+            console.error(
+              '[JarLoader] ERROR: targetSdkVersion <= 28 will cause infinite recursion!',
+            );
+          }
+        } catch (verifyErr: any) {
+          console.warn(
+            '[JarLoader] Could not verify targetSdkVersion:',
+            verifyErr.message,
+          );
+        }
+
+        // Call InitOrigin.init() to download native libraries (libLoadNiMa.so, etc)
+        // These ARM .so files are needed by unidbg to decrypt API responses.
+        // Previously skipped to avoid StackOverflowError in checkPermission(),
+        // but now stub ApplicationInfo.targetSdkVersion = 30, so it should work.
+        try {
+          console.log(
+            '[JarLoader] Calling InitOrigin.init() to download native libs...',
+          );
+          const InitOrigin2 = this.java.importClass(
+            'com.github.catvod.spider.InitOrigin',
+          );
+
+          // Use async variant to avoid blocking the main thread during network I/O
+          await InitOrigin2.init(app);
+          console.log('[JarLoader] InitOrigin.init() completed successfully');
+
+          // Verify libLoadNiMa.so was downloaded
+          await this.verifyAndDownloadLibLoadNiMa();
+        } catch (initCallErr: any) {
+          console.warn(
+            '[JarLoader] InitOrigin.init() call failed:',
+            initCallErr?.message || initCallErr,
+          );
+          // If init fails, try to manually download the native library
+          await this.verifyAndDownloadLibLoadNiMa();
+        }
       } catch (initErr: any) {
         console.warn('[JarLoader] InitOrigin setup failed:', initErr.message);
       }
@@ -1341,15 +1953,42 @@ export class JarLoader {
       // proxy port (used to build URLs like http://127.0.0.1:<port>/platform).
       // Without this, ProxyOrigin.getPort() returns 0 and OkHttp throws
       // "Invalid URL port: 0" inside detailContent's PlayUrlBuilder.
+      //
+      // ProxyOrigin.init() falls into findPort() which probes ports 8964-9999
+      // and picks the FIRST responsive one. If another process (e.g. a stale
+      // app instance, or a different service) responds to /proxy?do=ck on a
+      // lower port, findPort() picks that wrong port → spider connects to the
+      // wrong server → "Failed to connect" errors during detailContent.
+      //
+      // Fix: directly set the port field to ProxyServer's actual port BEFORE
+      // calling init(). findPort() checks `if (n <= 0)` and skips probing
+      // when the field is already set.
       try {
         const ProxyOrigin = this.java.importClass(
           'com.github.catvod.spider.ProxyOrigin',
         );
-        ProxyOrigin.initSync ? ProxyOrigin.initSync() : ProxyOrigin.init();
-        const port = ProxyOrigin.getPortSync
-          ? ProxyOrigin.getPortSync()
-          : ProxyOrigin.getPort();
+        const actualPort = proxyServer.getPort();
+        if (actualPort > 0) {
+          ProxyOrigin.oOo0oOo0Oo0oO0Oo = actualPort;
+          console.log(
+            '[JarLoader] ProxyOrigin port pre-set to ProxyServer port:',
+            actualPort,
+          );
+        }
+        // Use async variants to avoid blocking the main thread
+        await ProxyOrigin.init();
+        const port = await ProxyOrigin.getPort();
         console.log('[JarLoader] ProxyOrigin initialized, port:', port);
+        if (actualPort > 0 && port !== actualPort) {
+          console.warn(
+            '[JarLoader] ProxyOrigin port mismatch! init() overrode to',
+            port,
+            'expected',
+            actualPort,
+            '— forcing back',
+          );
+          ProxyOrigin.oOo0oOo0Oo0oO0Oo = actualPort;
+        }
       } catch (proxyErr: any) {
         console.warn('[JarLoader] ProxyOrigin init failed:', proxyErr.message);
       }
@@ -1388,12 +2027,12 @@ export class JarLoader {
    * Get Spider instance from JAR
    * className format: "csp_Duopan" -> JAR class: "com.github.catvod.spider.Duopan"
    */
-  public getSpider(
+  public async getSpider(
     key: string,
     className: string,
     ext: string,
     jarUrl: string = '',
-  ): boolean {
+  ): Promise<boolean> {
     if (!this.java) {
       this.lastError = 'java-bridge not available';
       console.error('[JarLoader]', this.lastError);
@@ -1429,7 +2068,23 @@ export class JarLoader {
       console.log(
         `[JarLoader] Guard spider detected: ${clsKey} -> real class ${realClsKey}`,
       );
-      if (!this.loadGuardSpiderJar()) {
+      // Use the pre-loaded promise if available (started at app startup).
+      // If preload wasn't started (e.g. a Guard spider clicked before app
+      // finished initializing), fall back to loading inline. Either way the
+      // heavy Java calls use async variants that run on libuv worker threads,
+      // so the Node.js event loop (and thus the Electron main window) stays
+      // responsive.
+      let guardOk: boolean;
+      if (this.guardSpiderJarPromise) {
+        console.log('[JarLoader] Awaiting pre-loaded Guard spider JAR promise');
+        guardOk = await this.guardSpiderJarPromise;
+      } else {
+        console.log(
+          '[JarLoader] No preload found, loading Guard spider JAR inline',
+        );
+        guardOk = await this.loadGuardSpiderJar();
+      }
+      if (!guardOk) {
         return false;
       }
     } else {
@@ -1440,6 +2095,11 @@ export class JarLoader {
         return false;
       }
     }
+
+    // Source isolation: setup per-source handling (download native libs, etc.)
+    // This is called AFTER loadGuardSpiderJar() to ensure InitOrigin.init() has run
+    // and libLoadNiMa.so has been downloaded. Each source's modifications are isolated.
+    await this.setupSourceSpecificHandling(clsKey, jarUrl);
 
     try {
       console.log('[JarLoader] Loading spider class:', fullClassName);
@@ -1531,7 +2191,7 @@ export class JarLoader {
           this.java.classpath.get(),
         );
         console.error(
-          '[JarLoader] Ensure tvbox-spider-stubs.jar is in the classpath',
+          '[JarLoader] Ensure tvbox-spider-stubs-complete.jar is in the classpath',
         );
       }
 
@@ -1577,6 +2237,18 @@ export class JarLoader {
     }
     if (typeof parsed !== 'object' || parsed === null) return jsonStr;
 
+    // For detailContent, log the FULL raw spider response so we can compare
+    // with Android's output and diagnose missing/incorrect episode data.
+    if (method === 'detailContent') {
+      console.log(
+        '[JarLoader] ========== detailContent RAW spider response (FULL) ==========',
+      );
+      console.log(jsonStr);
+      console.log(
+        '[JarLoader] ========== detailContent RAW spider response END ==========',
+      );
+    }
+
     // Detect Guard spider output by checking for obfuscated field names.
     // All Guard spiders use fields starting with "oOo" or "OoO" patterns.
     const keys = Object.keys(parsed);
@@ -1602,8 +2274,12 @@ export class JarLoader {
         );
       }
       const out: Record<string, any> = {};
-      // Field mapping verified empirically via test_detail_raw_fields.cjs
-      if (v.oOo0oOo0Oo0oO0Oo !== undefined) out.vod_id = v.oOo0oOo0Oo0oO0Oo;
+      // Field mapping verified empirically via verify_translation.cjs against
+      // raw NewZhiZhen detailContent output. The Guard serializer transforms
+      // some Java field names (e.g. vod_id field oOo0oOo0Oo0oO0Oo -> oOoOo0o0Oo0oO0Oo).
+      if (v.oOoOo0o0Oo0oO0Oo !== undefined) out.vod_id = v.oOoOo0o0Oo0oO0Oo;
+      else if (v.oOo0oOo0Oo0oO0Oo !== undefined)
+        out.vod_id = v.oOo0oOo0Oo0oO0Oo;
       if (v.oOoO0o0oOo0oO0Oo !== undefined)
         out.vod_remarks = v.oOoO0o0oOo0oO0Oo;
       if (v.oOoOoOo0O0O0oO0o !== undefined) out.vod_pic = v.oOoOoOo0O0O0oO0o;
@@ -1612,7 +2288,7 @@ export class JarLoader {
       if (v.OoOo0oO0o0o0oOo0 !== undefined)
         out.vod_director = v.OoOo0oO0o0o0oOo0;
       if (v.OoOoO0O0o0oOoO0O !== undefined) out.vod_actor = v.OoOoO0O0o0oOoO0O;
-      if (v.OoOoOo0O0Oo0o0Oo0 !== undefined) out.vod_year = v.OoOoOo0O0Oo0o0Oo0;
+      if (v.OoOoOo0O0o0oO0o0 !== undefined) out.vod_year = v.OoOoOo0O0o0oO0o0;
       if (v.oOoOo0o0O0O0Oo0 !== undefined) out.vod_content = v.oOoOo0o0O0O0Oo0;
       if (v.oOoOo0O0Oo0o0OoO !== undefined) out.vod_area = v.oOoOo0O0Oo0o0OoO;
       if (v.oOoOoOoOoOoOoO0o !== undefined) out.vod_class = v.oOoOoOoOoOoOoO0o;
@@ -1643,12 +2319,14 @@ export class JarLoader {
           out.vod_director,
           'vod_actor=',
           out.vod_actor,
-          'vod_play_from=',
+        );
+        console.log(
+          '[JarLoader] translateVideo(detailContent) vod_play_from (FULL)=',
           out.vod_play_from,
-          'vod_play_url=',
-          out.vod_play_url
-            ? out.vod_play_url.substring(0, 80) + '...'
-            : out.vod_play_url,
+        );
+        console.log(
+          '[JarLoader] translateVideo(detailContent) vod_play_url (FULL)=',
+          out.vod_play_url,
         );
       }
       return out;
@@ -1716,6 +2394,33 @@ export class JarLoader {
       `page=${result.page}, pagecount=${result.pagecount}`,
     );
 
+    // For detailContent, log the FULL translated result so we can compare
+    // with Android's output and see what the renderer receives.
+    if (method === 'detailContent' && result.list?.length > 0) {
+      const vod = result.list[0];
+      console.log(
+        '[JarLoader] ========== detailContent TRANSLATED result (FULL) ==========',
+      );
+      console.log(
+        JSON.stringify({
+          vod_name: vod.vod_name,
+          vod_play_from: vod.vod_play_from,
+          vod_play_url: vod.vod_play_url,
+          vod_director: vod.vod_director,
+          vod_actor: vod.vod_actor,
+          vod_pic: vod.vod_pic,
+          vod_remarks: vod.vod_remarks,
+          vod_year: vod.vod_year,
+          vod_area: vod.vod_area,
+          vod_class: vod.vod_class,
+          vod_content: vod.vod_content,
+        }),
+      );
+      console.log(
+        '[JarLoader] ========== detailContent TRANSLATED result END ==========',
+      );
+    }
+
     return JSON.stringify(result);
   }
 
@@ -1752,16 +2457,38 @@ export class JarLoader {
       return JSON.stringify(parsed);
     }
 
-    // Find the obfuscated URL field: a string field whose value starts with
-    // "http://127.0.0.1:8096/" (GoProxy) or any HTTP URL.
+    // Find the obfuscated URL field. Prefer real video URLs (https:// or
+    // non-localhost http://) over local proxy URLs (http://127.0.0.1:...).
+    // Some Guard spiders (WexGuaZi) return BOTH a video URL (https://...m3u8)
+    // and a danmu proxy URL (http://127.0.0.1:0/proxy?do=autodanmu). Picking
+    // the proxy URL causes playback failure (invalid port, wrong endpoint).
     let urlField: string | null = null;
     let urlValue = '';
+    let proxyUrlField: string | null = null;
+    let proxyUrlValue = '';
     for (const [k, v] of Object.entries(parsed)) {
-      if (typeof v === 'string' && v.startsWith('http://') && v.length > 20) {
+      if (typeof v !== 'string' || v.length <= 20) continue;
+      // Real video URL: https:// or non-localhost http://
+      if (
+        v.startsWith('https://') ||
+        (v.startsWith('http://') &&
+          !v.startsWith('http://127.0.0.1') &&
+          !v.startsWith('http://localhost'))
+      ) {
         urlField = k;
         urlValue = v;
         break;
       }
+      // Local proxy URL — save as fallback (for GoProxy compatibility)
+      if (v.startsWith('http://') && !proxyUrlField) {
+        proxyUrlField = k;
+        proxyUrlValue = v;
+      }
+    }
+    // Fall back to proxy URL if no real video URL found
+    if (!urlField && proxyUrlField) {
+      urlField = proxyUrlField;
+      urlValue = proxyUrlValue;
     }
     if (!urlField) return jsonStr;
 
@@ -1800,16 +2527,41 @@ export class JarLoader {
 
     const out: Record<string, any> = {};
     let rewrittenUrl = this.rewriteGoProxyUrl(urlValue, flag);
-    // If spider provided custom headers (like User-Agent: tdc.8260), encode them
-    // into the URL so ProxyServer can use them when requesting upstream CDN.
-    // Browser requests proxy URL without the header JSON, so we must pass it
-    // as a URL parameter.
+    // If spider provided custom headers, encode them into the URL — but ONLY
+    // for proxy URLs (containing /proxy?do=). For direct video URLs (e.g.
+    // https://vd.wmvbo.com/.../index.m3u8), appending &header= would be a
+    // spurious query parameter that the CDN may reject. The renderer reads
+    // out.header separately for direct URLs.
     if (headerField && headerValue) {
       out.header = JSON.stringify(headerValue);
-      // Append header to URL: &header=<encoded JSON>
-      const encodedHeader = encodeURIComponent(out.header);
-      if (!rewrittenUrl.includes('header=')) {
+      if (
+        rewrittenUrl.includes('/proxy?do=') &&
+        !rewrittenUrl.includes('header=')
+      ) {
+        const encodedHeader = encodeURIComponent(out.header);
         rewrittenUrl = rewrittenUrl + '&header=' + encodedHeader;
+      } else if (!rewrittenUrl.includes('/proxy?do=')) {
+        // Direct video URL (not proxied): rewrite to route through our
+        // /m3u8.m3u8 proxy endpoint. Node.js makes the upstream request with
+        // the spider-provided headers (User-Agent, Referer) — avoiding the
+        // browser's forbidden-header restrictions AND Chromium's TLS
+        // fingerprinting (which CDNs use to detect third-party access even
+        // when headers are spoofed). The proxy also rewrites the m3u8
+        // manifest to route TS segments through itself.
+        const proxyPort = proxyServer.getPort();
+        if (proxyPort > 0) {
+          const encodedUrl = encodeURIComponent(rewrittenUrl);
+          const encodedHeader = encodeURIComponent(out.header);
+          rewrittenUrl = `http://127.0.0.1:${proxyPort}/m3u8.m3u8?url=${encodedUrl}&header=${encodedHeader}`;
+          console.log(
+            '[JarLoader] Rewrote direct video URL to proxy:',
+            rewrittenUrl.substring(0, 120),
+          );
+        } else {
+          // Fallback: register headers for webRequest injection (less
+          // reliable — CDN may still detect browser TLS fingerprint)
+          this.registerVideoUrlHeaders(rewrittenUrl, headerValue);
+        }
       }
     }
     out.url = rewrittenUrl;
@@ -1825,6 +2577,50 @@ export class JarLoader {
     );
 
     return JSON.stringify(out);
+  }
+
+  /**
+   * Register custom headers for a direct video URL. The webRequest
+   * interceptor in main.ts calls getVideoHeadersForUrl() to inject these
+   * headers on requests to the video's origin (covers both m3u8 manifest
+   * and TS segments which share the same origin).
+   */
+  private registerVideoUrlHeaders(
+    url: string,
+    headers: Record<string, string>,
+  ): void {
+    try {
+      const parsed = new URL(url);
+      const origin = `${parsed.protocol}//${parsed.host}`;
+      console.log(
+        `[JarLoader] Registering video headers for origin: ${origin}`,
+        Object.keys(headers),
+      );
+      this.videoUrlHeaders.set(origin, headers);
+    } catch {
+      // Not a valid URL — skip registration
+    }
+  }
+
+  /**
+   * Get custom headers for a video URL, if any were registered.
+   * Called by the webRequest interceptor in main.ts.
+   */
+  public getVideoHeadersForUrl(url: string): Record<string, string> | null {
+    try {
+      const parsed = new URL(url);
+      const origin = `${parsed.protocol}//${parsed.host}`;
+      return this.videoUrlHeaders.get(origin) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Clear registered video headers (e.g. when switching to a new video).
+   */
+  public clearVideoUrlHeaders(): void {
+    this.videoUrlHeaders.clear();
   }
 
   /**
@@ -2098,468 +2894,6 @@ export class JarLoader {
   }
 
   /**
-   * Fallback for detailContent when the spider's built-in pan resolver fails
-   * to populate vod_play_url/vod_play_from.
-   *
-   * Root cause: the spider (NewWoggGuard) sends the Quark share-token API a
-   * request body of `{share_id: "..."}`, which the API now rejects with code
-   * 41006 "分享不存在". The spider's parser returns null → NPE in a background
-   * thread → spider returns partial detail (metadata only, no episodes).
-   *
-   * This fallback:
-   *  1. Fetches the vod detail HTML page from the spider's mirror URL.
-   *  2. Extracts all Quark share links (pan.quark.cn/s/xxx) from the HTML.
-   *  3. For each share link, calls QuarkPanService.resolveShareToFiles which
-   *     uses the correct `{pwd_id, passcode, support_visit_limit_private_share}`
-   *     body format and recurses into directories to find video files.
-   *  4. Constructs vod_play_url (episode-name$quark-share-id|fid) and
-   *     vod_play_from (line name per share link).
-   *  5. Injects these fields into the original spider result and returns it.
-   *
-   * Returns null if no share links / files were found, so the caller returns
-   * the original (partial) result unchanged.
-   */
-  private async resolveQuarkPanFallback(
-    key: string,
-    result: string,
-    instance: SpiderInstance,
-  ): Promise<string | null> {
-    try {
-      const parsed = JSON.parse(result);
-      const vod = parsed?.list?.[0];
-      if (!vod || !vod.vod_id) {
-        console.warn(
-          '[JarLoader] resolveQuarkPanFallback: no vod_id in result, cannot fetch HTML.',
-        );
-        return null;
-      }
-      const vodId: string = vod.vod_id;
-
-      // Determine the spider's base URL.
-      // 1. Try instance.spider.oOoOoOoOoOoOoO0o (Guard spider's baseURL field)
-      // 2. Try ext.site_urls[0]
-      // 3. Try ext.sites[0].api
-      let baseURL = '';
-      try {
-        const spiderAny = instance.spider as any;
-        const direct =
-          spiderAny.oOoOoOoOoOoOoO0o || spiderAny.O0o0O0o0O0OoOo0O0;
-        if (typeof direct === 'string' && direct.startsWith('http')) {
-          baseURL = direct;
-        }
-      } catch {
-        /* ignore */
-      }
-      if (!baseURL) {
-        try {
-          const extParsed = JSON.parse(instance.ext);
-          if (
-            Array.isArray(extParsed.site_urls) &&
-            extParsed.site_urls.length > 0
-          ) {
-            baseURL = extParsed.site_urls[0];
-          } else if (extParsed.sites && extParsed.sites[0]?.api) {
-            baseURL = extParsed.sites[0].api;
-          }
-        } catch {
-          /* ignore */
-        }
-      }
-      if (!baseURL) {
-        console.warn(
-          '[JarLoader] resolveQuarkPanFallback: cannot determine spider baseURL for',
-          key,
-        );
-        return null;
-      }
-      // Normalize: ensure trailing slash.
-      if (!baseURL.endsWith('/')) baseURL += '/';
-      const detailUrl = baseURL + vodId.replace(/^\//, '');
-      console.log(
-        '[JarLoader] resolveQuarkPanFallback: fetching detail HTML from',
-        detailUrl,
-      );
-
-      // Fetch the HTML page. Use a browser-like UA — some mirrors block
-      // non-browser requests.
-      const htmlResp = await axios.get(detailUrl, {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-          Accept:
-            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        },
-        timeout: 20000,
-        responseType: 'text',
-        // Don't throw on non-2xx — some mirrors return 200 with HTML content
-        // even for "not found" cases.
-        validateStatus: () => true,
-      });
-      const htmlRaw: string =
-        typeof htmlResp.data === 'string' ? htmlResp.data : '';
-      if (!htmlRaw) {
-        console.warn(
-          '[JarLoader] resolveQuarkPanFallback: empty HTML response from',
-          detailUrl,
-        );
-        return null;
-      }
-      // Normalize escaped slashes (HTML embedded in JSON often escapes '/'
-      // as '\/'). Without this, the pan-link regexes below fail to match
-      // URLs like "https:\/\/pan.quark.cn\/s\/abc123".
-      const html: string = htmlRaw.replace(/\\\//g, '/');
-
-      // Scan HTML for all known pan share-link types so we can build a
-      // multi-line vod_play_url (one line per pan site). Currently only
-      // Quark is fully resolved; other types are logged for visibility.
-      // Baidu share URLs may include a ?pwd=xxxx password suffix — capture
-      // it as part of the shareId so BaiduPanService can use it.
-      const panLinkPatterns: Array<{ name: string; regex: RegExp }> = [
-        {
-          name: 'quark',
-          regex: /https?:\/\/pan\.quark\.cn\/s\/([a-zA-Z0-9]+)/g,
-        },
-        { name: 'uc', regex: /https?:\/\/drive\.uc\.cn\/s\/([a-zA-Z0-9]+)/g },
-        {
-          name: 'aliyun',
-          regex:
-            /https?:\/\/(?:www\.)?(?:aliyundrive|alipan)\.com\/s\/([a-zA-Z0-9]+)/g,
-        },
-        {
-          name: 'baidu',
-          regex:
-            /https?:\/\/pan\.baidu\.com\/s\/([a-zA-Z0-9_-]+)(?:\?pwd=([a-zA-Z0-9]+))?/g,
-        },
-        {
-          name: 'xunlei',
-          regex: /https?:\/\/pan\.xunlei\.com\/s\/([a-zA-Z0-9_-]+)/g,
-        },
-        { name: '189', regex: /https?:\/\/cloud\.189\.cn\/t\/([a-zA-Z0-9]+)/g },
-      ];
-      // Value shape: { id: shareId, pwd?: password }
-      const panLinksByType: Record<
-        string,
-        Array<{ id: string; pwd?: string }>
-      > = {};
-      for (const { name, regex } of panLinkPatterns) {
-        const entries: Array<{ id: string; pwd?: string }> = [];
-        const seen = new Set<string>();
-        let mm: RegExpExecArray | null;
-        while ((mm = regex.exec(html)) !== null) {
-          const id = mm[1];
-          if (!seen.has(id)) {
-            seen.add(id);
-            entries.push({ id, pwd: mm[2] });
-          }
-        }
-        if (entries.length > 0) {
-          panLinksByType[name] = entries;
-        }
-      }
-      console.log(
-        '[JarLoader] resolveQuarkPanFallback: HTML length=',
-        html.length,
-        ', pan links by type:',
-        JSON.stringify(panLinksByType),
-      );
-
-      // Process all supported pan types (quark, uc, aliyun, baidu). Each
-      // type contributes its own line in vod_play_url, producing a multi-
-      // source tab in the detail page UI. Unsupported types (xunlei, 189)
-      // are still scanned and logged above but skipped here.
-      const panHandlers: Array<{
-        type: string;
-        lineName: string;
-        shareUrlPrefix: string;
-        idPrefix: string;
-        resolve: (url: string) => Promise<{
-          success: boolean;
-          title?: string;
-          files?: Array<{
-            fid?: string;
-            fileId?: string;
-            fsId?: string;
-            fileName: string;
-            shareFidToken?: string;
-            stoken?: string;
-          }>;
-          error?: string;
-        }>;
-        fileIdField: 'fid' | 'fileId' | 'fsId';
-      }> = [
-        {
-          type: 'quark',
-          // Must contain '夸克' so spider's WangPan.playerContent flag check
-          // dispatches to x.E(). Use '夸克原画' to also match x.E()'s strict
-          // equality branch (flag.split('#')[0].equals('夸克原画')).
-          lineName: '夸克原画',
-          shareUrlPrefix: 'https://pan.quark.cn/s/',
-          idPrefix: 'quark',
-          resolve: (url) => QuarkPanService.resolveShareToFiles(url),
-          fileIdField: 'fid',
-        },
-        {
-          type: 'uc',
-          lineName: 'UC',
-          shareUrlPrefix: 'https://drive.uc.cn/s/',
-          idPrefix: 'uc',
-          resolve: (url) => UCPanService.resolveShareToFiles(url),
-          fileIdField: 'fid',
-        },
-        {
-          type: 'aliyun',
-          lineName: '阿里云盘',
-          shareUrlPrefix: 'https://www.aliyundrive.com/s/',
-          idPrefix: 'aliyun',
-          resolve: (url) => AliyunPanService.resolveShareToFiles(url),
-          fileIdField: 'fileId',
-        },
-        {
-          type: 'baidu',
-          lineName: '百度网盘',
-          shareUrlPrefix: 'https://pan.baidu.com/s/',
-          idPrefix: 'baidu',
-          resolve: (url) => BaiduPanService.resolveShareToFiles(url),
-          fileIdField: 'fsId',
-        },
-      ];
-
-      const playFromLines: string[] = [];
-      const playUrlLines: string[] = [];
-      let totalFiles = 0;
-      let lineIndex = 0;
-
-      for (const handler of panHandlers) {
-        const shareEntries = panLinksByType[handler.type] || [];
-        if (shareEntries.length === 0) continue;
-        console.log(
-          '[JarLoader] resolveQuarkPanFallback: processing',
-          handler.type,
-          '- found',
-          shareEntries.length,
-          'share links:',
-          shareEntries,
-        );
-        for (const entry of shareEntries) {
-          const shareId = entry.id;
-          // For Baidu shares with a ?pwd=xxx suffix, append it to the
-          // shareUrl so BaiduPanService can present the password to the
-          // share-verify endpoint.
-          const shareUrl = entry.pwd
-            ? `${handler.shareUrlPrefix}${shareId}?pwd=${entry.pwd}`
-            : handler.shareUrlPrefix + shareId;
-          const resolved = await handler.resolve(shareUrl);
-          if (
-            !resolved.success ||
-            !resolved.files ||
-            resolved.files.length === 0
-          ) {
-            console.warn(
-              '[JarLoader] resolveQuarkPanFallback:',
-              handler.type,
-              'shareId=',
-              shareId,
-              'resolved with no files:',
-              resolved.error || 'no files',
-            );
-            continue;
-          }
-          // Flag (vod_play_from line name) MUST be handler.lineName for Quark
-          // and UC — the spider's WangPan.playerContent dispatches by checking
-          // flag.contains('夸克') / flag.contains('UC'). Using the share title
-          // here would break that dispatch. For multiple shares of the same
-          // type, append '#N' so the player UI can distinguish them; the
-          // spider's x.E() splits flag by '#' and checks the first part.
-          lineIndex++;
-          const lineName =
-            shareEntries.length > 1
-              ? `${handler.lineName}#${lineIndex}`
-              : handler.lineName;
-          const shareTitle = resolved.title || '';
-          const episodes: string[] = [];
-          resolved.files.forEach((f, idx) => {
-            const baseName = (f.fileName || '').replace(/\.[^.]+$/, '');
-            const epName = baseName || `第${idx + 1}集`;
-            const fileId = String(f[handler.fileIdField] || '');
-            if (!fileId) return;
-            let epUrl: string;
-            if (handler.type === 'quark') {
-              // NewWogg spider's playerContent → merge dispatcher → NewQuark.playerContent,
-              // which does `Base64.decode(id)` and parses the result as JSON to extract
-              // fid / shareFidToken / token (=stoken) / shareId / filename.
-              // (See NewQuark.java line 1259 and OoOoOo0O0o0oO0o0.java line 163-187.)
-              // The `+`-separated format only works for Duopan (WangPan.playerContent →
-              // x.E()), not for NewWogg. Injecting the spider's native Base64-JSON format
-              // lets NewQuark resolve the share and return a do=ali proxy URL.
-              const payload = JSON.stringify({
-                fid: fileId,
-                shareFidToken: f.shareFidToken || '',
-                token: f.stoken || '',
-                shareId: shareId,
-                filename: f.fileName || '',
-              });
-              epUrl = Buffer.from(payload, 'utf8').toString('base64');
-            } else {
-              // ':' format — playerContent interceptor routes to our service.
-              epUrl = `${handler.idPrefix}:${shareId}:${fileId}`;
-            }
-            episodes.push(`${epName}$${epUrl}`);
-          });
-          if (episodes.length === 0) continue;
-          playFromLines.push(lineName);
-          playUrlLines.push(episodes.join('#'));
-          totalFiles += episodes.length;
-        }
-      }
-
-      if (totalFiles === 0) {
-        console.warn(
-          '[JarLoader] resolveQuarkPanFallback: no playable files found in any share.',
-        );
-        return null;
-      }
-
-      // Inject fields into the original vod object.
-      vod.vod_play_from = playFromLines.join('$$$');
-      vod.vod_play_url = playUrlLines.join('$$$');
-      console.log(
-        '[JarLoader] resolveQuarkPanFallback: enriched result with',
-        playFromLines.length,
-        'lines,',
-        totalFiles,
-        'episodes.',
-      );
-      return JSON.stringify(parsed);
-    } catch (e: any) {
-      console.error(
-        '[JarLoader] resolveQuarkPanFallback error:',
-        e.message || e,
-      );
-      return null;
-    }
-  }
-
-  /**
-   * playerContent fallback for episodes with the "<panType>:<shareId>:<fileId>"
-   * id format (injected by resolveQuarkPanFallback).
-   *
-   * Returns a playerContent JSON response pointing the player at our local
-   * ProxyServer's /proxy?do=<panType>Direct endpoint, which streams the file
-   * from the pan CDN with the correct Cookie/Referer/User-Agent injected.
-   *
-   * Returns null on failure so the caller falls back to the spider's own
-   * playerContent (which will likely also fail, but at least we tried).
-   */
-  private async resolveQuarkPlayerContent(
-    panType: 'quark' | 'uc' | 'aliyun' | 'baidu',
-    shareId: string,
-    fid: string,
-  ): Promise<string | null> {
-    try {
-      const port = proxyServer.getPort();
-      if (!port || port < 0) {
-        console.warn(
-          '[JarLoader] resolveQuarkPlayerContent: ProxyServer not started',
-        );
-        return null;
-      }
-      // Pre-resolve the download URL once here so we can fail fast and so the
-      // proxy endpoint doesn't need to call back into the pan service. If
-      // resolution fails, return null and let the caller fall back to the
-      // spider's playerContent.
-      let downloadUrl: string | null = null;
-      switch (panType) {
-        case 'quark':
-          downloadUrl = await QuarkPanService.resolveQuarkDownloadUrl(
-            shareId,
-            fid,
-          );
-          break;
-        case 'uc':
-          downloadUrl = await UCPanService.resolveDownloadUrl(shareId, fid);
-          break;
-        case 'aliyun':
-          downloadUrl = await AliyunPanService.resolveDownloadUrl(shareId, fid);
-          break;
-        case 'baidu':
-          downloadUrl = await BaiduPanService.resolveDownloadUrl(shareId, fid);
-          break;
-      }
-      if (!downloadUrl) {
-        console.warn(
-          '[JarLoader] resolveQuarkPlayerContent: no download URL for',
-          panType,
-          'shareId=',
-          shareId,
-          'fid=',
-          fid,
-        );
-        return null;
-      }
-      // Aliyun's signed download_url works without Cookie/Referer, so we
-      // return it directly (no proxy needed). The browser's <video> element
-      // can fetch it as-is.
-      if (panType === 'aliyun') {
-        const aliResult = {
-          parse: 0,
-          playUrl: '',
-          url: downloadUrl,
-          header: '',
-        };
-        console.log(
-          '[JarLoader] resolveQuarkPlayerContent: returning direct aliyun URL for shareId=',
-          shareId,
-          'fid=',
-          fid,
-        );
-        return JSON.stringify(aliResult);
-      }
-      // Quark/UC/Baidu: route through ProxyServer which injects the correct
-      // Cookie/Referer/User-Agent the browser can't send.
-      const directDo =
-        panType === 'quark'
-          ? 'quarkDirect'
-          : panType === 'uc'
-            ? 'ucDirect'
-            : 'baiduDirect';
-      const referer =
-        panType === 'quark'
-          ? 'https://pan.quark.cn/'
-          : panType === 'uc'
-            ? 'https://drive.uc.cn/'
-            : 'https://pan.baidu.com/';
-      const proxyUrl =
-        `http://127.0.0.1:${port}/proxy?do=${directDo}` +
-        `&url=${encodeURIComponent(downloadUrl)}`;
-      const result = {
-        parse: 0,
-        playUrl: '',
-        url: proxyUrl,
-        // Browsers can't set these headers on <video> requests, but the
-        // ProxyServer will inject them when forwarding to the CDN. The
-        // "header" field here is informational for the player UI.
-        header: `Referer=${referer}&User-Agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36`,
-      };
-      console.log(
-        '[JarLoader] resolveQuarkPlayerContent: returning proxy URL for',
-        panType,
-        'shareId=',
-        shareId,
-        'fid=',
-        fid,
-      );
-      return JSON.stringify(result);
-    } catch (e: any) {
-      console.error(
-        '[JarLoader] resolveQuarkPlayerContent error:',
-        e.message || e,
-      );
-      return null;
-    }
-  }
-
-  /**
    * Sanitize a spider key for use in file paths and Java string parameters.
    *
    * java-bridge corrupts Unicode strings when passing them from Node.js to
@@ -2687,115 +3021,72 @@ export class JarLoader {
 
     let currentExt = instance.ext;
 
-    // playerContent: Quark Base64-JSON id bypass.
+    // Pre-playback Quark cookie refresh.
     //
-    // The spider's NewQuark.playerContent calls the Quark API with the
-    // spider's SharedPreferences cookie (possibly stale), producing a
-    // download URL whose auth_key is bound to that cookie's __puus. The
-    // ProxyServer.streamPanDirect uses QuarkPanService.syncedCookie (fresh),
-    // so the __puus mismatch causes 412 Precondition Failed on the CDN.
+    // The spider's playerContent reads the Quark cookie from JVM
+    // SharedPreferences. That cookie may be stale (set at app startup), so
+    // the spider generates a download URL whose auth_key is bound to a stale
+    // __puus → CDN 412.
     //
-    // Bypass the spider entirely for Quark: decode the Base64-JSON id
-    // (injected by resolveQuarkPanFallback at detailContent time) and call
-    // our TS-side resolver, which refreshes __puus and uses the same cookie
-    // for both the API call and the proxy → auth_key matches → no 412.
-    //
-    // Android (puopan.jar / Duopan) doesn't have this issue because
-    // libwexproxy.so handles CDN requests in-process with the spider's exact
-    // cookie. Desktop can't load the ARM .so, so we must use the TS proxy.
+    // Refresh __puus here and push the fresh cookie to JVM so the spider uses
+    // it. If the refresh detects true login expiry, emit pan:loginExpired so
+    // the renderer can pop up the QR re-login dialog.
     if (
       method === 'playerContent' &&
       typeof args[0] === 'string' &&
-      typeof args[1] === 'string' &&
-      (args[0].includes('夸克') || args[0].includes('夸父'))
+      (args[0].includes('夸克') || args[0].includes('夸父')) &&
+      QuarkPanService.getSyncedCookie()
     ) {
       try {
-        const decoded = JSON.parse(
-          Buffer.from(args[1], 'base64').toString('utf8'),
-        );
-        if (
-          decoded &&
-          typeof decoded.shareId === 'string' &&
-          typeof decoded.fid === 'string'
-        ) {
-          console.log(
-            '[JarLoader] playerContent: detected Quark Base64-JSON id,',
-            'shareId=',
-            decoded.shareId,
-            'fid=',
-            decoded.fid,
-          );
-          const fallbackResult = await this.resolveQuarkPlayerContent(
-            'quark',
-            decoded.shareId,
-            decoded.fid,
-          );
-          if (fallbackResult) {
-            return fallbackResult;
-          }
-          // null → fall through to spider as last resort
+        const refreshResult = await QuarkPanService.refreshCookieForPlayback();
+        if (refreshResult.expired) {
           console.warn(
-            '[JarLoader] playerContent: Quark Base64-JSON fallback returned null,',
-            'falling through to spider',
+            '[JarLoader] playerContent: Quark login expired, emitting pan:loginExpired',
           );
+          try {
+            BrowserWindow.getAllWindows().forEach((w) =>
+              w.webContents.send('pan:loginExpired', 'quark'),
+            );
+          } catch (e: any) {
+            console.warn(
+              '[JarLoader] Failed to emit pan:loginExpired:',
+              e.message,
+            );
+          }
+          throw new Error('Quark login expired, please re-scan QR code');
+        }
+        if (refreshResult.refreshed && refreshResult.cookie) {
+          console.log(
+            '[JarLoader] playerContent: Quark cookie refreshed, syncing to JVM',
+          );
+          await QuarkPanService.syncCookieToJVM(refreshResult.cookie);
         }
       } catch (e: any) {
-        // Not a valid Base64-JSON id (e.g. legacy '+'-separated format from
-        // Duopan/WangPan) — fall through to spider's own playerContent.
-        console.log(
-          '[JarLoader] playerContent: Quark Base64-JSON decode failed,',
-          'falling through to spider:',
-          e.message || e,
+        if (e.message?.includes('Quark login expired')) throw e;
+        console.warn(
+          '[JarLoader] playerContent: Quark cookie refresh failed, continuing with existing cookie:',
+          e.message,
         );
       }
     }
 
-    // playerContent: if the id has the "<panPrefix>:<shareId>:<fileId>"
-    // format (injected by resolveQuarkPanFallback for uc/aliyun/baidu), the
-    // spider can't resolve it via its built-in pan resolver. Skip the spider
-    // entirely and call our pan-service download API directly. Each prefix
-    // routes to the matching service.
+    // Pre-detailContent pan cookie injection.
     //
-    // NOTE: Quark no longer uses this format. resolveQuarkPanFallback injects
-    // the spider's native Base64-JSON format (Base64({fid, shareFidToken,
-    // token, shareId, filename})) for Quark. NewWogg's playerContent dispatches
-    // to NewQuark.playerContent, which does Base64.decode(id) and parses the
-    // JSON. The regex below won't match a Base64 string (no colons), so the
-    // spider's own playerContent handles it and returns a do=ali proxy URL.
-    if (method === 'playerContent' && typeof args[1] === 'string') {
-      const id: string = args[1];
-      const panMatch = id.match(/^(quark|uc|aliyun|baidu):([^:]+):(.+)$/);
-      if (panMatch) {
-        const panType = panMatch[1];
-        const shareId = panMatch[2];
-        const fid = panMatch[3];
-        console.log(
-          '[JarLoader] playerContent: detected',
-          panType,
-          '-fallback id, shareId=',
-          shareId,
-          'fid=',
-          fid,
-        );
-        try {
-          const fallbackResult = await this.resolveQuarkPlayerContent(
-            panType,
-            shareId,
-            fid,
-          );
-          if (fallbackResult) {
-            return fallbackResult;
-          }
-        } catch (e: any) {
-          console.warn(
-            '[JarLoader] playerContent',
-            panType,
-            'fallback failed:',
-            e.message || e,
-          );
-        }
-        // If fallback failed, fall through to spider call as last resort.
-      }
+    // The spider's pan resolver (NewQuark/NewPanUc/NewPan115) stores the
+    // pan cookie in a STATIC field initialized to "". The field is only
+    // populated from SharedPreferences inside oOoO0OoO0oOo0oOo() (a heavy
+    // validation method) or playerContent() — neither is called before
+    // detailContentVodPlay(). So when detailContent triggers the pan
+    // resolver thread pool, the Cookie header is empty, the Quark API
+    // rejects the request (no stoken), getvod() returns an empty VodBean,
+    // and Gson.fromJson("") returns null → NPE → "暂无播放源".
+    //
+    // Fix: directly set the static cookie fields from SharedPreferences
+    // before calling detailContent. This mirrors what the spider's own
+    // oOoO0OoO0oOo0oOo() does at line 557 (NewQuark) / line 383 (NewPanUc)
+    // / line 71 (NewPan115), but without the heavy HTTP validation.
+    if (method === 'detailContent') {
+      this.setPanCookiesForDetailContent();
     }
 
     for (let retry = 0; retry < maxRetries; retry++) {
@@ -2900,6 +3191,65 @@ export class JarLoader {
         const javaArgs = this.convertArgs(method, args);
         let result = await this.executeSpiderMethod(spider, method, javaArgs);
 
+        // Source isolation: call LoadNiMa.decode via unidbg for sources that need it
+        // This is ONLY applied to specific sources (e.g. WexGuaZiGuard) that have native decoding requirements
+        // Each source is isolated - this logic doesn't affect other sources
+        const clsKey = instance.className.replace('csp_', '');
+        if (clsKey === 'WexGuaZiGuard' && method === 'homeContent') {
+          console.log(
+            `[JarLoader] Checking if LoadNiMa decoding needed for ${clsKey}`,
+          );
+
+          // WexGuaZi's homeContent returns encrypted data that needs LoadNiMa.decode()
+          // Check if result is not valid JSON (indicating it needs decoding)
+          if (result && result.length > 0 && !result.trim().startsWith('{')) {
+            console.log(
+              `[JarLoader] Result is non-JSON, calling LoadNiMa.decode for ${clsKey}`,
+            );
+            console.log(
+              `[JarLoader] Original result preview:`,
+              result.substring(0, Math.min(100, result.length)),
+            );
+
+            // Call unidbg to decode the data
+            const decodedResult = await this.callLoadNiMaDecode(clsKey, result);
+
+            if (decodedResult && decodedResult.trim().startsWith('{')) {
+              console.log(
+                `[JarLoader] ✅ Decoding successful, using decoded data`,
+              );
+              result = decodedResult;
+            } else {
+              console.warn(
+                `[JarLoader] ⚠️  Decoding failed or returned non-JSON, keeping original`,
+              );
+            }
+          } else {
+            console.log(
+              `[JarLoader] Result is already JSON or empty, no decoding needed`,
+            );
+          }
+        }
+
+        // Debug: log raw result for homeContent/homeVideoContent to diagnose JSON parsing issues
+        if (isHomeMethod) {
+          console.log(
+            `[JarLoader] ${method} RAW RESULT (length=${result.length}):`,
+          );
+          // Print first 500 chars to see actual content
+          const preview =
+            result.length > 500 ? result.substring(0, 500) + '...' : result;
+          console.log(`[JarLoader] ${method} preview:`, preview);
+          // Print byte representation for non-JSON strings
+          if (result && result.length > 0 && result.charAt(0) !== '{') {
+            const bytes = Buffer.from(result.substring(0, 50));
+            console.log(
+              `[JarLoader] ${method} first 50 bytes:`,
+              bytes.toString('hex'),
+            );
+          }
+        }
+
         // Guard spiders return JSON with obfuscated field names (e.g.
         // oOo0oOo0Oo0oO0Oo). Translate to standard TVBox format (vod_id,
         // list, class, filters) so the renderer and isEmptyResult can
@@ -2911,6 +3261,35 @@ export class JarLoader {
           }
         }
 
+        // detailContent: log full input/output for debugging jar issues.
+        if (method === 'detailContent') {
+          console.log('[JarLoader] ========== detailContent debug ==========');
+          console.log('[JarLoader] detailContent args =', JSON.stringify(args));
+          const detailPreview =
+            result.length > 2000 ? result.substring(0, 2000) + '...' : result;
+          console.log(
+            '[JarLoader] detailContent result (full):',
+            detailPreview,
+          );
+          try {
+            const parsed = JSON.parse(result);
+            const vod = parsed?.list?.[0] || {};
+            console.log('[JarLoader] detailContent vod summary:', {
+              vod_name: vod.vod_name,
+              vod_id: vod.vod_id,
+              has_play_url: !!vod.vod_play_url,
+              has_play_from: !!vod.vod_play_from,
+              vod_play_from: vod.vod_play_from,
+              vod_play_url_len: vod.vod_play_url?.length || 0,
+            });
+          } catch {
+            /* not JSON */
+          }
+          console.log(
+            '[JarLoader] ========== end detailContent debug ==========',
+          );
+        }
+
         // playerContent: Guard spiders (NewWogg/NewQuark/etc.) return JSON
         // with an obfuscated URL field (e.g. "OoOoOi0o0o0oOo0") whose value
         // is a GoProxy URL ("http://127.0.0.1:8096/kaiser?url=<CDN URL>").
@@ -2920,21 +3299,33 @@ export class JarLoader {
         // streamPanDirect handler, which fetches the CDN URL with the same
         // Cookie/Referer/UA the spider would have used.
         if (method === 'playerContent' && typeof args[0] === 'string') {
-          // Diagnostic: log raw playerContent result for non-pan sources
+          // Diagnostic: log FULL playerContent input and output for debugging
+          // (previously truncated to 60/200 chars, which hid the vod_id and url)
+          console.log('[JarLoader] ========== playerContent debug ==========');
+          console.log('[JarLoader] playerContent flag =', args[0]);
           console.log(
-            '[JarLoader] playerContent raw result for flag=',
-            args[0],
-            'id=',
-            typeof args[1] === 'string'
-              ? args[1].substring(0, 60) + '...'
-              : args[1],
-            'result=',
-            result.substring(0, 200) + '...',
+            '[JarLoader] playerContent id (full) =',
+            typeof args[1] === 'string' ? args[1] : args[1],
           );
+          console.log('[JarLoader] playerContent raw result (full) =', result);
+          // Clear stale video headers from the previous video before
+          // registering new ones in translatePlayerContent.
+          this.clearVideoUrlHeaders();
           const translatedPc = this.translatePlayerContent(result, args[0]);
           if (translatedPc !== result) {
+            console.log(
+              '[JarLoader] playerContent translated result (full) =',
+              translatedPc,
+            );
             result = translatedPc;
+          } else {
+            console.log(
+              '[JarLoader] playerContent: translatePlayerContent returned unchanged',
+            );
           }
+          console.log(
+            '[JarLoader] ========== end playerContent debug ==========',
+          );
         }
 
         if (
@@ -2972,36 +3363,39 @@ export class JarLoader {
         }
 
         // detailContent: retries exhausted but vod_play_url still missing.
-        // The spider's pan resolver uses the legacy {share_id: ...} body
-        // format which the Quark API now rejects ("分享不存在"). Fall back to
-        // our own Quark resolution using the correct {pwd_id, passcode, ...}
-        // body format, then inject vod_play_url/vod_play_from into the result.
+        // Per user instruction: do NOT write PC fallback — rely on the jar
+        // spider entirely. If the spider returns missing play fields, log
+        // diagnostics so we can fix the jar issue, then return as-is.
         if (retryOnMissingPlayUrl && this.isMissingPlayUrl(result)) {
-          console.log(
-            '[JarLoader] detailContent still missing vod_play_url after retries, trying Quark pan fallback...',
+          console.warn(
+            '[JarLoader] detailContent: spider returned missing vod_play_url/vod_play_from after retries.',
           );
           try {
-            const fallbackResult = await this.resolveQuarkPanFallback(
-              key,
-              result,
-              instance,
-            );
-            if (fallbackResult) {
-              console.log(
-                '[JarLoader] Quark pan fallback succeeded, returning enriched result.',
-              );
-              return fallbackResult;
-            }
-          } catch (e: any) {
-            console.warn(
-              '[JarLoader] Quark pan fallback failed:',
-              e.message || e,
-            );
+            const parsed = JSON.parse(result);
+            const vod = parsed?.list?.[0] || {};
+            console.warn('[JarLoader] detailContent vod fields:', {
+              vod_name: vod.vod_name,
+              vod_id: vod.vod_id,
+              has_play_url: !!vod.vod_play_url,
+              has_play_from: !!vod.vod_play_from,
+              vod_play_from: vod.vod_play_from,
+              vod_play_url_len: vod.vod_play_url?.length || 0,
+            });
+          } catch {
+            /* ignore parse error */
           }
         }
 
         return result;
-      } catch {
+      } catch (err: any) {
+        console.error(
+          `[JarLoader] ${method} threw:`,
+          err.message || err,
+          'retry:',
+          retry,
+          'key:',
+          key,
+        );
         if (retry < maxRetries - 1) {
           console.log('[JarLoader] Error, clearing file cache and retrying...');
           this.clearSpiderFileCache(key + '_retry' + retry);
@@ -3011,6 +3405,14 @@ export class JarLoader {
           }
           continue;
         }
+
+        // Per user instruction: do NOT write PC fallback — rely on the jar
+        // spider entirely. If homeContent fails, log diagnostics so we can
+        // fix the jar issue, then return empty.
+        console.error(
+          `[JarLoader] ${clsKey} ${method} exhausted all retries and failed`,
+        );
+
         return '{}';
       }
     }
@@ -3491,6 +3893,79 @@ export class JarLoader {
         e?.message || e,
       );
       return null;
+    }
+  }
+
+  /**
+   * Set pan cookie static fields on NewQuark/NewPanUc/NewPan115 before
+   * detailContent. The spider initializes these fields to "" and only
+   * populates them inside oOoO0OoO0oOo0oOo() or playerContent() — neither
+   * runs before detailContentVodPlay(). Without this, the pan resolver
+   * sends an empty Cookie header → API rejects → empty VodBean → NPE.
+   *
+   * Static field mapping (verified from decompiled CFR source):
+   *   NewQuark.OoOoOo0O0o0oO0o0   ← Wex_quark_cookie  (NewQuark.java:901)
+   *   NewPanUc.oOoOo0O0Oo0o0OoO   ← Wex_ucpan_cookie  (NewPanUc.java:611,686)
+   *   NewPan115.oOoOoOo0oOo0o0oO  ← Wex_pan115_cookie (NewPan115.java:148,481)
+   */
+  private setPanCookiesForDetailContent(): void {
+    if (!this.java) return;
+    try {
+      const InitClass = this.java.importClass('com.github.catvod.spider.Init');
+      const ctx = InitClass.contextSync();
+      if (!ctx) return;
+      const guardPrefs = ctx.getSharedPreferencesSync(
+        'NewWexFnw_preferences',
+        0,
+      );
+
+      const panClasses = [
+        {
+          className: 'com.github.catvod.spider.NewQuark',
+          fieldName: 'OoOoOo0O0o0oO0o0',
+          prefKey: 'Wex_quark_cookie',
+          label: 'quark',
+        },
+        {
+          className: 'com.github.catvod.spider.NewPanUc',
+          fieldName: 'oOoOo0O0Oo0o0OoO',
+          prefKey: 'Wex_ucpan_cookie',
+          label: 'uc',
+        },
+        {
+          className: 'com.github.catvod.spider.NewPan115',
+          fieldName: 'oOoOoOo0oOo0o0oO',
+          prefKey: 'Wex_pan115_cookie',
+          label: '115',
+        },
+      ];
+
+      for (const pan of panClasses) {
+        try {
+          const cookie = guardPrefs.getStringSync(pan.prefKey, '');
+          if (!cookie || cookie.length < 10) {
+            console.log(
+              `[JarLoader] setPanCookies: ${pan.label} cookie empty or missing, skipping`,
+            );
+            continue;
+          }
+          const cls = this.java.importClass(pan.className);
+          cls[pan.fieldName] = cookie;
+          console.log(
+            `[JarLoader] setPanCookies: set ${pan.label} static cookie (len=${cookie.length})`,
+          );
+        } catch (e: any) {
+          console.warn(
+            `[JarLoader] setPanCookies: failed to set ${pan.label} cookie:`,
+            e?.message || e,
+          );
+        }
+      }
+    } catch (e: any) {
+      console.warn(
+        '[JarLoader] setPanCookiesForDetailContent failed:',
+        e?.message || e,
+      );
     }
   }
 
@@ -4264,13 +4739,26 @@ export class JarLoader {
           methods.slice(0, 20).join(', '),
         );
 
-        // Try different method names
-        if (typeof spiderObj.proxyLocalSync === 'function') {
-          console.log('[JarLoader] callSpiderProxyLocal: using proxyLocalSync');
-          const result = spiderObj.proxyLocalSync(map);
-          if (result) {
-            return this.parseProxyResult(result);
+        // Try the spider's own static proxy(Map) method (WexHanXiaoQuan, etc.)
+        // Static methods are available on the class, not on the instance
+        try {
+          const spiderClass = spiderInstance.spider.getClassSync
+            ? spiderInstance.spider.getClassSync()
+            : spiderInstance.spider.getClass();
+          if (spiderClass && typeof spiderClass.proxySync === 'function') {
+            console.log(
+              '[JarLoader] callSpiderProxyLocal: using static proxySync on spider class',
+            );
+            const result = spiderClass.proxySync(map);
+            if (result) {
+              return this.parseProxyResult(result);
+            }
           }
+        } catch (classErr: any) {
+          console.log(
+            '[JarLoader] callSpiderProxyLocal: static proxy attempt failed:',
+            classErr.message,
+          );
         }
 
         // Check for obfuscated method names (韩剧源使用混淆后的方法名)
@@ -4387,7 +4875,7 @@ export class JarLoader {
     }
     try {
       const ProxyClass = this.java.importClass(
-        'com.github.catvod.spider.Proxy',
+        'com.github.catvod.spider.ProxyOrigin',
       );
       const HashMap = this.java.importClass('java.util.HashMap');
       const map = new HashMap();
@@ -4582,7 +5070,12 @@ export function registerJarLoaderIPC(): void {
       ext: string,
       jarUrl?: string,
     ) => {
-      const success = jarLoader.getSpider(key, className, ext, jarUrl || '');
+      const success = await jarLoader.getSpider(
+        key,
+        className,
+        ext,
+        jarUrl || '',
+      );
       return {
         success,
         error: success ? '' : jarLoader.getLastError(),
@@ -4736,4 +5229,11 @@ export function registerJarLoaderIPC(): void {
   });
 
   console.log('[JarLoader] IPC handlers registered');
+
+  // Kick off Guard spider JAR preloading in the background so that when the
+  // user clicks a Guard source (e.g. WexGuaZiGuard), the heavy InitOrigin.init()
+  // network I/O has already completed. This keeps the main window responsive
+  // because getSpider() just awaits the promise rather than starting the work
+  // synchronously on the IPC call.
+  jarLoader.preloadGuardSpiderJar();
 }

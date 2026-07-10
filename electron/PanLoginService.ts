@@ -154,6 +154,7 @@ export class PanLoginService {
                 cookie.length,
               );
               UCPanService.setSyncedCookie(cookie);
+              await UCPanService.syncToGuardPrefs(cookie);
             } else if (panType === 'aliyun') {
               const refreshToken: string = info?.refreshToken || '';
               const accessToken: string = info?.accessToken || '';
@@ -172,6 +173,7 @@ export class PanLoginService {
                 cookie.length,
               );
               BaiduPanService.setSyncedCookie(cookie);
+              await BaiduPanService.syncToGuardPrefs(cookie);
             }
           }
           return { success: true };
@@ -623,6 +625,7 @@ export class PanLoginService {
       // Sync cookie to UCPanService so resolveShareToFiles/resolveDownloadUrl
       // can use it immediately (without requiring app restart).
       UCPanService.setSyncedCookie(cookie);
+      await UCPanService.syncToGuardPrefs(cookie);
       return { success: true, status: 'confirmed', loginInfo };
     } catch (e: any) {
       log('uc', 'pollQRCode failed:', e.message);
@@ -1004,11 +1007,13 @@ export class PanLoginService {
           // Sync cookie to BaiduPanService so resolveShareToFiles/resolveDownloadUrl
           // can use it immediately (without requiring app restart).
           BaiduPanService.setSyncedCookie(loginInfo.cookie || '');
+          await BaiduPanService.syncToGuardPrefs(loginInfo.cookie || '');
           return { success: true, status: 'confirmed', loginInfo };
         }
 
         // Fallback: use v as BDUSS
         BaiduPanService.setSyncedCookie(`BDUSS=${v}`);
+        await BaiduPanService.syncToGuardPrefs(`BDUSS=${v}`);
         return {
           success: true,
           status: 'confirmed',

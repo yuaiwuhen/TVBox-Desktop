@@ -105,7 +105,7 @@
               </div>
               <!-- Episode grid: fixed column width ensures vertical alignment -->
               <div class="ep-grid mt-2">
-                <el-tooltip v-for="(ep, idx) in getVisibleEpisodes(source.episodes)" :key="ep.name" :content="ep.name"
+                <el-tooltip v-for="(ep, idx) in getVisibleEpisodes(source.episodes)" :key="ep.url" :content="ep.name"
                   :disabled="ep.name.length <= 8" placement="top" :show-after="300">
                   <button
                     class="ep-btn px-3 py-2 rounded text-sm transition-all duration-150 cursor-pointer text-center"
@@ -121,6 +121,27 @@
               </div>
             </el-tab-pane>
           </el-tabs>
+        </div>
+
+        <!-- Pan Login Required Prompt -->
+        <div v-else-if="needPanLogin" class="mb-4 rounded-lg p-6 text-center" style="background: var(--color-bg-surface)">
+          <el-icon :size="40" style="color: var(--color-warning)">
+            <WarningFilled />
+          </el-icon>
+          <p class="mt-3 text-sm" style="color: var(--color-text-secondary)">
+            该资源来自网盘，需登录对应网盘后方可播放
+          </p>
+          <p class="mt-1 text-xs" style="color: var(--color-text-tertiary)">
+            请到配置中心扫码登录夸克网盘或百度网盘
+          </p>
+          <el-button type="warning" size="small" class="mt-3" @click="goToConfigCenter">
+            去配置中心登录
+          </el-button>
+        </div>
+
+        <!-- No Play Sources (unknown reason) -->
+        <div v-else class="mb-4 rounded-lg p-4 text-center" style="background: var(--color-bg-surface)">
+          <p class="text-sm" style="color: var(--color-text-secondary)">暂无播放源</p>
         </div>
       </div>
     </div>
@@ -159,7 +180,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ArrowLeft, Star, StarFilled, Film, Loading, Avatar, Picture } from '@element-plus/icons-vue'
+import { ArrowLeft, Star, StarFilled, Film, Loading, Avatar, Picture, WarningFilled } from '@element-plus/icons-vue'
 import { useAppStore } from '../store/app'
 import { Database } from '../core/Database'
 import { SubtitleSearch, type SubtitleSearchResult } from '../core/SubtitleSearch'
@@ -187,6 +208,12 @@ const subtitleSearchLoading = ref(false)
 const descExpanded = ref(false)
 const showPanLogin = ref(false)
 const pendingPlayAfterLogin = ref<{ flag: string; url: string } | null>(null)
+// Tracks the most recent playEpisode attempt so pan:loginExpired (fired by
+// the main process when Quark cookie expires mid-playback) can retry after
+// the user re-scans the QR code.
+const lastPlayAttempt = ref<{ flag: string; url: string } | null>(null)
+// Disposer for the pan:loginExpired IPC listener — called in onBeforeUnmount.
+let panLoginExpiredDisposer: (() => void) | null = null
 
 const currentPanType = computed<'quark' | 'uc' | 'aliyun' | 'baidu' | 'bili' | '115' | undefined>(() => {
   const flag = activePlaySource.value
@@ -270,6 +297,8 @@ async function playEpisode(flag: string, url: string) {
     loginState: panLoginStates[flag],
     allLoginStates: { ...panLoginStates },
   })
+  // Remember this attempt so pan:loginExpired can retry after re-login.
+  lastPlayAttempt.value = { flag, url }
   // 直接从 panLoginStates 读取状态
   if (isPanSource(flag) && !panLoginStates[flag]) {
     console.log('[Detail] playEpisode: not logged in, showing login dialog')
@@ -302,6 +331,24 @@ function onPanLoginSuccess() {
   }
 }
 
+/**
+ * Handle pan:loginExpired event from the main process.
+ *
+ * Fired when JarLoader detects Quark cookie expiry before playerContent, or
+ * when ProxyServer.streamPanDirect gets a 412 from the Quark CDN. Shows a
+ * warning, stashes the current play attempt for retry, and opens the QR
+ * re-login dialog.
+ */
+function onPanLoginExpired(panType: string) {
+  console.warn('[Detail] pan:loginExpired received, panType=', panType)
+  if (panType !== 'quark') return
+  ElMessage.warning('夸克网盘登录已失效，请重新扫码登录')
+  if (lastPlayAttempt.value) {
+    pendingPlayAfterLogin.value = { ...lastPlayAttempt.value }
+  }
+  showPanLogin.value = true
+}
+
 const playSources = computed(() => {
   const vod = store.currentVod
   if (!vod?.vod_play_from || !vod?.vod_play_url) {
@@ -310,6 +357,7 @@ const playSources = computed(() => {
       hasUrl: !!vod?.vod_play_url,
       from: vod?.vod_play_from,
       url: vod?.vod_play_url,
+      needPanLogin: (vod as any)?.needPanLogin,
     })
     return []
   }
@@ -331,14 +379,22 @@ const playSources = computed(() => {
     if (sortOrder.value === 'desc') episodes = [...episodes].reverse()
     return { name, episodes }
   })
-  console.log('[Detail] playSources:', {
+  console.log('[Detail] ========== playSources RAW DATA ==========')
+  console.log('[Detail] vod_play_from (FULL):', vod.vod_play_from)
+  console.log('[Detail] vod_play_url (FULL):', vod.vod_play_url)
+  console.log('[Detail] playSources parsed:', {
     sourcesCount: sources.length,
     urlGroupCount: urls.length,
     sources,
     urlGroupLengths: urls.map(u => u.length),
-    firstUrlGroupPreview: urls[0]?.substring(0, 200),
-    result: result.map(r => ({ name: r.name, epCount: r.episodes.length, firstEp: r.episodes[0] })),
+    result: result.map(r => ({
+      name: r.name,
+      epCount: r.episodes.length,
+      firstEp: r.episodes[0],
+      lastEp: r.episodes[r.episodes.length - 1],
+    })),
   })
+  console.log('[Detail] ========== playSources RAW DATA END ==========')
   return result
 })
 
@@ -348,6 +404,42 @@ const currentEpisodeName = computed(() => {
   const ep = store.currentEpisodes[store.currentPlayIndex]
   return ep?.name || ''
 })
+
+// Whether the current detail page needs pan login to show play data
+const needPanLogin = computed(() => {
+  return !!(store.currentVod as any)?.needPanLogin
+})
+
+function goToConfigCenter() {
+  // Navigate to home page and force-select the config center
+  router.replace('/')
+  // Check if config center already exists in the site list, otherwise use hardcoded selection
+  setTimeout(() => {
+    const hasConfig = store.sites.some(s => 
+      (s.key?.toLowerCase() === 'config') || 
+      (s.name?.includes('配置')) ||
+      (s.api?.toLowerCase().includes('config'))
+    )
+    if (hasConfig) {
+      // Find the config site by key/name/api and select it
+      const configSite = store.sites.find(s => 
+        (s.key?.toLowerCase() === 'config') || 
+        (s.name?.includes('配置')) ||
+        (s.api?.toLowerCase().includes('config'))
+      )
+      if (configSite) {
+        const uniqueKey = store.getUniqueKey(configSite)
+        store.setActiveSite(uniqueKey)
+        console.log('[Detail] goToConfigCenter: selected existing config site', uniqueKey)
+      }
+    } else {
+      // No existing config site found — this should not happen in normal usage
+      // We can't call setActiveSite with an object directly, so we just leave it
+      // User will manually navigate to config center
+      console.log('[Detail] goToConfigCenter: no config site found in site list')
+    }
+  }, 100)
+}
 
 // Title shown in the detail hero: "剧名" or "剧名 - 第01集" when playing
 const pageTitle = computed(() => {
@@ -412,6 +504,19 @@ onMounted(async () => {
     return
   }
   store.setActiveSite(sourceKey)
+  // Listen for pan:loginExpired from the main process (fired when Quark
+  // cookie expires mid-playback). Use the same ipcRenderer access pattern
+  // as PanLogin.ts for consistency.
+  try {
+    const { ipcRenderer } = require('electron')
+    const handler = (_event: any, panType: string) => onPanLoginExpired(panType)
+    ipcRenderer.on('pan:loginExpired', handler)
+    panLoginExpiredDisposer = () => {
+      ipcRenderer.removeListener('pan:loginExpired', handler)
+    }
+  } catch (e: any) {
+    console.warn('[Detail] Failed to register pan:loginExpired listener:', e.message)
+  }
   try {
     await store.loadDetail(vodId)
     if (store.currentVod && playSources.value.length > 0) {
@@ -432,6 +537,10 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopLoginPolling()
+  if (panLoginExpiredDisposer) {
+    panLoginExpiredDisposer()
+    panLoginExpiredDisposer = null
+  }
   // 清除播放状态，避免下一个视频显示错误的"播放到第X集"
   store.currentPlayUrl = ''
   store.currentPlayIndex = 0
@@ -606,7 +715,7 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
   100% {
     opacity: 1;
     max-height: 100vh;
-    transform: scaleY(1);
+    transform: none;
   }
 }
 </style>

@@ -18,6 +18,10 @@ export type PanType =
   | 'baidu'
   | 'bili'
   | '115'
+  | '189'
+  | '139'
+  | '123'
+  | 'guangyapan'
   | 'unknown';
 
 export interface PanVideoInfo {
@@ -38,46 +42,68 @@ export interface PanPlayResult {
 export class PanResolver {
   /**
    * 从 flag 和 url 中识别网盘类型
+   *
+   * 注意：检测顺序很重要。'UC' 必须在 'baidu' 之前（避免"百度"误匹配），
+   * '123' 必须在 'uc' 之后（避免"123"误匹配其他）。
+   * 各类型关键词对应该 spider jar 中的 vod_play_from 命名（如 "天翼原画"）。
    */
   static detectPanType(flag: string, url: string): PanType {
-    const text = `${flag} ${url}`.toLowerCase();
+    const text = `${flag} ${url}`;
+    const lower = text.toLowerCase();
 
+    // 光鸦（必须在其他之前，因为"光鸦"是独特关键词）
+    if (text.includes('光鸦') || lower.includes('guangya')) {
+      return 'guangyapan';
+    }
+    // 天翼 189
+    if (text.includes('天翼') || text.includes('189') || lower.includes('cloud.189')) {
+      return '189';
+    }
+    // 移动 139
+    if (text.includes('移动') || text.includes('139') || lower.includes('yun.139')) {
+      return '139';
+    }
+    // 115
+    if (text.includes('115')) {
+      return '115';
+    }
+    // 123
+    if (text.includes('123') || lower.includes('123pan')) {
+      return '123';
+    }
     if (
-      text.includes('quark') ||
+      lower.includes('quark') ||
       text.includes('夸克') ||
-      text.includes('pan.quark')
+      lower.includes('pan.quark')
     ) {
       return 'quark';
     }
     if (
-      text.includes('bili') ||
+      lower.includes('bili') ||
       text.includes('b站') ||
-      text.includes('bilibili')
+      lower.includes('bilibili')
     ) {
       return 'bili';
     }
     if (
-      text.includes('uc') ||
+      lower.includes('uc') ||
       text.includes('uc网盘') ||
-      text.includes('yun.uc')
+      lower.includes('yun.uc')
     ) {
       return 'uc';
     }
     if (
-      text.includes('aliyun') ||
+      lower.includes('aliyun') ||
       text.includes('阿里') ||
-      text.includes('alipan') ||
-      text.includes('aliyundrive')
+      lower.includes('alipan') ||
+      lower.includes('aliyundrive')
     ) {
       return 'aliyun';
     }
-    if (text.includes('115')) {
-      return '115';
-    }
     if (
-      text.includes('baidu') ||
+      lower.includes('baidu') ||
       text.includes('百度') ||
-      text.includes('pan.baidu')
+      lower.includes('pan.baidu')
     ) {
       return 'baidu';
     }
@@ -87,10 +113,19 @@ export class PanResolver {
 
   /**
    * 检查网盘是否已登录
+   *
+   * - 123/139: 无需登录（匿名可播放），始终返回 true
+   * - 115/189/guangyapan: 暂不支持登录，返回 false
+   * - quark/uc/aliyun/baidu/bili: 查询 PanLogin 登录状态
    */
   static isLoggedIn(panType: PanType): boolean {
-    // 'unknown' 和 '115' 不支持登录检查
-    if (panType === 'unknown' || panType === '115') {
+    if (panType === '123' || panType === '139') return true;
+    if (
+      panType === 'unknown' ||
+      panType === '115' ||
+      panType === '189' ||
+      panType === 'guangyapan'
+    ) {
       return false;
     }
     return PanLogin.isLoggedIn(panType as import('./PanLogin').PanType);

@@ -28,6 +28,19 @@ export interface RemoteControlHandler {
   setConfigUrl?(url: string): Promise<void>;
   setLiveUrl?(url: string): void;
   setEpgUrl?(url: string): void;
+  switchSource?(sourceKey: string): void;
+  loadHome?(force?: boolean): Promise<void>;
+  loadCategory?(
+    tid: string,
+    page: string,
+    filters?: Record<string, string>,
+  ): Promise<void>;
+  getPlayUrl?(
+    sourceKey: string,
+    vodId: string,
+    flag: string,
+    episodeUrl: string,
+  ): Promise<{ url: string; header?: Record<string, string> } | null>;
 }
 
 export class RemoteServer {
@@ -116,6 +129,10 @@ export class RemoteServer {
           '/source',
           '/action',
           '/media',
+          '/home',
+          '/category',
+          '/play-url',
+          '/switch',
         ],
       });
     } else if (pathname === '/status' || pathname === '/media') {
@@ -140,6 +157,14 @@ export class RemoteServer {
       this.handleSpider(res);
     } else if (pathname === '/clear-cache') {
       this.handleClearCache(res);
+    } else if (pathname === '/home') {
+      await this.handleHome(reqUrl, res);
+    } else if (pathname === '/category') {
+      await this.handleCategory(reqUrl, res);
+    } else if (pathname === '/play-url') {
+      await this.handlePlayUrl(reqUrl, res);
+    } else if (pathname === '/switch') {
+      await this.handleSwitch(reqUrl, res);
     } else {
       this.sendJson(res, 404, { error: 'Not Found' });
     }
@@ -435,6 +460,116 @@ export class RemoteServer {
   private sendJson(res: any, code: number, data: any): void {
     res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(data));
+  }
+
+  private async handleSwitch(reqUrl: URL, res: any): Promise<void> {
+    if (!this.handler) {
+      this.sendJson(res, 503, { error: 'Handler not connected' });
+      return;
+    }
+    const sourceKey = reqUrl.searchParams.get('key') || '';
+    if (!sourceKey) {
+      this.sendJson(res, 400, { error: 'Missing key parameter' });
+      return;
+    }
+    const waitForLoad = reqUrl.searchParams.get('wait') === 'true';
+    if (this.handler.switchSource) {
+      this.handler.switchSource(sourceKey);
+      if (waitForLoad && this.handler.loadHome) {
+        // Wait for home data to load after switching
+        await this.handler.loadHome(true);
+        const status = this.handler.getStatus();
+        this.sendJson(res, 200, {
+          message: `Source switched to: ${sourceKey}`,
+          ...status,
+        });
+      } else {
+        this.sendJson(res, 200, {
+          message: `Source switched to: ${sourceKey}`,
+        });
+      }
+    } else {
+      this.sendJson(res, 501, { error: 'switchSource not supported' });
+    }
+  }
+
+  private async handleHome(reqUrl: URL, res: any): Promise<void> {
+    if (!this.handler) {
+      this.sendJson(res, 503, { error: 'Handler not connected' });
+      return;
+    }
+    const force = reqUrl.searchParams.get('force') === 'true';
+    if (this.handler.loadHome) {
+      try {
+        await this.handler.loadHome(force);
+        // Wait a bit for data to load
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        const status = this.handler.getStatus();
+        this.sendJson(res, 200, status);
+      } catch (e: any) {
+        this.sendJson(res, 500, { error: e.message });
+      }
+    } else {
+      this.sendJson(res, 501, { error: 'loadHome not supported' });
+    }
+  }
+
+  private async handleCategory(reqUrl: URL, res: any): Promise<void> {
+    if (!this.handler) {
+      this.sendJson(res, 503, { error: 'Handler not connected' });
+      return;
+    }
+    const tid = reqUrl.searchParams.get('tid') || '';
+    const page = reqUrl.searchParams.get('page') || '1';
+    if (!tid) {
+      this.sendJson(res, 400, { error: 'Missing tid parameter' });
+      return;
+    }
+    if (this.handler.loadCategory) {
+      try {
+        await this.handler.loadCategory(tid, page);
+        // Wait for data to load
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const status = this.handler.getStatus();
+        this.sendJson(res, 200, status);
+      } catch (e: any) {
+        this.sendJson(res, 500, { error: e.message });
+      }
+    } else {
+      this.sendJson(res, 501, { error: 'loadCategory not supported' });
+    }
+  }
+
+  private async handlePlayUrl(reqUrl: URL, res: any): Promise<void> {
+    if (!this.handler) {
+      this.sendJson(res, 503, { error: 'Handler not connected' });
+      return;
+    }
+    const sourceKey = reqUrl.searchParams.get('source') || '';
+    const vodId = reqUrl.searchParams.get('id') || '';
+    const flag = reqUrl.searchParams.get('flag') || '';
+    const episodeUrl = reqUrl.searchParams.get('url') || '';
+    if (!sourceKey || !vodId || !episodeUrl) {
+      this.sendJson(res, 400, {
+        error: 'Missing source, id, or url parameter',
+      });
+      return;
+    }
+    if (this.handler.getPlayUrl) {
+      try {
+        const result = await this.handler.getPlayUrl(
+          sourceKey,
+          vodId,
+          flag,
+          episodeUrl,
+        );
+        this.sendJson(res, 200, result || { error: 'No result' });
+      } catch (e: any) {
+        this.sendJson(res, 500, { error: e.message });
+      }
+    } else {
+      this.sendJson(res, 501, { error: 'getPlayUrl not supported' });
+    }
   }
 }
 

@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { ipcMain } from 'electron';
+import { jarLoader } from './JarLoader';
 
 /**
  * UCPanService - UC网盘 share resolver.
@@ -31,6 +32,43 @@ export class UCPanService {
   }
   static getSyncedCookie(): string | null {
     return this.syncedCookie;
+  }
+
+  /**
+   * Sync UC cookie to the Guard spider's SharedPreferences
+   * (NewWexFnw_preferences, key Wex_ucpan_cookie). This lets the spider's
+   * internal pan resolver read the UC cookie when resolving UC share links.
+   * Mirrors QuarkPanService.syncCookieToJVM's guard-prefs step.
+   */
+  static async syncToGuardPrefs(cookie: string): Promise<void> {
+    if (!cookie) return;
+    try {
+      if (!jarLoader || !jarLoader.java) {
+        console.warn('[UCPanService] JVM not ready, skipping guard prefs sync');
+        return;
+      }
+      const InitClass = jarLoader.java.importClass(
+        'com.github.catvod.spider.Init',
+      );
+      const ctx = InitClass.contextSync();
+      if (!ctx) {
+        console.warn('[UCPanService] Init.context() returned null');
+        return;
+      }
+      const GUARD_PREFS = 'NewWexFnw_preferences';
+      const guardPrefs = ctx.getSharedPreferencesSync(GUARD_PREFS, 0);
+      const editor = guardPrefs.editSync();
+      editor.putStringSync('Wex_ucpan_cookie', cookie);
+      editor.applySync();
+      console.log(
+        `[UCPanService] Synced cookie to ${GUARD_PREFS} (Wex_ucpan_cookie), length: ${cookie.length}`,
+      );
+    } catch (e: any) {
+      console.warn(
+        '[UCPanService] Failed to sync to guard prefs:',
+        e?.message || e,
+      );
+    }
   }
 
   static init(): void {
@@ -74,7 +112,10 @@ export class UCPanService {
     error?: string;
   }> {
     if (!this.syncedCookie) {
-      return { success: false, error: 'UC cookie not synced. Please login first.' };
+      return {
+        success: false,
+        error: 'UC cookie not synced. Please login first.',
+      };
     }
     const match = shareUrl.match(/\/s\/([a-zA-Z0-9]+)/);
     if (!match) {
@@ -86,7 +127,11 @@ export class UCPanService {
     try {
       const tokenResp = await axios.post(
         'https://pc-api.uc.cn/1/clouddrive/share/sharepage/token?pr=UCBrowser&fr=pc',
-        { pwd_id: shareId, passcode: '', support_visit_limit_private_share: true },
+        {
+          pwd_id: shareId,
+          passcode: '',
+          support_visit_limit_private_share: true,
+        },
         { headers, timeout: 15000 },
       );
       if (tokenResp.data?.code !== 0 || !tokenResp.data?.data?.stoken) {
@@ -207,7 +252,11 @@ export class UCPanService {
     try {
       const tokenResp = await axios.post(
         'https://pc-api.uc.cn/1/clouddrive/share/sharepage/token?pr=UCBrowser&fr=pc',
-        { pwd_id: shareId, passcode: '', support_visit_limit_private_share: true },
+        {
+          pwd_id: shareId,
+          passcode: '',
+          support_visit_limit_private_share: true,
+        },
         { headers, timeout: 15000 },
       );
       if (tokenResp.data?.code !== 0 || !tokenResp.data?.data?.stoken) {
@@ -225,7 +274,10 @@ export class UCPanService {
         { fids: [fid], pwd_id: shareId, stoken },
         { headers, timeout: 15000, validateStatus: () => true },
       );
-      if (downloadResp.data?.code === 0 && downloadResp.data?.data?.[0]?.download_url) {
+      if (
+        downloadResp.data?.code === 0 &&
+        downloadResp.data?.data?.[0]?.download_url
+      ) {
         const url: string = downloadResp.data.data[0].download_url;
         console.log(
           '[UCPanService] resolveDownloadUrl: direct download OK, length=',
@@ -423,8 +475,7 @@ export class UCPanService {
       };
       const pick =
         videoList.find(
-          (v: any) =>
-            v?.video_info?.url && v?.accessable !== false && isMp4(v),
+          (v: any) => v?.video_info?.url && v?.accessable !== false && isMp4(v),
         ) ||
         videoList.find(
           (v: any) => v?.video_info?.url && v?.accessable !== false,

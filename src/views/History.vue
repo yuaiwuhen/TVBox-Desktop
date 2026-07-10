@@ -106,7 +106,7 @@ function goToPlay(item: HistoryRecord) {
 }
 
 async function handleDeleteSingle(item: HistoryRecord) {
-  await Database.removeHistory(item.sourceKey, item.vod_id)
+  await Database.removeHistory(item.vod_name || item.vod_id)
   await store.refreshHistory()
   ElMessage.success('已删除')
 }

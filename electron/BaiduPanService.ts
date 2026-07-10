@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { ipcMain } from 'electron';
+import { jarLoader } from './JarLoader';
 
 /**
  * BaiduPanService - 百度网盘 share resolver.
@@ -69,6 +70,45 @@ export class BaiduPanService {
     return this.syncedCookie;
   }
 
+  /**
+   * Sync Baidu cookie to the Guard spider's SharedPreferences
+   * (NewWexFnw_preferences, key Wex_baidu_cookie). This lets the spider's
+   * internal pan resolver read the Baidu cookie when resolving Baidu shares.
+   * Mirrors QuarkPanService.syncCookieToJVM's guard-prefs step.
+   */
+  static async syncToGuardPrefs(cookie: string): Promise<void> {
+    if (!cookie) return;
+    try {
+      if (!jarLoader || !jarLoader.java) {
+        console.warn(
+          '[BaiduPanService] JVM not ready, skipping guard prefs sync',
+        );
+        return;
+      }
+      const InitClass = jarLoader.java.importClass(
+        'com.github.catvod.spider.Init',
+      );
+      const ctx = InitClass.contextSync();
+      if (!ctx) {
+        console.warn('[BaiduPanService] Init.context() returned null');
+        return;
+      }
+      const GUARD_PREFS = 'NewWexFnw_preferences';
+      const guardPrefs = ctx.getSharedPreferencesSync(GUARD_PREFS, 0);
+      const editor = guardPrefs.editSync();
+      editor.putStringSync('Wex_baidu_cookie', cookie);
+      editor.applySync();
+      console.log(
+        `[BaiduPanService] Synced cookie to ${GUARD_PREFS} (Wex_baidu_cookie), length: ${cookie.length}`,
+      );
+    } catch (e: any) {
+      console.warn(
+        '[BaiduPanService] Failed to sync to guard prefs:',
+        e?.message || e,
+      );
+    }
+  }
+
   private static extractCookieValue(
     cookie: string,
     key: string,
@@ -123,6 +163,9 @@ export class BaiduPanService {
       return { success: false, error: 'Invalid share URL: ' + shareUrl };
     }
     const surl = match[1];
+    // Baidu's /share/verify API expects the SHORT surl (without the leading
+    // "1" prefix). The share page URL uses the full surl (with "1").
+    const shortSurl = surl.replace(/^1/, '');
     // Extract optional ?pwd=xxx (added by JarLoader when scanning detail HTML).
     const pwdMatch = shareUrl.match(/[?&]pwd=([a-zA-Z0-9]+)/);
     const pwd = pwdMatch?.[1] || '';
@@ -133,7 +176,7 @@ export class BaiduPanService {
     let extraCookie = '';
     if (pwd) {
       try {
-        const verifyUrl = `https://pan.baidu.com/share/verify?surl=${surl}&pwd=${pwd}&bdstoken=${this.bdstoken || ''}&clienttype=0&channel=chunmi`;
+        const verifyUrl = `https://pan.baidu.com/share/verify?surl=${shortSurl}&pwd=${pwd}&bdstoken=${this.bdstoken || ''}&clienttype=0&channel=chunmi`;
         const verifyResp = await axios.get(verifyUrl, {
           headers: this.buildHeaders(),
           timeout: 15000,

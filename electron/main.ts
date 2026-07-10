@@ -1,13 +1,28 @@
 import { app, BrowserWindow, Menu, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { registerJarLoaderIPC } from './JarLoader';
+import { registerJarLoaderIPC, jarLoader } from './JarLoader';
 import { QuarkPanService } from './QuarkPanService';
 import { UCPanService } from './UCPanService';
 import { AliyunPanService } from './AliyunPanService';
 import { BaiduPanService } from './BaiduPanService';
+import { Pan123Service } from './Pan123Service';
+import { Pan139Service } from './Pan139Service';
+import { Pan189Service } from './Pan189Service';
+import { Pan115Service } from './Pan115Service';
 import { PanLoginService } from './PanLoginService';
 import { proxyServer } from './ProxyServer';
+
+// Enable HEVC/H.265 hardware decoding in Chromium.
+// On Windows, this uses Media Foundation's HEVC decoder (requires HEVC Video
+// Extension from Microsoft Store, or a GPU with native HEVC decode support).
+// Without this flag, Chromium falls back to software decoding which may not
+// be available, causing video playback to stall on the first frame.
+app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport');
+
+// Enable remote debugging for CDP (Chrome DevTools Protocol) access.
+// Used by test scripts to inspect renderer state (HEVC support, playback).
+app.commandLine.appendSwitch('remote-debugging-port', '9222');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -51,22 +66,92 @@ function createWindow() {
     win.loadFile(path.join(process.env.DIST, 'index.html'));
   }
 
-  // Anti-leech header interceptor
+  // Video header injection + anti-leech interceptor.
+  // Some Guard spiders (WexGuaZi) return direct video URLs (https://...) with
+  // custom headers (User-Agent, Referer) that the browser cannot set:
+  //   - User-Agent is a forbidden header in fetch/XHR
+  //   - Referer is controlled by the browser
+  // jarLoader registers these headers by URL origin; we inject them here so
+  // the CDN receives the headers it expects. This covers both the m3u8
+  // manifest and the TS segments inside it (same origin).
+  //
+  // We also strip browser-specific headers (Sec-Fetch-*, Sec-Ch-Ua, etc.)
+  // because CDNs use them to detect third-party access ("请勿使用第三方程序"
+  // error). A real Lavf/57.83.100 client doesn't send these.
   const filter = { urls: ['*://*/*'] };
+  // Headers that reveal the request originates from a browser. CDNs check
+  // these to block third-party access even when User-Agent is spoofed.
+  const BROWSER_LEAK_HEADERS = [
+    'sec-fetch-dest',
+    'sec-fetch-mode',
+    'sec-fetch-site',
+    'sec-fetch-user',
+    'sec-ch-ua',
+    'sec-ch-ua-mobile',
+    'sec-ch-ua-platform',
+    'sec-ch-ua-arch',
+    'sec-ch-ua-bitness',
+    'sec-ch-ua-full-version',
+    'sec-ch-ua-full-version-list',
+    'accept-language',
+    'origin',
+    'cache-control',
+    'pragma',
+    'dnt',
+    'upgrade-insecure-requests',
+  ];
   win.webContents.session.webRequest.onBeforeSendHeaders(
     filter,
     (details, callback) => {
       const { requestHeaders } = details;
-      if (details.url.includes('.m3u8') || details.url.includes('.ts')) {
-        // Referer stripping for anti-leech bypass
+      const videoHeaders = jarLoader.getVideoHeadersForUrl(details.url);
+      if (videoHeaders) {
+        // Inject spider-provided headers (User-Agent, Referer, etc.)
+        for (const [hk, hv] of Object.entries(videoHeaders)) {
+          requestHeaders[hk] = hv;
+        }
+        // Strip browser-specific headers that betray a browser origin.
+        // CDN anti-leech checks look for Sec-Fetch-* and Sec-Ch-Ua headers
+        // — a real native client (Lavf/57.83.100) never sends them.
+        for (const h of BROWSER_LEAK_HEADERS) {
+          delete requestHeaders[h];
+          // Also handle case-sensitive variants
+          delete requestHeaders[h.charAt(0).toUpperCase() + h.slice(1)];
+        }
+        console.log(
+          '[webRequest] Injected video headers for',
+          details.url.substring(0, 80),
+          '— keys:',
+          Object.keys(requestHeaders).join(','),
+        );
+      } else if (details.url.includes('.m3u8') || details.url.includes('.ts')) {
+        // No custom headers registered — apply default anti-leech bypass
         delete requestHeaders['Referer'];
       }
       callback({ requestHeaders });
     },
   );
 
-  // hevc.js不需要SharedArrayBuffer和COOP/COEP headers（单线程解码）
-  // 移除headers拦截器配置，简化部署
+  // CORS bypass for direct video URLs. CDNs often don't send
+  // Access-Control-Allow-Origin, which makes hls.js fail to fetch the
+  // m3u8/TS segments. Add permissive CORS headers to the response.
+  win.webContents.session.webRequest.onHeadersReceived(
+    filter,
+    (details, callback) => {
+      const videoHeaders = jarLoader.getVideoHeadersForUrl(details.url);
+      if (videoHeaders) {
+        const responseHeaders = { ...details.responseHeaders };
+        responseHeaders['access-control-allow-origin'] = ['*'];
+        responseHeaders['access-control-allow-headers'] = ['*'];
+        responseHeaders['access-control-allow-methods'] = [
+          'GET, HEAD, OPTIONS',
+        ];
+        callback({ responseHeaders });
+        return;
+      }
+      callback({});
+    },
+  );
 
   // Open external links in default browser
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -116,6 +201,10 @@ app.whenReady().then(async () => {
   UCPanService.init();
   AliyunPanService.init();
   BaiduPanService.init();
+  Pan123Service.init();
+  Pan139Service.init();
+  Pan189Service.init();
+  Pan115Service.init();
   PanLoginService.init();
 
   // Start local proxy server BEFORE any spider calls.

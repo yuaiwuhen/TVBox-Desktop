@@ -44,6 +44,7 @@
     "electron": "33.4.11",
     "electron-builder": "^25.1.8",
     "jsdom": "^29.1.1",
+    "playwright": "^1.61.1",
     "tailwindcss": "^4.3.2",
     "ts-node": "^10.9.2",
     "typescript": "~6.0.2",

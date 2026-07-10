@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>HEVC HLS Playback Test</title>
+<style>
+  body { font-family: monospace; background: #111; color: #0f0; margin: 20px; }
+  video { width: 100%; max-width: 800px; background: #000; }
+  #log { margin-top: 10px; max-height: 400px; overflow-y: auto; font-size: 12px; }
+  .error { color: #f44; }
+  .warn { color: #fa0; }
+  .ok { color: #0f0; }
+</style>
+</head>
+<body>
+<h2>HEVC HLS Playback Test</h2>
+<div id="status">Initializing...</div>
+<video id="video" controls muted autoplay></video>
+<div id="log"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<script>
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const video = document.getElementById('video');
+
+function log(msg, cls) {
+  const div = document.createElement('div');
+  div.className = cls || '';
+  div.textContent = new Date().toISOString().substr(11, 8) + ' ' + msg;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(msg);
+}
+
+// Check HEVC support
+log('Checking HEVC support...');
+const hevcNative = video.canPlayType('video/mp4; codecs="hev1.1.6.L120.90"');
+const hevcMse = MediaSource.isTypeSupported('video/mp4; codecs="hev1.1.6.L120.90"');
+log('HEVC native: ' + hevcNative, hevcNative === 'probably' ? 'ok' : 'warn');
+log('HEVC MSE: ' + hevcMse, hevcMse ? 'ok' : 'error');
+
+if (!Hls.isSupported()) {
+  log('hls.js not supported!', 'error');
+  statusEl.innerHTML = '<span class="error">hls.js not supported</span>';
+} else {
+  log('hls.js is supported', 'ok');
+
+  // The m3u8 proxy URL (from hxq spider)
+  const m3u8Url = 'https://voldn-ser01.51touxiang.com/m3u8/FoWhJhpQUDYp077eXz9cTW00YHWiQDo5rbijIzUE.m3u8?pid=6JWYIR4GRl5X42s0TyPCHSrM6elsnIUlxxnumXP7Q3w%3D&utk=u_dKaUDTA49Out4bJipnSw&uk=5qcM4%2BCia0z5Rtcpn0iqIY7Jkq6ECI1bw7LAKJZB2%2BA%3D&spl=213&t=1783441454&sign=5f76a8b3952b543334a747633a8ec38e&ip=120.224.224.199';
+  const proxyUrl = 'http://127.0.0.1:9978/proxy?do=hxq&url=' + encodeURIComponent(m3u8Url);
+
+  log('M3U8 URL: ' + proxyUrl.substring(0, 80) + '...');
+
+  const hls = new Hls({
+    enableWorker: true,
+    lowLatencyMode: true,
+    debug: false,
+  });
+
+  hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+    log('✅ MANIFEST_PARSED: ' + data.levels.length + ' levels', 'ok');
+    statusEl.innerHTML = '<span class="ok">Playing...</span>';
+  });
+
+  hls.on(Hls.Events.LEVEL_LOADED, (event, data) => {
+    const codecs = data.details?.levels?.[0]?.videoCodec || 'unknown';
+    log('LEVEL_LOADED: codec=' + codecs + ', duration=' + data.details?.totalduration, 'ok');
+  });
+
+  hls.on(Hls.Events.FRAG_LOADED, (event, data) => {
+    log('FRAG_LOADED: sn=' + data.frag?.sn + ', size=' + data.payload?.byteLength);
+  });
+
+  hls.on(Hls.Events.FRAG_BUFFERED, (event, data) => {
+    log('FRAG_BUFFERED: sn=' + data.frag?.sn);
+  });
+
+  hls.on(Hls.Events.ERROR, (event, data) => {
+    const errMsg = data.type + ': ' + data.details + (data.fatal ? ' (FATAL)' : '');
+    log('❌ ERROR: ' + errMsg, 'error');
+    statusEl.innerHTML = '<span class="error">Error: ' + errMsg + '</span>';
+    if (data.fatal) {
+      log('Fatal error, stopping', 'error');
+    }
+  });
+
+  hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+    log('MEDIA_ATTACHED', 'ok');
+  });
+
+  video.addEventListener('loadedmetadata', () => {
+    log('✅ Video loadedmetadata: ' + video.videoWidth + 'x' + video.videoHeight, 'ok');
+  });
+
+  video.addEventListener('playing', () => {
+    log('✅ Video PLAYING!', 'ok');
+    statusEl.innerHTML = '<span class="ok">✅ Playing!</span>';
+  });
+
+  video.addEventListener('waiting', () => {
+    log('⏳ Video waiting/buffering...', 'warn');
+  });
+
+  video.addEventListener('error', (e) => {
+    log('❌ Video element error: ' + (video.error?.message || 'unknown'), 'error');
+  });
+
+  video.addEventListener('stalled', () => {
+    log('⚠️ Video stalled', 'warn');
+  });
+
+  video.addEventListener('suspend', () => {
+    log('Video suspend (loading complete for now)');
+  });
+
+  hls.loadSource(proxyUrl);
+  hls.attachMedia(video);
+  log('hls.loadSource() called');
+}
+</script>
+</body>
+</html>

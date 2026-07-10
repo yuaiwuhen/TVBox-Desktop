@@ -13,11 +13,14 @@
 
 import http from 'http';
 import https from 'https';
+import net from 'net';
 import { URL } from 'url';
 import fs from 'fs';
 import path from 'path';
-import { Transform } from 'stream';
+import { Transform, PassThrough } from 'stream';
 import dns from 'dns';
+import { spawn } from 'child_process';
+import { BrowserWindow } from 'electron';
 import { jarLoader } from './JarLoader';
 import { QuarkPanService } from './QuarkPanService';
 import { UCPanService } from './UCPanService';
@@ -71,12 +74,14 @@ class M3u8Rewriter extends Transform {
   private customHeaders: Record<string, string>;
   private rewriteCount: number = 0;
   private loggedFirstChunk: boolean = false;
+  private directCdn: boolean;
 
   constructor(
     decodedUrl: string,
     port: number,
     doType: string,
     customHeaders: Record<string, string>,
+    directCdn: boolean = false,
   ) {
     // Don't set encoding - we want to output Buffer, not string
     // decodeStrings: true converts input Buffer to string for us
@@ -84,6 +89,7 @@ class M3u8Rewriter extends Transform {
     this.port = port;
     this.doType = doType;
     this.customHeaders = customHeaders;
+    this.directCdn = directCdn;
     this.baseUrl = decodedUrl.split('?')[0];
     this.baseOrigin =
       this.baseUrl.match(/^https?:\/\/[^/]+/)?.[0] || this.baseUrl;
@@ -101,6 +107,8 @@ class M3u8Rewriter extends Transform {
       this.basePath,
       'queryPart=',
       this.queryPart.substring(0, 50),
+      'directCdn=',
+      this.directCdn,
     );
   }
 
@@ -166,12 +174,14 @@ class M3u8Rewriter extends Transform {
     }
 
     // Rewrite media segment URLs (.ts, .m3u8, .m4s, .mp4, .key)
-    if (line.match(/\.(ts|m3u8|m4s|mp4|key)$/i)) {
+    // Support URLs with query strings (e.g., .ts?sign=xxx&t=xxx)
+    if (line.match(/\.(ts|m3u8|m4s|mp4|key)(\?.*)?$/i)) {
       let fullUrl: string;
 
-      // Already absolute URL → rewrite to proxy URL with correct UA
+      // Already absolute URL → use as-is (don't append queryPart if it already has query params)
       if (line.startsWith('http://') || line.startsWith('https://')) {
-        fullUrl = line + this.queryPart;
+        // Only append queryPart if the line doesn't already have query params
+        fullUrl = line.includes('?') ? line : line + this.queryPart;
       } else if (line.startsWith('/')) {
         // Absolute path (starts with /)
         fullUrl = this.baseOrigin + line + this.queryPart;
@@ -180,7 +190,21 @@ class M3u8Rewriter extends Transform {
         fullUrl = this.basePath + line + this.queryPart;
       }
 
-      // Encode URL and headers
+      // Debug: log first few rewrites
+      if (this.rewriteCount < 3) {
+        console.log('[M3u8Rewriter] rewriteLine #' + this.rewriteCount + ':');
+        console.log('  original line (full):', line);
+        console.log('  fullUrl:', fullUrl);
+        this.rewriteCount++;
+      }
+
+      // directCdn mode: output absolute CDN URL directly (hxq source).
+      // The browser fetches TS from CDN at full speed without proxy overhead.
+      if (this.directCdn) {
+        return fullUrl;
+      }
+
+      // Normal mode: wrap in proxy URL for header injection.
       const encoded = encodeURIComponent(fullUrl);
       let proxyUrl = `http://127.0.0.1:${this.port}/proxy?do=${this.doType}&url=${encoded}`;
 
@@ -190,23 +214,97 @@ class M3u8Rewriter extends Transform {
         proxyUrl += `&header=${encodeURIComponent(headerJson)}`;
       }
 
-      // Debug: log first few rewrites (FULL URL, not truncated)
-      if (this.rewriteCount < 3) {
-        console.log('[M3u8Rewriter] rewriteLine #' + this.rewriteCount + ':');
-        console.log('  original line (full):', line);
-        console.log('  fullUrl:', fullUrl);
-        console.log('  proxyUrl:', proxyUrl);
-        this.rewriteCount++;
-      }
-
-      // Debug: log the first chunk's raw content to see the m3u8 structure
-      if (!this.loggedFirstChunk && line.startsWith('#EXT')) {
-        console.log('[M3u8Rewriter] First EXT line:', line);
-        this.loggedFirstChunk = true;
-      }
-
       return proxyUrl;
     }
+
+    return line;
+  }
+}
+
+/**
+ * Transform stream that rewrites CDN hostnames in m3u8 TS URLs.
+ * Replaces slow CDN domains with the fastest known CDN for the same base domain.
+ *
+ * This mirrors Android's DexNative CDN scheduling — the native library
+ * probes multiple CDN endpoints and picks the fastest one. On PC we
+ * don't have DexNative, so we test CDN speeds at startup and rewrite
+ * TS URLs to use the fastest CDN.
+ */
+class CdnRewriter extends Transform {
+  private buffer: string = '';
+  private fastestCdn: string;
+  private rewriteCount: number = 0;
+  private loggedFirstChunk: boolean = false;
+
+  constructor(fastestCdn: string) {
+    super({ decodeStrings: true });
+    this.fastestCdn = fastestCdn;
+  }
+
+  _transform(chunk: Buffer, encoding: string, callback: Function) {
+    const text = chunk.toString('utf8');
+    this.buffer += text;
+
+    if (!this.loggedFirstChunk) {
+      console.log(
+        '[CdnRewriter] First chunk, rewriting CDN to',
+        this.fastestCdn,
+      );
+      this.loggedFirstChunk = true;
+    }
+
+    const lines = this.buffer.split('\n');
+    this.buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const rewritten = this.rewriteLine(line);
+      this.push(Buffer.from(rewritten + '\n', 'utf8'));
+    }
+
+    callback();
+  }
+
+  _flush(callback: Function) {
+    if (this.buffer.length > 0) {
+      const rewritten = this.rewriteLine(this.buffer);
+      this.push(Buffer.from(rewritten, 'utf8'));
+    }
+    callback();
+  }
+
+  private rewriteLine(line: string): string {
+    if (line.startsWith('#') || line.trim().length === 0) {
+      return line;
+    }
+
+    // Only rewrite TS segment URLs (not m3u8, key, etc.)
+    if (!line.match(/\.ts(\?.*)?$/i)) {
+      return line;
+    }
+
+    // Only rewrite if the line is an absolute URL
+    if (!line.startsWith('http://') && !line.startsWith('https://')) {
+      return line;
+    }
+
+    try {
+      const url = new URL(line);
+      // Only rewrite 51touxiang.com CDN domains
+      if (url.hostname.includes('51touxiang.com')) {
+        const oldHost = url.hostname;
+        url.hostname = this.fastestCdn;
+        if (this.rewriteCount < 3) {
+          console.log(
+            '[CdnRewriter] CDN rewrite:',
+            oldHost,
+            '→',
+            this.fastestCdn,
+          );
+          this.rewriteCount++;
+        }
+        return url.toString();
+      }
+    } catch {}
 
     return line;
   }
@@ -261,6 +359,13 @@ export class ProxyServer {
   private static readonly END_PORT = 9999;
   private contentLengthCache = new Map<string, number>();
   private dnsOptimized: boolean = false; // DNS优化是否已初始化
+  private cdnOptimized: boolean = false; // CDN优化是否已初始化
+  private fastestCdn: string = ''; // 最快的CDN域名
+  private static readonly CDN_CANDIDATES = [
+    'voldn-ser01.51touxiang.com',
+    'piccct2.cdn.51touxiang.com',
+    'piccc.cdn.51touxiang.com',
+  ];
 
   /**
    * Set callback fired when the actual listening port is determined.
@@ -315,6 +420,70 @@ export class ProxyServer {
   }
 
   /**
+   * 初始化CDN优化
+   * 启动时测试所有候选CDN域名的下载速度，选择最快的
+   */
+  async initCdnOptimization(): Promise<void> {
+    console.log('[ProxyServer] 初始化CDN优化...');
+    console.log(
+      '[ProxyServer] 候选CDN:',
+      ProxyServer.CDN_CANDIDATES.join(', '),
+    );
+
+    const results: { cdn: string; speedKBps: number; error?: string }[] = [];
+
+    for (const cdn of ProxyServer.CDN_CANDIDATES) {
+      try {
+        const score = await this.testCdnSpeed(cdn);
+        results.push({ cdn, speedKBps: score });
+        console.log(`[ProxyServer] CDN ${cdn}: TTFB score=${score.toFixed(1)}`);
+      } catch (e: any) {
+        results.push({ cdn, speedKBps: 0, error: e.message });
+        console.log(`[ProxyServer] CDN ${cdn}: 失败 (${e.message})`);
+      }
+    }
+
+    // 选择下载速度最快的CDN
+    const valid = results.filter((r) => r.speedKBps > 0);
+    if (valid.length > 0) {
+      valid.sort((a, b) => b.speedKBps - a.speedKBps);
+      this.fastestCdn = valid[0].cdn;
+      this.cdnOptimized = true;
+      console.log(
+        '[ProxyServer] ✅ 最快CDN:',
+        this.fastestCdn,
+        `(${(valid[0].speedKBps / 1024).toFixed(2)} MB/s)`,
+      );
+    } else {
+      console.warn('[ProxyServer] ⚠️ 所有CDN测试失败，CDN优化未启用');
+      this.cdnOptimized = false;
+    }
+  }
+
+  /**
+   * 测试单个CDN域名的TCP连接延迟。
+   * 使用TCP连接延迟倒数作为评分（延迟越低分数越高）。
+   * TCP延迟不受应用层下载限速影响，比HTTP TTFB更可靠。
+   */
+  private testCdnSpeed(hostname: string): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const startTime = Date.now();
+      const sock = net.connect({ host: hostname, port: 80 }, () => {
+        const elapsed = Date.now() - startTime;
+        sock.destroy();
+        // 返回延迟倒数作为评分（ms → score），延迟越低分数越高
+        // 100ms → 10.0, 50ms → 20.0, 200ms → 5.0
+        resolve(1000 / Math.max(elapsed, 1));
+      });
+      sock.on('error', (err: Error) => reject(err));
+      sock.setTimeout(5000, () => {
+        sock.destroy();
+        reject(new Error('TCP timeout'));
+      });
+    });
+  }
+
+  /**
    * 使用DNS优化解析域名并建立HTTP连接
    * 优先使用DoH，失败则使用系统DNS
    */
@@ -342,8 +511,14 @@ export class ProxyServer {
    * Resolves with the actual port in use.
    */
   async start(): Promise<number> {
-    // 启动前初始化DNS优化
-    await this.initDnsOptimization();
+    // DNS和CDN优化在后台异步执行，不阻塞主进程启动
+    // 这样用户可以立即开始使用，优化完成后自动生效
+    this.initDnsOptimization().catch((e) =>
+      console.warn('[ProxyServer] DNS优化失败:', e.message),
+    );
+    this.initCdnOptimization().catch((e) =>
+      console.warn('[ProxyServer] CDN优化失败:', e.message),
+    );
 
     return new Promise<number>((resolve, reject) => {
       if (this.server) {
@@ -461,6 +636,41 @@ export class ProxyServer {
     }
 
     if (pathname !== '/proxy') {
+      // m3u8 proxy: /m3u8.m3u8?url=<encoded video URL>&header=<encoded JSON>
+      // Routes direct video URLs through Node.js (not the browser) so we can
+      // set User-Agent/Referer freely and avoid Chromium TLS fingerprinting.
+      // For m3u8 manifests, TS segment URLs are rewritten to route through
+      // this same endpoint so the CDN sees consistent headers on every request.
+      if (
+        pathname === '/m3u8.m3u8' ||
+        pathname === '/m3u8' ||
+        pathname === '/ts'
+      ) {
+        const upstreamUrl = params['url'];
+        if (!upstreamUrl) {
+          res.writeHead(400, { 'Content-Type': 'text/plain' });
+          res.end('Missing url parameter');
+          return;
+        }
+        let headerJson: Record<string, string> | null = null;
+        if (params['header']) {
+          try {
+            headerJson = JSON.parse(params['header']);
+          } catch {
+            console.warn(
+              '[ProxyServer] /m3u8.m3u8: failed to parse header param',
+            );
+          }
+        }
+        void this.streamVideoDirect(
+          upstreamUrl,
+          req,
+          res,
+          headerJson,
+          pathname === '/ts',
+        );
+        return;
+      }
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not Found');
       return;
@@ -603,6 +813,25 @@ export class ProxyServer {
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ): Promise<void> {
+    // Decode the upstream URL BEFORE calling spider to detect TS segments.
+    // TS segments don't need spider processing — we stream them directly
+    // from CDN with ffmpeg transcoding (HEVC→H.264). Checking early avoids
+    // the spider call overhead and ensures correct Content-Type headers.
+    let decodedUrl = '';
+    try {
+      decodedUrl = decodeURIComponent(params['url'] || '');
+    } catch {}
+
+    const isTsByUrl = decodedUrl && decodedUrl.match(/\.ts(\?.*)?$/i);
+
+    if (isTsByUrl) {
+      // TS segment: stream directly from CDN through ffmpeg for HEVC→H.264
+      // transcoding. No spider call needed — auth params are in the URL.
+      console.log('[ProxyServer] TS segment detected, streaming transcode...');
+      this.streamTranscodeTs(decodedUrl, req, res);
+      return;
+    }
+
     let result: {
       status: number;
       mime: string;
@@ -657,9 +886,6 @@ export class ProxyServer {
 
     if (!result) {
       // Fallback to streamUnknownProxy when spider methods fail
-      // This happens when:
-      // 1. spider.proxyLocal() not implemented or returns null
-      // 2. Proxy.proxy() fails due to missing DexNative JNI library
       console.log(
         '[ProxyServer] invokeSpiderProxy: spider methods failed, falling back to direct proxy for do=',
         params['do'],
@@ -667,7 +893,6 @@ export class ProxyServer {
 
       const upstreamUrl = params['url'];
       if (upstreamUrl) {
-        // Extract custom headers from params if present
         let customHeaders: Record<string, string> = {};
         try {
           const headerStr = params['header'];
@@ -675,8 +900,6 @@ export class ProxyServer {
             customHeaders = JSON.parse(headerStr);
           }
         } catch {}
-
-        // Add injected headers (referer, user-agent, cookie)
         if (params['referer']) {
           customHeaders['Referer'] = params['referer'];
         }
@@ -697,7 +920,6 @@ export class ProxyServer {
         return;
       }
 
-      // No fallback available
       if (!res.headersSent) {
         res.writeHead(502, { 'Content-Type': 'text/plain' });
         res.end('Spider proxy returned null and no URL available for fallback');
@@ -708,11 +930,15 @@ export class ProxyServer {
     const { status, mime, stream, headers } = result;
     const effectiveMime = this.resolveVideoMime(mime, params);
 
+    const isM3u8 =
+      effectiveMime.includes('mpegurl') || effectiveMime.includes('mpegURL');
+
     const upstreamUrl = params['url'] || '';
     const site = params['site'];
-    const totalLength = upstreamUrl
-      ? await this.fetchContentLength(upstreamUrl, site)
-      : -1;
+    const totalLength =
+      isM3u8 || !upstreamUrl
+        ? -1
+        : await this.fetchContentLength(upstreamUrl, site);
 
     const rangeHeader = req.headers['range'] as string | undefined;
     const range =
@@ -771,20 +997,285 @@ export class ProxyServer {
       timeoutTimer = null;
     }
 
-    jarLoader.streamJavaToNode(
-      stream,
-      res,
-      () => {
+    // For m3u8 content: decide whether to rewrite TS URLs.
+    //
+    // hxq source: TS URLs already contain auth params (utk, uk, sign, etc.)
+    // in the query string. The CDN serves them without requiring special
+    // headers. We pass the m3u8 through unchanged so the browser fetches TS
+    // directly from CDN at full speed. HEVC decoding is handled by the
+    // browser's native decoder (PlatformHEVCDecoderSupport flag) or by
+    // hevc.js WASM decoder in the player.
+    //
+    // Other sources (quark, uc, etc.): TS requests need Cookie/Referer/UA
+    // headers that the browser can't send cross-origin. We rewrite TS URLs
+    // to proxy URLs so the proxy can inject these headers.
+    if (isM3u8) {
+      const isHxq = params['do'] === 'hxq';
+
+      if (isHxq) {
+        // hxq: rewrite relative TS paths to absolute CDN URLs (NOT proxy URLs).
+        // The m3u8 from the CDN contains relative paths like
+        // "/m3u8/.../file.ts" which the browser would resolve against the
+        // proxy origin (127.0.0.1:9978) → 404. We rewrite them to absolute
+        // CDN URLs so the browser fetches TS directly from CDN at full speed.
+        // Auth params (utk, uk, sign, t) are in the queryPart appended to each URL.
+        //
+        // CDN optimization: replace slow CDN hostnames (e.g. piccc.cdn) with
+        // the fastest CDN (e.g. voldn-ser01) selected at startup. This avoids
+        // the ~0.06 MB/s throttling on piccc.cdn.
+        console.log(
+          '[ProxyServer] m3u8 streaming (hxq: rewrite to absolute CDN URLs)',
+        );
+        const passThrough = new PassThrough();
+        const m3u8Rewriter = new M3u8Rewriter(
+          decodedUrl,
+          this.port,
+          params['do'],
+          {},
+          true, // directCdn: output absolute CDN URLs, not proxy URLs
+        );
+        if (this.cdnOptimized && this.fastestCdn) {
+          const cdnRewriter = new CdnRewriter(this.fastestCdn);
+          passThrough.pipe(m3u8Rewriter).pipe(cdnRewriter).pipe(res);
+          console.log(
+            '[ProxyServer] hxq m3u8: CDN rewrite enabled, target=',
+            this.fastestCdn,
+          );
+        } else {
+          passThrough.pipe(m3u8Rewriter).pipe(res);
+        }
+        jarLoader.streamJavaToNode(
+          stream,
+          passThrough,
+          () => {
+            try {
+              passThrough.end();
+            } catch {}
+          },
+          () => {
+            try {
+              passThrough.destroy();
+            } catch {}
+          },
+        );
+      } else {
+        // Other sources: rewrite TS URLs to proxy URLs for header injection.
+        let customHeaders: Record<string, string> = {};
+        try {
+          const headerStr = params['header'];
+          if (headerStr) {
+            customHeaders = JSON.parse(headerStr);
+          }
+        } catch {}
+        if (params['referer']) customHeaders['Referer'] = params['referer'];
+        if (params['user-agent'])
+          customHeaders['User-Agent'] = params['user-agent'];
+        if (params['cookie']) customHeaders['Cookie'] = params['cookie'];
+
+        const passThrough = new PassThrough();
+        const m3u8Rewriter = new M3u8Rewriter(
+          decodedUrl,
+          this.port,
+          params['do'],
+          customHeaders,
+        );
+        passThrough.pipe(m3u8Rewriter).pipe(res);
+        console.log(
+          '[ProxyServer] m3u8 streaming with M3u8Rewriter (TS → proxy)',
+        );
+        jarLoader.streamJavaToNode(
+          stream,
+          passThrough,
+          () => {
+            try {
+              passThrough.end();
+            } catch {}
+          },
+          () => {
+            try {
+              passThrough.destroy();
+            } catch {}
+          },
+        );
+      }
+    } else {
+      jarLoader.streamJavaToNode(
+        stream,
+        res,
+        () => {
+          try {
+            res.end();
+          } catch {}
+        },
+        () => {
+          try {
+            res.destroy();
+          } catch {}
+        },
+      );
+    }
+  }
+
+  /**
+   * Stream a TS segment from CDN through ffmpeg for HEVC→H.264 transcoding.
+   *
+   * Uses streaming pipes (no buffering):
+   *   CDN download → ffmpeg stdin → ffmpeg stdout → HTTP response
+   *
+   * This eliminates the "download-then-transcode" latency of the old
+   * downloadAndTranscodeTs approach. ffmpeg starts producing output as soon
+   * as it has enough input, and the client receives data immediately.
+   */
+  private streamTranscodeTs(
+    tsUrl: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const startTime = Date.now();
+
+    const u = new URL(tsUrl);
+    const isHttps = u.protocol === 'https:';
+    const lib = isHttps ? https : http;
+
+    // Send response headers immediately — we'll stream the transcoded data
+    res.writeHead(200, {
+      'Content-Type': 'video/mp2t',
+      'Transfer-Encoding': 'chunked',
+      'Access-Control-Allow-Origin': '*',
+    });
+
+    let clientGone = false;
+    req.on('close', () => {
+      clientGone = true;
+    });
+    req.on('error', () => {
+      clientGone = true;
+    });
+
+    const ffmpeg = spawn(
+      'ffmpeg',
+      [
+        '-i',
+        'pipe:0',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        '23',
+        '-c:a',
+        'copy',
+        '-f',
+        'mpegts',
+        '-y',
+        'pipe:1',
+      ],
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+
+    let totalOut = 0;
+    ffmpeg.stdout.on('data', (chunk: Buffer) => {
+      totalOut += chunk.length;
+    });
+
+    let stderrLog = '';
+    ffmpeg.stderr.on('data', (data: Buffer) => {
+      stderrLog += data.toString();
+    });
+
+    ffmpeg.on('error', (err: Error) => {
+      console.error(
+        '[ProxyServer] streamTranscodeTs: ffmpeg error:',
+        err.message,
+      );
+      if (!res.writableEnded) {
         try {
           res.end();
         } catch {}
+      }
+    });
+
+    ffmpeg.on('close', (code: number) => {
+      const elapsed = Date.now() - startTime;
+      console.log(
+        '[ProxyServer] streamTranscodeTs: done, ffmpeg exit=',
+        code,
+        'output=',
+        totalOut,
+        'bytes, elapsed=',
+        elapsed,
+        'ms',
+      );
+      if (code !== 0) {
+        console.error(
+          '[ProxyServer] streamTranscodeTs: ffmpeg stderr:',
+          stderrLog.substring(0, 500),
+        );
+      }
+    });
+
+    // Pipe ffmpeg stdout directly to HTTP response
+    ffmpeg.stdout.pipe(res, { end: true });
+
+    // Download from CDN and pipe directly to ffmpeg stdin
+    const cdnReq = lib.request(
+      {
+        hostname: u.hostname,
+        port: u.port || (isHttps ? 443 : 80),
+        path: u.pathname + u.search,
+        method: 'GET',
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+          Accept: '*/*',
+          'Accept-Encoding': 'identity',
+        },
+        agent: isHttps ? httpsAgent : httpAgent,
       },
-      () => {
-        try {
-          res.destroy();
-        } catch {}
+      (upstreamRes) => {
+        if (upstreamRes.statusCode !== 200) {
+          console.error(
+            '[ProxyServer] streamTranscodeTs: CDN returned',
+            upstreamRes.statusCode,
+          );
+          ffmpeg.stdin.end();
+          return;
+        }
+
+        // Pipe CDN response stream directly to ffmpeg stdin
+        upstreamRes.pipe(ffmpeg.stdin);
+
+        upstreamRes.on('error', (err: Error) => {
+          console.error(
+            '[ProxyServer] streamTranscodeTs: CDN download error:',
+            err.message,
+          );
+          try {
+            ffmpeg.stdin.end();
+          } catch {}
+        });
       },
     );
+
+    cdnReq.on('error', (err: Error) => {
+      console.error(
+        '[ProxyServer] streamTranscodeTs: CDN request error:',
+        err.message,
+      );
+      try {
+        ffmpeg.stdin.end();
+      } catch {}
+    });
+
+    cdnReq.setTimeout(15000, () => {
+      console.error('[ProxyServer] streamTranscodeTs: CDN download timeout');
+      cdnReq.destroy();
+      try {
+        ffmpeg.stdin.end();
+      } catch {}
+    });
+
+    cdnReq.end();
   }
 
   /**
@@ -1105,12 +1596,21 @@ export class ProxyServer {
     }
 
     const upstreamHeaders: Record<string, string> = {
-      Cookie: cookie,
       'User-Agent': userAgent,
       Referer: referer,
       Accept: '*/*',
       'Accept-Encoding': 'identity',
     };
+    // Quark CDN auth_key is self-contained — sending Cookie with __puus causes
+    // CDN to validate __puus against auth_key, and any mismatch → 412.
+    // Browsers play the URL without any cookie, proving cookie is unnecessary.
+    // UC/Baidu CDNs still require Cookie for auth, so keep it for them.
+
+    upstreamHeaders['User-Agent'] = userAgent;
+    upstreamHeaders['Referer'] = referer;
+    upstreamHeaders['Accept'] = '*/*';
+    upstreamHeaders['Accept-Encoding'] = 'identity';
+    upstreamHeaders.Cookie = cookie;
     if (req.headers['range']) {
       upstreamHeaders['Range'] = String(req.headers['range']);
     }
@@ -1200,6 +1700,27 @@ export class ProxyServer {
               debugLog(
                 `streamPanDirect ERROR_BODY len=${body.length} body=${body.substring(0, 2000)}`,
               );
+              // 412 from Quark CDN means __puus is stale or the download
+              // URL's auth_key has expired. Emit pan:loginExpired so the
+              // renderer prompts the user to re-scan the QR code. This is
+              // a safety net for the case where pre-playback refresh in
+              // JarLoader didn't catch the expiry (e.g., cookie revoked
+              // between refresh and the CDN request).
+              if (status === 412 && panType === 'quark') {
+                console.warn(
+                  '[ProxyServer] streamPanDirect: Quark 412 detected, emitting pan:loginExpired',
+                );
+                try {
+                  BrowserWindow.getAllWindows().forEach((w) =>
+                    w.webContents.send('pan:loginExpired', 'quark'),
+                  );
+                } catch (e: any) {
+                  console.warn(
+                    '[ProxyServer] Failed to emit pan:loginExpired:',
+                    e.message,
+                  );
+                }
+              }
               if (!res.headersSent) {
                 res.writeHead(status, {
                   'Content-Type':
@@ -1217,9 +1738,60 @@ export class ProxyServer {
             });
             return;
           }
+          // Detect m3u8 manifest — need to rewrite TS segment URLs
+          // to route through the proxy so the CDN sees consistent headers
+          // (browser can't set User-Agent/Referer on fetch/XHR).
+          const contentType = String(
+            upstreamRes.headers['content-type'] || '',
+          ).toLowerCase();
+          const isM3u8 =
+            contentType.includes('mpegurl') ||
+            contentType.includes('m3u8') ||
+            downloadUrl.toLowerCase().includes('.m3u8');
+
+          if (isM3u8) {
+            const bodyChunks: Buffer[] = [];
+            upstreamRes.on('data', (chunk: Buffer) => bodyChunks.push(chunk));
+            upstreamRes.on('end', () => {
+              const manifest = Buffer.concat(bodyChunks).toString('utf8');
+              console.log(
+                '[ProxyServer] streamPanDirect: m3u8 manifest received, len=',
+                manifest.length,
+                'firstLine=',
+                manifest.substring(0, 100),
+              );
+              const rewritten = this.rewritePanM3u8Manifest(
+                manifest,
+                downloadUrl,
+                panType,
+              );
+              const m3u8Headers: Record<string, string> = {
+                'Content-Type':
+                  upstreamRes.headers['content-type'] ||
+                  'application/vnd.apple.mpegurl',
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'no-cache',
+              };
+              if (!res.headersSent) {
+                res.writeHead(200, m3u8Headers);
+                res.end(rewritten);
+              }
+            });
+            upstreamRes.on('error', () => {
+              if (!res.headersSent) {
+                try {
+                  res.end();
+                } catch {}
+              }
+            });
+            return;
+          }
+
+          // TS segment or other media: stream bytes through
           const respHeaders: Record<string, string> = {
             'Content-Type': upstreamRes.headers['content-type'] || 'video/mp4',
             'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
           };
           if (upstreamRes.headers['content-length']) {
             respHeaders['Content-Length'] = String(
@@ -1231,8 +1803,6 @@ export class ProxyServer {
               upstreamRes.headers['content-range'],
             );
           }
-          // 206 (Partial Content) for Range requests; 200 otherwise.
-          // Browsers require 206 + Content-Range to seek.
           res.writeHead(status, respHeaders);
           upstreamRes.on('error', () => {
             try {
@@ -1264,6 +1834,417 @@ export class ProxyServer {
         res.end('Proxy error: ' + e.message);
       }
     }
+  }
+
+  /**
+   * Stream a direct video URL (m3u8 manifest or TS segment) through Node.js
+   * with custom headers. Routes around the browser's forbidden-header
+   * restrictions and TLS fingerprinting.
+   *
+   * For m3u8 manifests: rewrites all segment URLs to route through this same
+   * endpoint so the CDN sees consistent headers on every segment request.
+   *
+   * For TS segments (or any non-m3u8 content): streams the bytes through
+   * directly, honoring Range requests for seeking.
+   */
+  private async streamVideoDirect(
+    upstreamUrl: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    customHeaders: Record<string, string> | null,
+    isTsSegment: boolean,
+  ): Promise<void> {
+    const upstreamHeaders: Record<string, string> = {
+      Accept: '*/*',
+      'Accept-Encoding': 'identity',
+      ...(customHeaders || {}),
+    };
+    if (req.headers['range']) {
+      upstreamHeaders['Range'] = String(req.headers['range']);
+    }
+
+    console.log(
+      '[ProxyServer] streamVideoDirect:',
+      isTsSegment ? '[TS]' : '[m3u8]',
+      'url=',
+      upstreamUrl.substring(0, 120),
+      'hasRange=',
+      !!req.headers['range'],
+      'headerKeys=',
+      customHeaders ? Object.keys(customHeaders).join(',') : '(none)',
+    );
+
+    let clientGone = false;
+    req.on('close', () => {
+      clientGone = true;
+    });
+    req.on('error', () => {
+      clientGone = true;
+    });
+
+    // Node.js http.request does NOT auto-follow 3xx redirects (unlike
+    // Android okhttp). CDNs such as vd.wmvbo.com return 302 with an empty
+    // body and a Location header pointing to an edge node. Without this
+    // redirect loop, the proxy returns the empty 302 body to hls.js, which
+    // fails with "no EXTM3U delimiter".
+    const MAX_REDIRECTS = 5;
+    let currentUrl = upstreamUrl;
+    let redirectCount = 0;
+
+    const makeRequest = (): void => {
+      if (clientGone) return;
+      try {
+        const parsedUrl = new URL(currentUrl);
+        const isHttps = parsedUrl.protocol === 'https:';
+        const lib = isHttps ? https : http;
+        const upstreamReq = lib.request(
+          currentUrl,
+          {
+            method: 'GET',
+            headers: upstreamHeaders,
+            agent: isHttps ? httpsAgent : httpAgent,
+          },
+          (upstreamRes) => {
+            if (clientGone) {
+              try {
+                upstreamRes.destroy();
+              } catch {}
+              return;
+            }
+            const status = upstreamRes.statusCode || 200;
+            const contentType = String(
+              upstreamRes.headers['content-type'] || '',
+            ).toLowerCase();
+            console.log(
+              '[ProxyServer] streamVideoDirect: upstream status=',
+              status,
+              'content-type=',
+              contentType,
+              'content-length=',
+              upstreamRes.headers['content-length'],
+              'redirectCount=',
+              redirectCount,
+            );
+
+            // Follow 3xx redirects. Resolve Location against currentUrl
+            // (handles both absolute and relative redirects).
+            if (
+              (status === 301 ||
+                status === 302 ||
+                status === 303 ||
+                status === 307 ||
+                status === 308) &&
+              upstreamRes.headers['location'] &&
+              redirectCount < MAX_REDIRECTS
+            ) {
+              redirectCount++;
+              const location = String(upstreamRes.headers['location']);
+              let nextUrl: string;
+              try {
+                nextUrl = new URL(location, currentUrl).href;
+              } catch {
+                nextUrl = location;
+              }
+              console.log(
+                '[ProxyServer] streamVideoDirect: following redirect ' +
+                  redirectCount +
+                  '/' +
+                  MAX_REDIRECTS +
+                  ' →',
+                nextUrl.substring(0, 120),
+              );
+              upstreamRes.resume(); // drain redirect body
+              currentUrl = nextUrl;
+              makeRequest(); // recursive call
+              return;
+            }
+
+            // Error responses: capture body for diagnostics
+            if (status >= 400) {
+              const bodyChunks: Buffer[] = [];
+              upstreamRes.on('data', (chunk: Buffer) => bodyChunks.push(chunk));
+              upstreamRes.on('end', () => {
+                const body = Buffer.concat(bodyChunks).toString('utf8');
+                console.warn(
+                  '[ProxyServer] streamVideoDirect: upstream error body (len=' +
+                    body.length +
+                    '):',
+                  body.substring(0, 1000),
+                );
+                if (!res.headersSent) {
+                  res.writeHead(status, {
+                    'Content-Type':
+                      upstreamRes.headers['content-type'] || 'text/plain',
+                  });
+                  res.end(body);
+                }
+              });
+              upstreamRes.on('error', () => {
+                if (!res.headersSent) {
+                  try {
+                    res.end();
+                  } catch {}
+                }
+              });
+              return;
+            }
+
+            // m3u8 manifest: rewrite segment URLs to route through proxy.
+            // Use currentUrl (post-redirect) as the base so relative TS
+            // paths resolve against the actual serving host.
+            if (
+              !isTsSegment &&
+              (contentType.includes('mpegurl') ||
+                contentType.includes('m3u8') ||
+                currentUrl.toLowerCase().includes('.m3u8'))
+            ) {
+              const bodyChunks: Buffer[] = [];
+              upstreamRes.on('data', (chunk: Buffer) => bodyChunks.push(chunk));
+              upstreamRes.on('end', () => {
+                const manifest = Buffer.concat(bodyChunks).toString('utf8');
+                if (!manifest.trimStart().startsWith('#EXTM3U')) {
+                  console.warn(
+                    '[ProxyServer] streamVideoDirect: m3u8 URL returned non-EXTM3U body (len=' +
+                      manifest.length +
+                      '):',
+                    manifest.substring(0, 500),
+                  );
+                }
+                const rewritten = this.rewriteM3u8Manifest(
+                  manifest,
+                  currentUrl,
+                  customHeaders,
+                );
+                const respHeaders: Record<string, string> = {
+                  'Content-Type':
+                    upstreamRes.headers['content-type'] ||
+                    'application/vnd.apple.mpegurl',
+                  'Access-Control-Allow-Origin': '*',
+                  'Cache-Control': 'no-cache',
+                };
+                if (!res.headersSent) {
+                  res.writeHead(200, respHeaders);
+                  res.end(rewritten);
+                }
+              });
+              upstreamRes.on('error', () => {
+                if (!res.headersSent) {
+                  try {
+                    res.end();
+                  } catch {}
+                }
+              });
+              return;
+            }
+
+            // TS segment or other media: stream bytes through
+            const respHeaders: Record<string, string> = {
+              'Content-Type':
+                upstreamRes.headers['content-type'] || 'video/mp2t',
+              'Accept-Ranges': 'bytes',
+              'Access-Control-Allow-Origin': '*',
+            };
+            if (upstreamRes.headers['content-length']) {
+              respHeaders['Content-Length'] = String(
+                upstreamRes.headers['content-length'],
+              );
+            }
+            if (upstreamRes.headers['content-range']) {
+              respHeaders['Content-Range'] = String(
+                upstreamRes.headers['content-range'],
+              );
+            }
+            res.writeHead(status, respHeaders);
+            upstreamRes.on('error', () => {
+              try {
+                res.end();
+              } catch {}
+            });
+            upstreamRes.pipe(res);
+          },
+        );
+        upstreamReq.on('error', (err) => {
+          console.error(
+            '[ProxyServer] streamVideoDirect: upstream error:',
+            err.message,
+          );
+          if (!res.headersSent && !clientGone) {
+            res.writeHead(502, { 'Content-Type': 'text/plain' });
+            res.end('Upstream error: ' + err.message);
+          } else {
+            try {
+              res.end();
+            } catch {}
+          }
+        });
+        upstreamReq.end();
+      } catch (e: any) {
+        console.error(
+          '[ProxyServer] streamVideoDirect: setup error:',
+          e.message,
+        );
+        if (!res.headersSent && !clientGone) {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('Proxy error: ' + e.message);
+        }
+      }
+    };
+
+    makeRequest();
+  }
+
+  /**
+   * Rewrite segment URLs inside an m3u8 manifest to route through our
+   * /m3u8.m3u8 proxy endpoint. This ensures the CDN sees the same headers
+   * (User-Agent, Referer) on every TS segment request, not just the manifest.
+   *
+   * Handles both relative ("seg-1.ts") and absolute ("https://...") URLs.
+   */
+  private rewriteM3u8Manifest(
+    manifest: string,
+    baseUrl: string,
+    customHeaders: Record<string, string> | null,
+  ): string {
+    const port = this.port;
+    const headerParam = customHeaders
+      ? '&header=' + encodeURIComponent(JSON.stringify(customHeaders))
+      : '';
+    const lines = manifest.split('\n');
+    let baseOrigin = '';
+    let basePath = '';
+    try {
+      const parsed = new URL(baseUrl);
+      baseOrigin = `${parsed.protocol}//${parsed.host}`;
+      basePath = parsed.pathname.substring(
+        0,
+        parsed.pathname.lastIndexOf('/') + 1,
+      );
+    } catch {}
+
+    const rewritten: string[] = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      // Directive lines (start with #) — pass through unchanged.
+      // But rewrite #EXT-X-KEY URI if present (encrypted HLS).
+      if (trimmed.startsWith('#')) {
+        rewritten.push(
+          this.rewriteManifestDirective(
+            trimmed,
+            baseOrigin,
+            basePath,
+            port,
+            headerParam,
+          ),
+        );
+        continue;
+      }
+      // Empty line — pass through
+      if (!trimmed) {
+        rewritten.push(line);
+        continue;
+      }
+      // Segment URL line — rewrite to go through proxy
+      let absoluteUrl: string;
+      if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+        absoluteUrl = trimmed;
+      } else if (trimmed.startsWith('//')) {
+        absoluteUrl = baseOrigin.split('//')[0] + trimmed;
+      } else if (trimmed.startsWith('/')) {
+        absoluteUrl = baseOrigin + trimmed;
+      } else {
+        absoluteUrl = baseOrigin + basePath + trimmed;
+      }
+      rewritten.push(
+        `http://127.0.0.1:${port}/ts?url=${encodeURIComponent(absoluteUrl)}${headerParam}`,
+      );
+    }
+    return rewritten.join('\n');
+  }
+
+  /**
+   * Rewrite m3u8 manifest for pan direct streaming (quarkDirect/ucDirect/etc).
+   * Same as rewriteM3u8Manifest but routes TS segments through the pan proxy
+   * endpoint so CDN requests get the correct pan-specific headers (no Cookie
+   * for quark, Chrome UA, etc.).
+   */
+  private rewritePanM3u8Manifest(
+    manifest: string,
+    baseUrl: string,
+    panType: string,
+  ): string {
+    const port = this.port;
+    const lines = manifest.split('\n');
+    let baseOrigin = '';
+    let basePath = '';
+    try {
+      const parsed = new URL(baseUrl);
+      baseOrigin = `${parsed.protocol}//${parsed.host}`;
+      basePath = parsed.pathname.substring(
+        0,
+        parsed.pathname.lastIndexOf('/') + 1,
+      );
+    } catch {}
+
+    const rewritten: string[] = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      // Directive lines (#EXTINF, #EXT-X-*, etc.) — pass through
+      if (trimmed.startsWith('#')) {
+        rewritten.push(line);
+        continue;
+      }
+      // Empty line — pass through
+      if (!trimmed) {
+        rewritten.push(line);
+        continue;
+      }
+      // Segment URL line — rewrite to go through pan proxy
+      let absoluteUrl: string;
+      if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+        absoluteUrl = trimmed;
+      } else if (trimmed.startsWith('//')) {
+        absoluteUrl = baseOrigin.split('//')[0] + trimmed;
+      } else if (trimmed.startsWith('/')) {
+        absoluteUrl = baseOrigin + trimmed;
+      } else {
+        absoluteUrl = baseOrigin + basePath + trimmed;
+      }
+      rewritten.push(
+        `http://127.0.0.1:${port}/proxy?do=${panType}Direct&url=${encodeURIComponent(absoluteUrl)}`,
+      );
+    }
+    return rewritten.join('\n');
+  }
+
+  /**
+   * Rewrite URI="..." inside manifest directives (#EXT-X-KEY, #EXT-X-MAP).
+   * Encrypted HLS keys/segments also need to go through the proxy.
+   */
+  private rewriteManifestDirective(
+    directive: string,
+    baseOrigin: string,
+    basePath: string,
+    port: number,
+    headerParam: string,
+  ): string {
+    const uriMatch = directive.match(/URI="([^"]+)"/);
+    if (!uriMatch) return directive;
+    const originalUri = uriMatch[1];
+    let absoluteUrl: string;
+    if (
+      originalUri.startsWith('http://') ||
+      originalUri.startsWith('https://')
+    ) {
+      absoluteUrl = originalUri;
+    } else if (originalUri.startsWith('//')) {
+      absoluteUrl = baseOrigin.split('//')[0] + originalUri;
+    } else if (originalUri.startsWith('/')) {
+      absoluteUrl = baseOrigin + originalUri;
+    } else {
+      absoluteUrl = baseOrigin + basePath + originalUri;
+    }
+    const proxiedUri = `http://127.0.0.1:${port}/ts?url=${encodeURIComponent(absoluteUrl)}${headerParam}`;
+    return directive.replace(`URI="${originalUri}"`, `URI="${proxiedUri}"`);
   }
 
   /**
@@ -1351,6 +2332,7 @@ export class ProxyServer {
         path: u.pathname + u.search,
         method: 'GET',
         headers,
+        agent: isHttps ? httpsAgent : httpAgent, // 复用连接减少 TLS 握手延迟
       },
       (upstreamRes) => {
         if (clientGone) {
@@ -1403,48 +2385,96 @@ export class ProxyServer {
             res.headersSent,
           );
 
-          // Use Transform Stream to rewrite m3u8 line by line while streaming
-          // This mirrors Android's chunked response behavior
-          console.log(
-            '[ProxyServer] streamUnknownProxy: creating M3u8Rewriter for streaming rewrite, do=',
-            doType,
-            'port=',
-            this.port,
-            'customHeaders=',
-            JSON.stringify(customHeaders),
-          );
-
-          const m3u8Rewriter = new M3u8Rewriter(
-            decodedUrl,
-            this.port,
-            doType,
-            customHeaders,
-          );
-
-          // Pipeline: upstreamRes → M3u8Rewriter → res
-          // (reads chunks, rewrites line by line, pushes immediately)
-          console.log('[ProxyServer] streamUnknownProxy: starting pipe chain');
-          upstreamRes
-            .pipe(m3u8Rewriter)
-            .on('error', (err: Error) => {
-              console.error(
-                '[ProxyServer] streamUnknownProxy: m3u8 rewriter error:',
-                err.message,
-              );
-            })
-            .pipe(res)
-            .on('error', (err: Error) => {
-              console.error(
-                '[ProxyServer] streamUnknownProxy: response stream error:',
-                err.message,
-              );
-            })
-            .on('finish', () => {
+          // hxq source: TS URLs have auth in query string, pass through
+          // unchanged so the browser fetches TS directly from CDN.
+          // CDN optimization: replace slow CDN hostnames with the fastest
+          // CDN selected at startup (avoids ~0.06 MB/s throttling).
+          if (doType === 'hxq') {
+            console.log(
+              '[ProxyServer] streamUnknownProxy: hxq m3u8, rewrite to absolute CDN URLs',
+            );
+            const m3u8Rewriter = new M3u8Rewriter(
+              decodedUrl,
+              this.port,
+              doType,
+              customHeaders,
+              true, // directCdn: output absolute CDN URLs
+            );
+            if (this.cdnOptimized && this.fastestCdn) {
+              const cdnRewriter = new CdnRewriter(this.fastestCdn);
               console.log(
-                '[ProxyServer] streamUnknownProxy: pipe chain finished for do=',
-                doType,
+                '[ProxyServer] streamUnknownProxy: hxq m3u8 CDN rewrite enabled, target=',
+                this.fastestCdn,
               );
-            });
+              upstreamRes
+                .pipe(m3u8Rewriter)
+                .on('error', (err: Error) => {
+                  console.error(
+                    '[ProxyServer] streamUnknownProxy: m3u8 rewriter error:',
+                    err.message,
+                  );
+                })
+                .pipe(cdnRewriter)
+                .on('error', (err: Error) => {
+                  console.error(
+                    '[ProxyServer] streamUnknownProxy: cdn rewriter error:',
+                    err.message,
+                  );
+                })
+                .pipe(res)
+                .on('error', (err: Error) => {
+                  console.error(
+                    '[ProxyServer] streamUnknownProxy: response stream error:',
+                    err.message,
+                  );
+                });
+            } else {
+              upstreamRes
+                .pipe(m3u8Rewriter)
+                .on('error', (err: Error) => {
+                  console.error(
+                    '[ProxyServer] streamUnknownProxy: m3u8 rewriter error:',
+                    err.message,
+                  );
+                })
+                .pipe(res)
+                .on('error', (err: Error) => {
+                  console.error(
+                    '[ProxyServer] streamUnknownProxy: response stream error:',
+                    err.message,
+                  );
+                });
+            }
+          } else {
+            // Other sources: rewrite TS URLs to proxy URLs for header injection
+            console.log(
+              '[ProxyServer] streamUnknownProxy: creating M3u8Rewriter, do=',
+              doType,
+              'port=',
+              this.port,
+            );
+            const m3u8Rewriter = new M3u8Rewriter(
+              decodedUrl,
+              this.port,
+              doType,
+              customHeaders,
+            );
+            upstreamRes
+              .pipe(m3u8Rewriter)
+              .on('error', (err: Error) => {
+                console.error(
+                  '[ProxyServer] streamUnknownProxy: m3u8 rewriter error:',
+                  err.message,
+                );
+              })
+              .pipe(res)
+              .on('error', (err: Error) => {
+                console.error(
+                  '[ProxyServer] streamUnknownProxy: response stream error:',
+                  err.message,
+                );
+              });
+          }
         } else {
           // Non-m3u8 content (like TS segments) - pipe directly
           const statusCode = upstreamRes.statusCode === 206 ? 206 : 200;

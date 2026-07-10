@@ -14,8 +14,14 @@ export type { HistoryRecord, FavoriteRecord };
 
 export class Database {
   // ---- History ----
+  // 使用影视名称作为key，让不同源的相同影视剧共享进度
   static async saveHistory(record: HistoryRecord): Promise<void> {
-    const id = `${record.sourceKey}_${record.vod_id}`;
+    const vodName = record.vod_name || '';
+    // 包含playIndex，让不同集数有独立的历史记录
+    const id = `${vodName}_${record.playIndex || 0}`;
+    console.log(
+      `[Database] saveHistory key: "${id}" (vod_name="${vodName}", playIndex=${record.playIndex || 0})`,
+    );
     const existing = await historyStore.getItem<HistoryRecord>(id);
     await historyStore.setItem(id, {
       ...record,
@@ -31,19 +37,47 @@ export class Database {
     vodId: string,
     progress: number,
     duration: number,
+    episodeIndex: number = 0,
+    vodName?: string,
   ): Promise<void> {
-    const id = `${sourceKey}_${vodId}`;
+    // 使用影视名称作为key
+    const name = vodName || vodId;
+    const id = `${name}_${episodeIndex}`;
     const existing = await historyStore.getItem<HistoryRecord>(id);
+    // 如果记录存在，更新进度；否则创建新记录
     if (existing) {
       await historyStore.setItem(id, { ...existing, progress, duration });
+    } else {
+      // 没有现有记录时也保存进度
+      await historyStore.setItem(id, {
+        sourceKey,
+        vod_id: vodId,
+        vod_name: name,
+        playIndex: episodeIndex,
+        progress,
+        duration,
+        timestamp: Date.now(),
+      } as HistoryRecord);
     }
   }
 
   static async getHistory(
     sourceKey: string,
     vodId: string,
+    episodeIndex: number = 0,
+    vodName?: string,
   ): Promise<HistoryRecord | null> {
-    return await historyStore.getItem<HistoryRecord>(`${sourceKey}_${vodId}`);
+    // 使用影视名称作为key
+    const name = vodName || vodId;
+    const id = `${name}_${episodeIndex}`;
+    console.log(
+      `[Database] getHistory key: "${id}" (vodName="${vodName || ''}", vodId="${vodId}", episodeIndex=${episodeIndex})`,
+    );
+    const result = await historyStore.getItem<HistoryRecord>(id);
+    console.log(
+      `[Database] getHistory result: ${result ? `progress=${result.progress}s` : 'null'}`,
+    );
+    return result;
   }
 
   static async getAllHistory(): Promise<HistoryRecord[]> {
@@ -58,8 +92,25 @@ export class Database {
     await historyStore.clear();
   }
 
-  static async removeHistory(sourceKey: string, vodId: string): Promise<void> {
-    await historyStore.removeItem(`${sourceKey}_${vodId}`);
+  static async removeHistory(
+    vodName: string,
+    episodeIndex?: number,
+  ): Promise<void> {
+    if (episodeIndex !== undefined) {
+      // 删除特定集数的历史
+      await historyStore.removeItem(`${vodName}_${episodeIndex}`);
+    } else {
+      // 删除该影视剧所有集数的历史
+      const keysToRemove: string[] = [];
+      await historyStore.iterate<HistoryRecord, void>((_, key) => {
+        if (key.startsWith(`${vodName}_`)) {
+          keysToRemove.push(key);
+        }
+      });
+      for (const key of keysToRemove) {
+        await historyStore.removeItem(key);
+      }
+    }
   }
 
   // ---- Favorites ----

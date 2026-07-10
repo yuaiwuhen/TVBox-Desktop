@@ -19,24 +19,43 @@ import type {
   LiveChannelGroup,
 } from '../core/models';
 
-function buildConfigCenterVodList(): Movie[] {
+async function buildConfigCenterVodList(): Promise<Movie[]> {
   const panTypes: PanType[] = ['quark', 'uc', 'aliyun', 'baidu', 'bili'];
-  return panTypes.map((panType) => {
-    const isLoggedIn = PanLogin.isLoggedIn(panType);
-    const info = PanLogin.getLoginInfo(panType);
-    const capName = panType.charAt(0).toUpperCase() + panType.slice(1);
-    const actionPrefix = panType === 'aliyun' ? 'Ali' : capName;
-    const action = isLoggedIn ? `del${actionPrefix}` : `add${actionPrefix}`;
-    return {
-      vod_id: action,
-      vod_name: PanLogin.getDisplayName(panType),
-      vod_pic: `/icons/${panType}.png`,
-      vod_remarks: isLoggedIn
-        ? `已登录: ${info?.nickname || info?.userId || '未知'}`
-        : '点击扫码登录',
-      action,
-    };
-  });
+  const results = await Promise.all(
+    panTypes.map(async (panType) => {
+      const savedLoggedIn = PanLogin.isLoggedIn(panType);
+      const info = PanLogin.getLoginInfo(panType);
+      const capName = panType.charAt(0).toUpperCase() + panType.slice(1);
+      const actionPrefix = panType === 'aliyun' ? 'Ali' : capName;
+      // Verify token validity via API call (only for Quark currently)
+      let actualLoggedIn = savedLoggedIn;
+      if (savedLoggedIn) {
+        actualLoggedIn = await PanLogin.checkTokenValid(panType);
+        if (savedLoggedIn && !actualLoggedIn) {
+          console.log(
+            `[Store] buildConfigCenterVodList: ${panType} token expired, auto-logging out`,
+          );
+          PanLogin.logout(panType);
+        }
+      }
+      const action = actualLoggedIn
+        ? `del${actionPrefix}`
+        : `add${actionPrefix}`;
+      console.log(
+        `[Store] buildConfigCenterVodList: ${panType} savedLoggedIn=${savedLoggedIn} actualLoggedIn=${actualLoggedIn} action=${action}`,
+      );
+      return {
+        vod_id: action,
+        vod_name: PanLogin.getDisplayName(panType),
+        vod_pic: `/icons/${panType}.png`,
+        vod_remarks: actualLoggedIn
+          ? `已登录: ${info?.nickname || info?.userId || '未知'}`
+          : '点击扫码登录',
+        action,
+      };
+    }),
+  );
+  return results;
 }
 
 export const useAppStore = defineStore('app', () => {
@@ -55,6 +74,8 @@ export const useAppStore = defineStore('app', () => {
   const filters = ref<Record<string, FilterGroup[]>>({});
   const homeVodList = ref<Movie[]>([]);
   const homeLoading = ref(false);
+  const activeCategory = ref(''); // 当前选中的分类
+  const filterValues = ref<Record<string, string>>({}); // 当前选中的筛选值
 
   // ===== Category =====
   const categoryVodList = ref<Movie[]>([]);
@@ -169,7 +190,6 @@ export const useAppStore = defineStore('app', () => {
 
   function setActiveSite(key: string) {
     const oldKey = activeSiteKey.value;
-    console.log(`[Store] setActiveSite: oldKey=${oldKey}, newKey=${key}`);
 
     let site = sites.value.find((s) => getUniqueKey(s) === key);
     if (!site) {
@@ -177,6 +197,19 @@ export const useAppStore = defineStore('app', () => {
     }
 
     const newUniqueKey = site ? getUniqueKey(site) : key;
+
+    // Same site: skip resetHome to preserve cached home/category data
+    // (e.g., when returning from Detail page)
+    if (oldKey === newUniqueKey) {
+      console.log(
+        `[Store] setActiveSite: same key (${oldKey}), skipping resetHome`,
+      );
+      return;
+    }
+
+    console.log(
+      `[Store] setActiveSite: oldKey=${oldKey}, newKey=${newUniqueKey}`,
+    );
     activeSiteKey.value = newUniqueKey;
     localStorage.setItem('tvbox_active_site', newUniqueKey);
     if (site) configParser.setHomeSource(site);
@@ -191,6 +224,8 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function resetHome(oldKey?: string) {
+    console.log('[Store] resetHome called, oldKey:', oldKey);
+    console.log('[Store] resetHome stack:', new Error().stack);
     classes.value = [];
     filters.value = {};
     homeVodList.value = [];
@@ -211,7 +246,17 @@ export const useAppStore = defineStore('app', () => {
       console.warn('[Store] loadHome: no active site');
       return;
     }
-    if (!force && homeVodList.value.length > 0) {
+
+    const apiLower = (activeSite.value.api || '').toLowerCase();
+    const keyLower = (activeSite.value.key || '').toLowerCase();
+    const isConfigCenter =
+      keyLower === 'config' ||
+      apiLower.includes('config') ||
+      (activeSite.value.name || '').includes('配置');
+
+    // Config center always needs fresh data (token states change independently).
+    // For non-config sites, use cached data unless forced.
+    if (!force && !isConfigCenter && homeVodList.value.length > 0) {
       console.log('[Store] loadHome: using cached data');
       return;
     }
@@ -241,18 +286,12 @@ export const useAppStore = defineStore('app', () => {
       ),
     );
 
-    const apiLower = (activeSite.value.api || '').toLowerCase();
-    const keyLower = (activeSite.value.key || '').toLowerCase();
-    const isConfigCenter =
-      keyLower === 'config' ||
-      apiLower.includes('config') ||
-      (activeSite.value.name || '').includes('配置');
     if (isConfigCenter) {
       console.log('[Store] loadHome: config center (hardcoded)');
       try {
         classes.value = [];
         filters.value = {};
-        homeVodList.value = buildConfigCenterVodList();
+        homeVodList.value = await buildConfigCenterVodList();
       } finally {
         homeLoading.value = false;
       }
@@ -371,6 +410,29 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  // 设置当前分类
+  function setCategory(tid: string) {
+    activeCategory.value = tid;
+    filterValues.value = {};
+  }
+
+  // Toggle a filter value (no API call — caller applies via applyFilters)
+  function setFilter(key: string, value: string) {
+    if (filterValues.value[key] === value) {
+      delete filterValues.value[key];
+    } else {
+      filterValues.value[key] = value;
+    }
+    filterValues.value = { ...filterValues.value };
+  }
+
+  // Apply current filters and reload category (page 1)
+  async function applyFilters() {
+    if (activeCategory.value && activeCategory.value !== '__recommend__') {
+      await loadCategory(activeCategory.value, '1', filterValues.value);
+    }
+  }
+
   async function runSpiderAction(actionId: string, actionData: any) {
     if (!activeSite.value) return;
     console.log(
@@ -406,6 +468,8 @@ export const useAppStore = defineStore('app', () => {
   ) {
     if (!activeSite.value) return;
     categoryLoading.value = true;
+    // Clear current list so skeleton shows during load
+    categoryVodList.value = [];
     console.log(
       `[Store] loadCategory: site=${activeSite.value.name} key=${activeSite.value.key}, tid=${tid}, pg=${pg}, filterValues=${JSON.stringify(filterValues)}`,
     );
@@ -420,20 +484,22 @@ export const useAppStore = defineStore('app', () => {
       const hasFilter =
         activeSite.value.filterable === 1 &&
         Object.keys(filterValues).length > 0;
+      // Vue reactive proxy cannot be cloned by Electron IPC — convert to plain object
+      const plainFilterValues = JSON.parse(JSON.stringify(filterValues));
       const rawResult = await spider.categoryContent(
         tid,
         pg,
         hasFilter,
-        filterValues,
+        plainFilterValues,
       );
-      let parsedRaw: any;
+      let result: any;
       try {
-        parsedRaw = JSON.parse(rawResult);
+        result =
+          typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
       } catch {
-        parsedRaw = rawResult;
+        result = { list: [] };
       }
-      console.log(`[Store] loadCategory: raw result:`, parsedRaw);
-      const result = JSON.parse(rawResult);
+      console.log(`[Store] loadCategory: raw result:`, result);
       console.log(
         `[Store] loadCategory: parsed list=${result.list?.length || 0}, page=${result.page || pg}, pagecount=${result.pagecount || 1}`,
       );
@@ -552,6 +618,18 @@ export const useAppStore = defineStore('app', () => {
       });
 
       if (result.url) {
+        // 先获取历史进度，再设置URL（避免时序问题）
+        const history = await Database.getHistory(
+          activeSite.value.key,
+          currentVod.value?.vod_id || '',
+          episodeIndex,
+          currentVod.value?.vod_name,
+        );
+        console.log(
+          `[Store] loadPlay: getHistory returned progress=${history?.progress || 0}s for episodeIndex=${episodeIndex}`,
+        );
+        resumeProgress.value = history?.progress || 0;
+
         if (ParseEngine.needsParse(result)) {
           try {
             const resolvedUrl = await ParseEngine.resolve(
@@ -571,6 +649,7 @@ export const useAppStore = defineStore('app', () => {
           }
         }
 
+        // 设置URL（触发VideoPlayer重新初始化，此时resumeProgress已正确）
         currentPlayUrl.value = result.url;
         currentPlayFlag.value = flag;
         if (result.header) {
@@ -582,12 +661,6 @@ export const useAppStore = defineStore('app', () => {
         } else {
           currentPlayHeader.value = {};
         }
-
-        const history = await Database.getHistory(
-          activeSite.value.key,
-          currentVod.value?.vod_id || '',
-        );
-        resumeProgress.value = history?.progress || 0;
 
         if (currentVod.value) {
           await Database.saveHistory({
@@ -619,6 +692,8 @@ export const useAppStore = defineStore('app', () => {
       currentVod.value.vod_id,
       progress,
       duration,
+      currentPlayIndex.value,
+      currentVod.value.vod_name,
     );
   }
 
@@ -758,6 +833,8 @@ export const useAppStore = defineStore('app', () => {
     filters,
     homeVodList,
     homeLoading,
+    activeCategory,
+    filterValues,
     categoryVodList,
     categoryPage,
     categoryPageCount,
@@ -789,6 +866,9 @@ export const useAppStore = defineStore('app', () => {
     setActiveSite,
     setDefaultParse,
     loadHome,
+    setCategory,
+    setFilter,
+    applyFilters,
     loadCategory,
     runSpiderAction,
     loadDetail,

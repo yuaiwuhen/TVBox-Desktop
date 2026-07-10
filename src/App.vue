@@ -67,6 +67,26 @@
         <div class="flex items-center gap-3">
           <el-tag v-if="store.sites.length > 0" size="small" type="info">{{ store.sites.length }} 个源</el-tag>
           <div class="text-xs tabular-nums" style="color: var(--color-text-tertiary)">{{ currentTime }}</div>
+          <!-- 筛选按钮（只在首页显示且有筛选选项时显示） -->
+          <el-popover v-if="showFilterButton && activeFilters.length > 0" placement="bottom" trigger="click"
+            width="280" @show="onFilterPopoverShow" @hide="onFilterPopoverHide">
+            <template #reference>
+              <el-button text size="small" style="color: var(--color-text-secondary)">
+                <el-icon class="mr-1">
+                  <Filter />
+                </el-icon>筛选
+              </el-button>
+            </template>
+            <div v-for="group in activeFilters" :key="group.key" class="mb-3">
+              <div class="text-sm font-medium mb-1" style="color: var(--color-text-primary)">{{ group.name }}:</div>
+              <div class="flex flex-wrap gap-2">
+                <button v-for="item in group.value" :key="item.v"
+                  class="filter-chip px-3 py-1 rounded text-xs transition-all duration-200 cursor-pointer"
+                  :class="{ 'filter-chip-active': store.filterValues[group.key] === item.v }"
+                  @click="onFilterSelect(group.key, item.v)">{{ item.n }}</button>
+              </div>
+            </div>
+          </el-popover>
           <el-button text size="small" @click="$router.push('/search')" style="color: var(--color-text-secondary)">
             <el-icon class="mr-1">
               <Search />
@@ -92,7 +112,7 @@
 
 <script setup lang="ts">
 import LoadingToast from './components/LoadingToast.vue'
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from './store/app'
 import { localProxy } from './core/LocalProxyServer'
@@ -104,7 +124,7 @@ import { spiderEngine } from './core/SpiderEngine'
 import { PanLogin } from './core/PanLogin'
 import type { RemoteControlHandler } from './core/RemoteServer'
 import {
-  HomeFilled, Search, Monitor, Clock, Star, FolderOpened, Setting, VideoPlay, Fold, Expand,
+  HomeFilled, Search, Monitor, Clock, Star, FolderOpened, Setting, VideoPlay, Fold, Expand, Filter,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -112,6 +132,34 @@ const router = useRouter()
 const store = useAppStore()
 const sidebarExpanded = ref(true)
 const currentTime = ref('')
+
+// 筛选按钮相关
+const showFilterButton = computed(() => route.path === '/' || route.name === 'detail')
+const activeFilters = computed(() => {
+  if (store.activeCategory) {
+    return store.filters[store.activeCategory] || []
+  }
+  return []
+})
+
+function onFilterSelect(key: string, value: string) {
+  store.setFilter(key, value)
+}
+
+// Snapshot of filterValues when popover opens — used to detect changes on close
+let filterSnapshot = ''
+
+function onFilterPopoverShow() {
+  filterSnapshot = JSON.stringify(store.filterValues)
+}
+
+function onFilterPopoverHide() {
+  const current = JSON.stringify(store.filterValues)
+  if (current !== filterSnapshot) {
+    console.log('[App] Filters changed, applying:', store.filterValues)
+    store.applyFilters()
+  }
+}
 
 let timeTimer: ReturnType<typeof setInterval> | null = null
 function updateTime() {
@@ -161,6 +209,11 @@ const remoteHandler: RemoteControlHandler = {
       playing: !!store.currentPlayUrl,
       playUrl: store.currentPlayUrl,
       playFlag: store.currentPlayFlag,
+      classes: store.classes,
+      homeVodList: store.homeVodList,
+      categoryVodList: store.categoryVodList,
+      categoryPage: store.categoryPage,
+      categoryPageCount: store.categoryPageCount,
     }
   },
   getDebug() {
@@ -195,6 +248,26 @@ const remoteHandler: RemoteControlHandler = {
       firstSiteApi: cfg.video?.sites?.[0]?.api || cfg.sites?.[0]?.api,
       firstSiteExt: cfg.video?.sites?.[0]?.ext?.substring(0, 100) || cfg.sites?.[0]?.ext?.substring(0, 100),
       siteKeys: (cfg.video?.sites || cfg.sites || []).map((s: any) => s.key).slice(0, 10),
+    }
+  },
+  switchSource(sourceKey: string) {
+    store.setActiveSite(sourceKey)
+  },
+  async loadHome(force?: boolean) {
+    // 等待 Vue 响应式更新完成
+    await new Promise(resolve => setTimeout(resolve, 100))
+    await store.loadHome(force)
+  },
+  async loadCategory(tid: string, page: string, filters?: Record<string, string>) {
+    await store.loadCategory(tid, page, filters || store.filterValues)
+  },
+  async getPlayUrl(sourceKey: string, vodId: string, flag: string, episodeUrl: string) {
+    store.setActiveSite(sourceKey)
+    await store.loadDetail(vodId)
+    await store.loadPlay(flag, episodeUrl)
+    return {
+      url: store.currentPlayUrl,
+      header: store.currentPlayHeader,
     }
   },
 }

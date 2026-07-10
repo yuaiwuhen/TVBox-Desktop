@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { ipcMain } from 'electron';
+import { ipcMain, BrowserWindow } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { jarLoader } from './JarLoader';
@@ -36,9 +36,14 @@ export class QuarkPanService {
     });
 
     ipcMain.handle('quark:logout', async () => {
-      this.loginInfo = null;
-      this.syncedCookie = null;
+      this.clearLoginState();
       return { success: true };
+    });
+
+    // Check token validity by making a lightweight API call.
+    // Used by config center to detect expired tokens on each open.
+    ipcMain.handle('quark:checkTokenValid', async () => {
+      return this.checkTokenValid();
     });
 
     // Diagnostic: test Quark share-link API with the synced cookie.
@@ -155,6 +160,113 @@ export class QuarkPanService {
     console.log(
       '[QuarkPanService] clearLoginState: loginInfo, syncedCookie, caches cleared',
     );
+    // Also clear JVM SharedPreferences so spider no longer thinks user is logged in
+    this.clearJvmCookie().catch((e) =>
+      console.warn(
+        '[QuarkPanService] clearLoginState: JVM clear failed:',
+        e.message,
+      ),
+    );
+  }
+
+  /**
+   * Check if the current Quark token/cookie is still valid.
+   * Makes a lightweight API call to /clouddrive/auth/pc/flush to verify.
+   * Returns { valid: true, nickname } if valid, { valid: false } if expired.
+   */
+  static async checkTokenValid(): Promise<{
+    valid: boolean;
+    nickname?: string;
+  }> {
+    const cookie = this.syncedCookie;
+    if (!cookie) {
+      return { valid: false };
+    }
+    try {
+      const resp = await axios.post(
+        'https://drive-pc.quark.cn/1/clouddrive/auth/pc/flush?pr=ucpro&fr=pc&uc_param_str=',
+        null,
+        {
+          headers: {
+            Cookie: cookie,
+            'User-Agent': this.QUARK_DESKTOP_UA,
+            'Content-Type': 'application/json;charset=UTF-8',
+            Referer: 'https://pan.quark.cn/',
+            Origin: 'https://pan.quark.cn',
+          },
+          timeout: 10000,
+          validateStatus: () => true,
+        },
+      );
+      const body = resp.data;
+      if (
+        body &&
+        typeof body === 'object' &&
+        typeof body.code === 'number' &&
+        body.code !== 0
+      ) {
+        console.warn(
+          '[QuarkPanService] checkTokenValid: token expired, code=',
+          body.code,
+        );
+        return { valid: false };
+      }
+      console.log('[QuarkPanService] checkTokenValid: token valid');
+      return { valid: true, nickname: this.loginInfo?.nickname };
+    } catch (e: any) {
+      console.warn('[QuarkPanService] checkTokenValid error:', e.message);
+      return { valid: false };
+    }
+  }
+
+  /**
+   * Clear Quark cookie from JVM SharedPreferences.
+   * Without this, spider continues to read stale cookie from SharedPreferences
+   * after logout and returns "已登录" state in homeContent.
+   */
+  private static async clearJvmCookie(): Promise<void> {
+    try {
+      if (!jarLoader || !jarLoader.java) {
+        console.warn(
+          '[QuarkPanService] JVM not ready, skipping JVM cookie clear',
+        );
+        return;
+      }
+      const InitClass = jarLoader.java.importClass(
+        'com.github.catvod.spider.Init',
+      );
+      const ctx = InitClass.contextSync();
+      if (!ctx) {
+        console.warn(
+          '[QuarkPanService] Init.context() returned null, skipping JVM clear',
+        );
+        return;
+      }
+      const PREFS_NAME = 'com.github.catvod.tvbox_preferences';
+      const prefs = ctx.getSharedPreferencesSync(PREFS_NAME, 0);
+      if (prefs) {
+        const editor = prefs.editSync();
+        editor.removeSync('mi.quark');
+        editor.removeSync('.quark');
+        editor.applySync();
+        console.log(
+          `[QuarkPanService] Cleared quark cookie from ${PREFS_NAME}`,
+        );
+      }
+      // Also clear from Guard spider's SharedPreferences
+      const GUARD_PREFS = 'NewWexFnw_preferences';
+      const guardPrefs = ctx.getSharedPreferencesSync(GUARD_PREFS, 0);
+      if (guardPrefs) {
+        const guardEditor = guardPrefs.editSync();
+        guardEditor.removeSync('Wex_quark_cookie');
+        guardEditor.applySync();
+        console.log(
+          `[QuarkPanService] Cleared quark cookie from ${GUARD_PREFS}`,
+        );
+      }
+    } catch (e: any) {
+      console.warn('[QuarkPanService] clearJvmCookie error:', e.message);
+    }
   }
 
   /**
@@ -466,7 +578,33 @@ export class QuarkPanService {
       // Step 1: Refresh __puus cookie (mirrors spider's refreshCookie()).
       // CDN validates __puus against the auth_key in the download URL; a
       // stale __puus causes 412 even with a fresh download URL.
-      await this.refreshCookie(commonHeaders);
+      //
+      // Use refreshCookieForPlayback (not the private refreshCookie) so we
+      // detect true login expiry: if /clouddrive/auth/pc/flush returns a
+      // non-zero code, the user must re-scan the QR code. Without this, the
+      // private refreshCookie silently keeps the stale cookie and every
+      // subsequent API call generates URLs bound to the stale __puus → 412.
+      const refreshResult = await this.refreshCookieForPlayback();
+      if (refreshResult.expired) {
+        console.warn(
+          '[QuarkPanService] resolveQuarkDownloadUrl: Quark login expired, emitting pan:loginExpired',
+        );
+        try {
+          BrowserWindow.getAllWindows().forEach((w) =>
+            w.webContents.send('pan:loginExpired', 'quark'),
+          );
+        } catch (e: any) {
+          console.warn(
+            '[QuarkPanService] Failed to emit pan:loginExpired:',
+            e.message,
+          );
+        }
+        return null;
+      }
+      // refreshCookieForPlayback updated this.syncedCookie in-place if a new
+      // __puus was returned. Rebuild commonHeaders.Cookie so the fresh
+      // __puus is used for all subsequent API calls (v2/play, download, etc.).
+      commonHeaders.Cookie = this.syncedCookie || cookie;
 
       // Step 2: Try /file/v2/play first — this endpoint returns a streaming-
       // optimized URL that doesn't throttle. /file/download URLs often get
@@ -537,6 +675,89 @@ export class QuarkPanService {
         e.response?.data,
       );
       return null;
+    }
+  }
+
+  /**
+   * Public wrapper around refreshCookie for pre-playback refresh.
+   *
+   * Called by JarLoader before spider's playerContent to ensure __puus is
+   * fresh, so the spider-generated download URL's auth_key matches the cookie
+   * the ProxyServer will send. Without this, the spider uses a stale JVM
+   * cookie → stale auth_key → CDN 412.
+   *
+   * Also detects true login expiry: if /clouddrive/auth/pc/flush returns a
+   * non-zero code (auth failure), the user must re-scan the QR code.
+   *
+   * Returns:
+   *   - refreshed: true if __puus was updated
+   *   - expired: true if login has expired (needs re-login)
+   *   - cookie: current synced cookie (null if not logged in)
+   */
+  public static async refreshCookieForPlayback(): Promise<{
+    refreshed: boolean;
+    expired: boolean;
+    cookie: string | null;
+  }> {
+    const cookie = this.syncedCookie;
+    if (!cookie) {
+      return { refreshed: false, expired: false, cookie: null };
+    }
+    const commonHeaders = {
+      Cookie: cookie,
+      'User-Agent': this.QUARK_DESKTOP_UA,
+      'Content-Type': 'application/json;charset=UTF-8',
+      Referer: 'https://pan.quark.cn/',
+      Origin: 'https://pan.quark.cn',
+    };
+    try {
+      const resp = await axios.post(
+        'https://drive-pc.quark.cn/1/clouddrive/auth/pc/flush?pr=ucpro&fr=pc&uc_param_str=',
+        null,
+        { headers: commonHeaders, timeout: 10000, validateStatus: () => true },
+      );
+      // Detect true login expiry: Quark API returns code != 0 when the cookie
+      // is no longer valid (e.g., 31001 "account not logged in"). A successful
+      // flush returns code 0 even if no new __puus is set.
+      const body = resp.data;
+      if (body && typeof body === 'object' && typeof body.code === 'number') {
+        if (body.code !== 0) {
+          console.warn(
+            '[QuarkPanService] refreshCookieForPlayback: login expired, code=',
+            body.code,
+            'message=',
+            body.message,
+          );
+          return { refreshed: false, expired: true, cookie: null };
+        }
+      }
+      const setCookie = resp.headers?.['set-cookie'];
+      if (!setCookie) {
+        return { refreshed: false, expired: false, cookie };
+      }
+      const cookies = Array.isArray(setCookie) ? setCookie : [setCookie];
+      const puusEntry = cookies.find((c: string) => c.startsWith('__puus='));
+      if (!puusEntry) {
+        return { refreshed: false, expired: false, cookie };
+      }
+      const newPuus = puusEntry.split(';')[0];
+      const parts = cookie
+        .split(';')
+        .map((s) => s.trim())
+        .filter((s) => s && !s.startsWith('__puus='));
+      parts.push(newPuus);
+      this.syncedCookie = parts.join('; ');
+      console.log(
+        '[QuarkPanService] refreshCookieForPlayback: updated __puus, cookie len=',
+        this.syncedCookie.length,
+      );
+      return { refreshed: true, expired: false, cookie: this.syncedCookie };
+    } catch (e: any) {
+      console.warn(
+        '[QuarkPanService] refreshCookieForPlayback failed (continuing with existing cookie):',
+        e.message,
+      );
+      return { refreshed: false, expired: false, cookie };
     }
   }
 

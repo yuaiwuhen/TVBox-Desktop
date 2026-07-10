@@ -36,3 +36,4 @@ jar_cache/
 
 # Tools - decompiled jars/sources are downloaded/generated, not source code
 tools/
+temp_apk_extracted/

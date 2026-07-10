@@ -82,6 +82,32 @@ export class PanLogin {
     return !!(info?.cookie || info?.refreshToken || info?.accessToken);
   }
 
+  /**
+   * Check if the saved login token is actually still valid by calling
+   * the main process API.
+   */
+  static async checkTokenValid(panType: PanType): Promise<boolean> {
+    const info = this.getLoginInfo(panType);
+    if (!info) {
+      return false;
+    }
+    // Only Quark has token validation implemented for now
+    if (panType !== 'quark') {
+      return true;
+    }
+    const ipc = getIPC();
+    if (!ipc) {
+      return true; // assume valid if IPC is not available
+    }
+    try {
+      const result = await ipc.invoke('quark:checkTokenValid');
+      return result.valid;
+    } catch (e) {
+      console.warn(`[PanLogin] checkTokenValid failed for ${panType}:`, e);
+      return true; // assume valid on network error
+    }
+  }
+
   static getLoginInfo(panType: PanType): PanLoginInfo | null {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS[panType]);
@@ -107,10 +133,17 @@ export class PanLogin {
   }
 
   static logout(panType: PanType): void {
-    localStorage.removeItem(STORAGE_KEYS[panType]);
+    const key = STORAGE_KEYS[panType];
+    const beforeRemove = localStorage.getItem(key);
+    console.log(`[PanLogin] logout ${panType}, key=${key}, hadData=${!!beforeRemove}`);
+    localStorage.removeItem(key);
+    const afterRemove = localStorage.getItem(key);
+    console.log(`[PanLogin] logout ${panType}, after remove: ${!!afterRemove}`);
     const ipc = getIPC();
     if (ipc) {
-      ipc.invoke('pan:logout', panType).catch(() => {});
+      ipc.invoke('pan:logout', panType).catch((e) => {
+        console.warn(`[PanLogin] logout IPC failed for ${panType}:`, e);
+      });
     }
     console.log(`[PanLogin] Logged out ${panType}`);
   }

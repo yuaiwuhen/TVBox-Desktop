@@ -1,17 +1,28 @@
 import axios from 'axios';
 import type { ISpider } from './models';
 
-// Node.js builtins via require (Vite doesn't bundle these)
-const _require =
-  typeof require !== 'undefined'
-    ? require
-    : (m: string) => {
-        throw new Error(`Cannot require ${m}`);
-      };
-const { spawn } = _require('child_process');
-const fs = _require('fs');
-const path = _require('path');
-const os = _require('os');
+// Node.js builtins - lazy load only when needed (avoid browser crash)
+// These are only used in Electron main process context
+let spawn: any = null;
+let fs: any = null;
+let path: any = null;
+let os: any = null;
+
+function loadNodeModules(): boolean {
+  if (typeof require === 'undefined') {
+    return false;
+  }
+  try {
+    const childProcess = require('child_process');
+    spawn = childProcess.spawn;
+    fs = require('fs');
+    path = require('path');
+    os = require('os');
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 interface JsonRpcRequest {
   jsonrpc: '2.0';
@@ -221,11 +232,22 @@ export class PySpider implements ISpider {
     this.key = key;
     this.api = api;
     this.ext = ext;
-    this.pluginDir = path.join(os.tmpdir(), 'tvbox-pc', 'plugin');
+    // Delay pluginDir initialization - will be set in ensureProcess()
+    this.pluginDir = '';
   }
 
   private async ensureProcess(): Promise<void> {
     if (this.process) return;
+
+    // Load Node.js modules on demand (only in Electron main process)
+    if (!loadNodeModules()) {
+      throw new Error('PySpider requires Electron main process context');
+    }
+
+    // Initialize pluginDir now that Node.js modules are loaded
+    if (!this.pluginDir) {
+      this.pluginDir = path.join(os.tmpdir(), 'tvbox-pc', 'plugin');
+    }
 
     const pyCmd = detectPython();
     if (!pyCmd)

@@ -72,7 +72,15 @@ export class JarSpider implements ISpider {
   async init(extend: string): Promise<void> {
     this.ext = extend || this.ext;
 
+    console.log('[JarSpider] init called:', {
+      key: this.key,
+      className: this.className,
+      jarUrl: this.jarUrl,
+      extPreview: this.ext.substring(0, 80),
+    });
+
     const ipc = getIPC();
+    console.log('[JarSpider] IPC available:', !!ipc);
     if (!ipc) {
       throw new Error('[JarSpider] IPC not available');
     }
@@ -93,8 +101,10 @@ export class JarSpider implements ISpider {
 
     try {
       // Step 1: Load JAR
-      console.log('[JarSpider] Loading JAR:', this.jarUrl);
+      console.log('[JarSpider] Step 1: Loading JAR...');
+      console.log('[JarSpider] jarUrl:', this.jarUrl);
       const loadResult = await ipc.invoke('jar:load', this.jarUrl, '', false);
+      console.log('[JarSpider] jar:load result:', loadResult);
       if (!loadResult?.success) {
         const errorMsg =
           loadResult?.error || `Failed to load JAR: ${this.jarUrl}`;
@@ -104,7 +114,7 @@ export class JarSpider implements ISpider {
       }
 
       // Step 2: Get Spider instance
-      console.log('[JarSpider] Getting spider:', this.className);
+      console.log('[JarSpider] Step 2: Getting spider:', this.className);
       const spiderResult = await ipc.invoke(
         'jar:getSpider',
         this.key,
@@ -112,6 +122,7 @@ export class JarSpider implements ISpider {
         this.ext,
         this.jarUrl,
       );
+      console.log('[JarSpider] jar:getSpider result:', spiderResult);
       if (!spiderResult?.success) {
         const errorMsg =
           spiderResult?.error || `Failed to get spider: ${this.className}`;
@@ -122,13 +133,13 @@ export class JarSpider implements ISpider {
 
       // Step 3: Initialize spider with ext config
       console.log(
-        '[JarSpider] Initializing spider with ext:',
+        '[JarSpider] Step 3: Initializing spider with ext:',
         this.ext.substring(0, 80),
       );
       await ipc.invoke('jar:initSpider', this.key, this.ext);
 
       this.initialized = true;
-      console.log('[JarSpider] Initialized:', this.key);
+      console.log('[JarSpider] Initialized successfully:', this.key);
 
       // Debug: list all methods
       try {

@@ -11,13 +11,22 @@
     </div>
 
     <div v-else class="flex-1 flex flex-col overflow-hidden">
-      <div ref="scrollContainer" class="flex-1 overflow-auto p-4">
+      <div ref="scrollContainer" class="flex-1 overflow-auto p-4" @scroll="onScroll">
         <!-- Home Loading -->
         <div v-if="store.homeLoading && store.homeVodList.length === 0">
           <el-skeleton :rows="6" animated />
         </div>
 
         <template v-else>
+          <!-- Config Center Header -->
+          <div v-if="isConfigCenter" class="flex items-center justify-between mb-4 px-1">
+            <h2 class="text-lg font-semibold" style="color: var(--color-text-primary)">配置中心</h2>
+            <el-button size="small" :loading="store.homeLoading" @click="refreshConfigCenter">
+              <el-icon><Refresh /></el-icon>
+              <span class="ml-1">刷新</span>
+            </el-button>
+          </div>
+
           <!-- Category Tabs (horizontally scrollable) -->
           <div v-if="displayClasses.length > 0" class="mb-4 overflow-x-auto flex gap-2 pb-2 scrollbar-hide">
             <button v-for="cls in displayClasses" :key="cls.type_id"
@@ -25,21 +34,6 @@
               :class="{ 'category-pill-active': activeCategory === cls.type_id }"
               @click="onCategoryChange(cls.type_id)">{{ cls.type_name }}</button>
           </div>
-
-          <!-- Filter Panel -->
-          <el-collapse v-if="activeFilters.length > 0" class="mb-4">
-            <el-collapse-item title="筛选" name="filters">
-              <div v-for="group in activeFilters" :key="group.key" class="mb-3">
-                <div class="text-sm font-medium mb-1" style="color: var(--color-text-primary)">{{ group.name }}:</div>
-                <div class="flex flex-wrap gap-2">
-                  <button v-for="item in group.value" :key="item.v"
-                    class="filter-chip px-3 py-1 rounded text-xs transition-all duration-200 cursor-pointer"
-                    :class="{ 'filter-chip-active': filterValues[group.key] === item.v }"
-                    @click="onFilterSelect(group.key, item.v)">{{ item.n }}</button>
-                </div>
-              </div>
-            </el-collapse-item>
-          </el-collapse>
 
           <!-- Category Loading -->
           <div v-if="store.categoryLoading && displayVodList.length === 0">
@@ -124,9 +118,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onActivated, onDeactivated, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onActivated, onDeactivated } from 'vue'
 import { useRouter } from 'vue-router'
-import { Box, Film } from '@element-plus/icons-vue'
+import { Box, Film, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore } from '../store/app'
 import { spiderEngine } from '../core/SpiderEngine'
@@ -137,11 +131,13 @@ import type { Movie, SourceBean } from '../core/models'
 const store = useAppStore()
 const router = useRouter()
 
-const activeCategory = ref('')
-const filterValues = ref<Record<string, string>>({})
 const isMounted = ref(false)
 const scrollTop = ref(0)
 const scrollContainer = ref<HTMLElement | null>(null)
+
+// 使用store中的状态
+const activeCategory = computed(() => store.activeCategory)
+const filterValues = computed(() => store.filterValues)
 
 // 网盘扫码登录对话框状态
 const qrDialogVisible = ref(false)
@@ -165,10 +161,19 @@ const displayClasses = computed(() => {
 })
 
 watch([displayClasses, () => store.homeLoading], ([classes, loading]) => {
-  if (isMounted.value && classes.length > 0 && store.homeVodList.length === 0 && !loading && !activeCategory.value) {
-    const firstClass = classes[0]
-    console.log('[Home] Auto-selecting first category:', firstClass.type_id)
-    activeCategory.value = firstClass.type_id
+  if (!isMounted.value || classes.length === 0 || loading || store.activeCategory) return
+  // 有推荐分类且首页有数据时，选中推荐
+  const recommendClass = classes.find(c => c.type_id === '__recommend__')
+  if (recommendClass && store.homeVodList.length > 0) {
+    console.log('[Home] Auto-selecting recommend category')
+    store.setCategory('__recommend__')
+    return
+  }
+  // 否则选中第一个分类并加载
+  const firstClass = classes[0]
+  console.log('[Home] Auto-selecting first category:', firstClass.type_id)
+  store.setCategory(firstClass.type_id)
+  if (firstClass.type_id !== '__recommend__') {
     store.loadCategory(firstClass.type_id, '1')
   }
 }, { immediate: true })
@@ -196,21 +201,20 @@ const currentTid = computed(() => {
 watch(() => store.activeSiteKey, async (newKey, oldKey) => {
   console.log(`[Home] activeSiteKey changed: oldKey=${oldKey}, newKey=${newKey}`)
   if (newKey) {
-    activeCategory.value = ''
-    filterValues.value = {}
+    store.setCategory('')
     console.log(`[Home] Calling loadHome(true) for key=${newKey}`)
     await store.loadHome(true)
-    
+
     if (store.homeVodList.length > 0) {
       const recommendClass = store.classes.find(c => c.type_id === '__recommend__')
       if (recommendClass) {
         console.log(`[Home] homeVodList has data, selecting recommend category`)
-        activeCategory.value = '__recommend__'
+        store.setCategory('__recommend__')
       }
     } else if (store.classes.length > 0) {
       const firstClass = store.classes[0]
       console.log(`[Home] homeVodList empty, selecting first category: ${firstClass.type_name} (${firstClass.type_id})`)
-      activeCategory.value = firstClass.type_id
+      store.setCategory(firstClass.type_id)
       store.loadCategory(firstClass.type_id, '1')
     }
   }
@@ -231,30 +235,47 @@ onMounted(() => {
 })
 
 onActivated(() => {
+  console.log('[Home] onActivated — homeVodList:', store.homeVodList.length, 'categoryVodList:', store.categoryVodList.length, 'activeCategory:', store.activeCategory, 'homeLoading:', store.homeLoading)
   if (store.activeSite) {
     if (store.homeVodList.length === 0) {
+      console.log('[Home] onActivated: homeVodList empty, calling loadHome()')
       store.loadHome()
     }
-    if (activeCategory.value && store.categoryVodList.length === 0) {
-      activeCategory.value = ''
+    // 非推荐分类且分类数据为空时，重新加载分类数据（保持 tab 选中状态）
+    if (store.activeCategory && store.activeCategory !== '__recommend__' && store.categoryVodList.length === 0) {
+      store.loadCategory(store.activeCategory, String(store.categoryPage))
     }
   }
-  nextTick(() => {
-    if (scrollContainer.value && scrollTop.value > 0) {
-      scrollContainer.value.scrollTop = scrollTop.value
-    }
-  })
+  // 双重 rAF 确保 DOM 重新挂载完成后再恢复滚动位置
+  const savedTop = scrollTop.value
+  console.log('[Home] onActivated, saved scrollTop:', savedTop, 'hasContainer:', !!scrollContainer.value)
+  if (savedTop > 0) {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (scrollContainer.value) {
+          scrollContainer.value.scrollTop = savedTop
+          console.log('[Home] scroll restored to:', scrollContainer.value.scrollTop, '(target:', savedTop + ')')
+        }
+      })
+    })
+  }
 })
 
 onDeactivated(() => {
   if (scrollContainer.value) {
     scrollTop.value = scrollContainer.value.scrollTop
+    console.log('[Home] onDeactivated, saved scrollTop:', scrollTop.value)
   }
 })
 
+function onScroll() {
+  if (scrollContainer.value) {
+    scrollTop.value = scrollContainer.value.scrollTop
+  }
+}
+
 function onCategoryChange(tid: string) {
-  activeCategory.value = tid
-  filterValues.value = {}
+  store.setCategory(tid)
   if (tid === '__recommend__') {
     console.log('[Home] onCategoryChange: recommend clicked, showing homeVodList')
     store.categoryVodList = []
@@ -263,16 +284,14 @@ function onCategoryChange(tid: string) {
   }
 }
 
-function onFilterSelect(key: string, value: string) {
-  if (filterValues.value[key] === value) delete filterValues.value[key]
-  else filterValues.value[key] = value
-  filterValues.value = { ...filterValues.value }
-  // 使用 currentTid 作为 tid
-  store.loadCategory(currentTid.value, '1', filterValues.value)
-}
+// onFilterSelect 已移到 App.vue 的顶栏筛选按钮中
 
 function onPageChange(pg: number) {
-  store.loadCategory(currentTid.value, String(pg), filterValues.value)
+  // Scroll to top immediately so user sees the loading skeleton
+  if (scrollContainer.value) {
+    scrollContainer.value.scrollTop = 0
+  }
+  store.loadCategory(currentTid.value, String(pg), store.filterValues)
 }
 
 async function handleVodClick(vod: Movie) {
@@ -301,7 +320,7 @@ async function handleVodClick(vod: Movie) {
           }
           PanLogin.logout(panType)
           ElMessage.success(`${PanLogin.getDisplayName(panType)}登录已清除`)
-          await store.loadHome()
+          await store.loadHome(true)
         }
         return
       }
@@ -348,8 +367,13 @@ async function showPanQrCode(panType: PanType) {
 function onQrLoginSuccess(info: { panType: PanType; nickname?: string; userId?: string }) {
   console.log('[onQrLoginSuccess] login success:', info)
   ElMessage.success(`${PanLogin.getDisplayName(info.panType)}登录成功${info.nickname ? '：' + info.nickname : ''}`)
-  // 刷新首页以反映登录状态变化
-  store.loadHome()
+  // Force refresh config center to immediately show updated login status
+  store.loadHome(true)
+}
+
+function refreshConfigCenter() {
+  console.log('[refreshConfigCenter] manual refresh')
+  store.loadHome(true)
 }
 </script>
 
