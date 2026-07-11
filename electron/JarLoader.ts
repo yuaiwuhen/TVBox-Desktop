@@ -2451,8 +2451,22 @@ export class JarLoader {
     // If "url" already exists, just rewrite it (non-Guard spider path).
     if (typeof parsed.url === 'string') {
       parsed.url = this.rewriteGoProxyUrl(parsed.url, flag);
-      if (parsed.header && typeof parsed.header === 'object') {
-        parsed.header = JSON.stringify(parsed.header);
+      if (parsed.header) {
+        const headerStr =
+          typeof parsed.header === 'object'
+            ? JSON.stringify(parsed.header)
+            : parsed.header;
+        // Encode header into proxy URL so ProxyServer can use spider-provided
+        // UA/Referer. Baidu CDN's sign is bound to the spider's Android UA;
+        // without this, the proxy sends a Windows UA → 31362 "sign error".
+        if (
+          typeof parsed.url === 'string' &&
+          parsed.url.includes('/proxy?do=') &&
+          !parsed.url.includes('header=')
+        ) {
+          parsed.url = parsed.url + '&header=' + encodeURIComponent(headerStr);
+        }
+        parsed.header = headerStr;
       }
       return JSON.stringify(parsed);
     }

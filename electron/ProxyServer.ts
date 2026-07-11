@@ -708,7 +708,23 @@ export class ProxyServer {
           : params['do'] === 'ucDirect'
             ? 'uc'
             : 'baidu';
-      void this.streamPanDirect(downloadUrl, req, res, panType);
+      // Spider's translatePlayerContent encodes spider-provided headers
+      // (User-Agent, Referer) into the proxy URL as &header=<encoded JSON>.
+      // Pass them to streamPanDirect so it can use the spider's UA instead
+      // of the hardcoded default — Baidu CDN's sign validation rejects
+      // mismatched UAs with error_code 31362 "sign error".
+      let headerOverride: Record<string, string> | undefined;
+      if (params['header']) {
+        try {
+          const parsed = JSON.parse(params['header']);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            headerOverride = parsed;
+          }
+        } catch {
+          // ignore parse error, fall back to defaults
+        }
+      }
+      void this.streamPanDirect(downloadUrl, req, res, panType, headerOverride);
       return;
     }
 
@@ -1561,6 +1577,7 @@ export class ProxyServer {
     req: http.IncomingMessage,
     res: http.ServerResponse,
     panType: 'quark' | 'uc' | 'baidu',
+    headerOverride?: Record<string, string>,
   ): Promise<void> {
     let cookie: string | null = null;
     let referer = '';
@@ -1581,6 +1598,18 @@ export class ProxyServer {
       referer = 'https://pan.baidu.com/';
       userAgent =
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+    }
+    // Spider-provided headers override defaults. Baidu's download URL sign is
+    // bound to the UA the spider used when generating the link (Android UA
+    // like "com.android.chrome/... AndroidXMedia3/..."). Sending a Windows
+    // UA causes the CDN to reject with 31362 "sign error".
+    if (headerOverride) {
+      if (headerOverride['User-Agent']) {
+        userAgent = headerOverride['User-Agent'];
+      }
+      if (headerOverride['Referer']) {
+        referer = headerOverride['Referer'];
+      }
     }
     if (!cookie) {
       console.warn(
