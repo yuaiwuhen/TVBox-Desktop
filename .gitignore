@@ -44,6 +44,7 @@ test_*.json
 test_*.txt
 test_*.png
 test_*.ps1
+test_*.log
 check_*.ps1
 decode_vodid.ps1
 find_*.ps1
@@ -51,3 +52,5 @@ read_log*.ps1
 inspect_page.cjs
 trigger_detail.cjs
 *_classes.txt
+feimao_*.json
+feimao_*.log
