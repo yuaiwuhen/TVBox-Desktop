@@ -37,3 +37,17 @@ jar_cache/
 # Tools - decompiled jars/sources are downloaded/generated, not source code
 tools/
 temp_apk_extracted/
+
+# Temporary diagnostic and test scripts (not part of the codebase)
+test_*.cjs
+test_*.json
+test_*.txt
+test_*.png
+test_*.ps1
+check_*.ps1
+decode_vodid.ps1
+find_*.ps1
+read_log*.ps1
+inspect_page.cjs
+trigger_detail.cjs
+*_classes.txt
