@@ -86,6 +86,7 @@ export const useAppStore = defineStore('app', () => {
   // ===== Detail =====
   const currentVod = ref<Movie | null>(null);
   const detailLoading = ref(false);
+  const detailError = ref('');
 
   // ===== Player =====
   const currentPlayUrl = ref('');
@@ -95,6 +96,7 @@ export const useAppStore = defineStore('app', () => {
   const playLoading = ref(false);
   const currentEpisodes = ref<{ name: string; url: string }[]>([]);
   const resumeProgress = ref(0);
+  const playError = ref('');
 
   // ===== Request cancellation =====
   let detailAbortController: AbortController | null = null;
@@ -523,10 +525,13 @@ export const useAppStore = defineStore('app', () => {
     detailAbortController = new AbortController();
 
     detailLoading.value = true;
+    detailError.value = '';
+    currentVod.value = null;
     try {
       const spider = await spiderEngine.getSpider(activeSite.value);
       if (!spider) {
         detailLoading.value = false;
+        detailError.value = '无法加载源，请稍后重试';
         return;
       }
 
@@ -535,26 +540,56 @@ export const useAppStore = defineStore('app', () => {
         '[Store] loadDetail rawResult:',
         rawResult?.substring?.(0, 1000),
       );
-      const result = JSON.parse(rawResult);
+      if (!rawResult || !rawResult.trim()) {
+        detailError.value =
+          '该资源无法解析（源未返回数据），可能已下线或分享链接已失效';
+        return;
+      }
+      let result: any;
+      try {
+        result = JSON.parse(rawResult);
+      } catch {
+        detailError.value = '源返回的数据格式异常，可能资源已下线';
+        return;
+      }
+      if (!result.list || result.list.length === 0) {
+        detailError.value = '未找到该资源的详情信息，可能已下线';
+        return;
+      }
 
-      if (result.list && result.list.length > 0) {
-        const vod = result.list[0];
-        console.log('[Store] loadDetail vod:', {
-          vod_id: vod.vod_id,
-          vod_name: vod.vod_name,
-          vod_play_from: vod.vod_play_from,
-          vod_play_url: vod.vod_play_url,
-          vod_play_url_length: vod.vod_play_url?.length,
-          vod_keys: Object.keys(vod),
-        });
-        currentVod.value = {
-          ...vod,
-          sourceKey: activeSite.value.key,
-        };
+      const vod = result.list[0];
+      console.log('[Store] loadDetail vod:', {
+        vod_id: vod.vod_id,
+        vod_name: vod.vod_name,
+        vod_play_from: vod.vod_play_from,
+        vod_play_url: vod.vod_play_url,
+        vod_play_url_length: vod.vod_play_url?.length,
+        vod_keys: Object.keys(vod),
+      });
+      currentVod.value = {
+        ...vod,
+        sourceKey: activeSite.value.key,
+      };
+      // 若返回了 vod 但没有播放源，给出更具体的提示
+      if (!vod.vod_play_from || !vod.vod_play_url) {
+        const isPan =
+          activeSite.value.key.toLowerCase().includes('quark') ||
+          activeSite.value.key.toLowerCase().includes('uc') ||
+          activeSite.value.key.toLowerCase().includes('baidu') ||
+          activeSite.value.key.toLowerCase().includes('ali') ||
+          (vod as any).needPanLogin;
+        if (isPan) {
+          // 触发 needPanLogin UI 分支
+          (currentVod.value as any).needPanLogin = true;
+        } else {
+          detailError.value =
+            '该资源暂无可播放的源，可能分享链接已失效或资源已下线';
+        }
       }
     } catch (e: any) {
       if (e.name !== 'AbortError') {
         console.warn('loadDetail failed:', e.message);
+        detailError.value = `加载详情失败: ${e.message || '未知错误'}`;
       }
     } finally {
       detailLoading.value = false;
@@ -583,6 +618,7 @@ export const useAppStore = defineStore('app', () => {
     playAbortController = new AbortController();
 
     playLoading.value = true;
+    playError.value = '';
     currentPlayIndex.value = episodeIndex;
     if (episodes) currentEpisodes.value = episodes;
     try {
@@ -593,6 +629,7 @@ export const useAppStore = defineStore('app', () => {
       });
       if (!spider) {
         playLoading.value = false;
+        playError.value = '无法加载源，请稍后重试';
         return;
       }
 
@@ -609,7 +646,17 @@ export const useAppStore = defineStore('app', () => {
         flag,
         idPreview: id.substring(0, 80),
       });
-      const result: PlayResult = JSON.parse(rawResult);
+      if (!rawResult || !rawResult.trim()) {
+        playError.value = '源未返回播放地址，该资源可能已下线或分享链接已失效';
+        return;
+      }
+      let result: PlayResult;
+      try {
+        result = JSON.parse(rawResult);
+      } catch {
+        playError.value = '播放地址解析失败，可能资源已下线';
+        return;
+      }
       console.log('[Store] loadPlay parsed result:', {
         hasUrl: !!result.url,
         hasHeader: !!result.header,
@@ -617,67 +664,80 @@ export const useAppStore = defineStore('app', () => {
         urlPreview: result.url ? result.url.substring(0, 100) : '(none)',
       });
 
-      if (result.url) {
-        // 先获取历史进度，再设置URL（避免时序问题）
-        const history = await Database.getHistory(
-          activeSite.value.key,
-          currentVod.value?.vod_id || '',
-          episodeIndex,
-          currentVod.value?.vod_name,
-        );
-        console.log(
-          `[Store] loadPlay: getHistory returned progress=${history?.progress || 0}s for episodeIndex=${episodeIndex}`,
-        );
-        resumeProgress.value = history?.progress || 0;
-
-        if (ParseEngine.needsParse(result)) {
-          try {
-            const resolvedUrl = await ParseEngine.resolve(
-              result.url,
-              result.header || '',
-              vipFlags,
-              activeParse.value || undefined,
-              flag,
-              activeSite.value?.clickSelector,
-            );
-            if (resolvedUrl && resolvedUrl !== result.url) {
-              result.url = resolvedUrl;
-              result.parse = 0;
-            }
-          } catch (e) {
-            console.warn('[App] VIP parse failed:', e);
-          }
-        }
-
-        // 设置URL（触发VideoPlayer重新初始化，此时resumeProgress已正确）
-        currentPlayUrl.value = result.url;
-        currentPlayFlag.value = flag;
-        if (result.header) {
-          try {
-            currentPlayHeader.value = JSON.parse(result.header);
-          } catch {
-            currentPlayHeader.value = {};
-          }
+      if (!result.url) {
+        const isPanType =
+          flag.toLowerCase().includes('quark') ||
+          flag.toLowerCase().includes('uc') ||
+          flag.toLowerCase().includes('baidu') ||
+          flag.toLowerCase().includes('ali');
+        if (isPanType) {
+          playError.value =
+            '网盘资源解析失败，可能是分享链接已失效或网盘登录已过期，请重新登录后再试';
         } else {
+          playError.value = '未能获取播放地址，该资源可能已下线';
+        }
+        return;
+      }
+      // 先获取历史进度，再设置URL（避免时序问题）
+      const history = await Database.getHistory(
+        activeSite.value.key,
+        currentVod.value?.vod_id || '',
+        episodeIndex,
+        currentVod.value?.vod_name,
+      );
+      console.log(
+        `[Store] loadPlay: getHistory returned progress=${history?.progress || 0}s for episodeIndex=${episodeIndex}`,
+      );
+      resumeProgress.value = history?.progress || 0;
+
+      if (ParseEngine.needsParse(result)) {
+        try {
+          const resolvedUrl = await ParseEngine.resolve(
+            result.url,
+            result.header || '',
+            vipFlags,
+            activeParse.value || undefined,
+            flag,
+            activeSite.value?.clickSelector,
+          );
+          if (resolvedUrl && resolvedUrl !== result.url) {
+            result.url = resolvedUrl;
+            result.parse = 0;
+          }
+        } catch (e) {
+          console.warn('[App] VIP parse failed:', e);
+        }
+      }
+
+      // 设置URL（触发VideoPlayer重新初始化，此时resumeProgress已正确）
+      currentPlayUrl.value = result.url;
+      currentPlayFlag.value = flag;
+      if (result.header) {
+        try {
+          currentPlayHeader.value = JSON.parse(result.header);
+        } catch {
           currentPlayHeader.value = {};
         }
+      } else {
+        currentPlayHeader.value = {};
+      }
 
-        if (currentVod.value) {
-          await Database.saveHistory({
-            ...currentVod.value,
-            sourceKey: activeSite.value.key,
-            playUrl: result.url,
-            playFlag: flag,
-            playIndex: episodeIndex,
-            progress: 0,
-            duration: 0,
-            timestamp: Date.now(),
-          });
-        }
+      if (currentVod.value) {
+        await Database.saveHistory({
+          ...currentVod.value,
+          sourceKey: activeSite.value.key,
+          playUrl: result.url,
+          playFlag: flag,
+          playIndex: episodeIndex,
+          progress: 0,
+          duration: 0,
+          timestamp: Date.now(),
+        });
       }
     } catch (e: any) {
       if (e.name !== 'AbortError') {
         console.warn('loadPlay failed:', e.message);
+        playError.value = `播放失败: ${e.message || '未知错误'}`;
       }
     } finally {
       playLoading.value = false;
@@ -841,6 +901,7 @@ export const useAppStore = defineStore('app', () => {
     categoryLoading,
     currentVod,
     detailLoading,
+    detailError,
     currentPlayUrl,
     currentPlayHeader,
     currentPlayFlag,
@@ -848,6 +909,7 @@ export const useAppStore = defineStore('app', () => {
     currentEpisodes,
     resumeProgress,
     playLoading,
+    playError,
     searchResults,
     searchLoading,
     liveGroups,

@@ -18,6 +18,25 @@
       <el-skeleton :rows="8" animated />
     </div>
 
+    <!-- Detail Load Error -->
+    <div v-else-if="detailError && !store.currentVod" class="flex-1 flex items-center justify-center p-6">
+      <div class="text-center max-w-md">
+        <el-icon :size="56" style="color: var(--color-warning)">
+          <WarningFilled />
+        </el-icon>
+        <p class="mt-4 text-base font-medium" style="color: var(--color-text-primary)">
+          无法加载详情
+        </p>
+        <p class="mt-2 text-sm" style="color: var(--color-text-secondary)">
+          {{ detailError }}
+        </p>
+        <div class="mt-4 flex gap-2 justify-center">
+          <el-button type="primary" size="small" @click="retryLoadDetail">重试</el-button>
+          <el-button size="small" @click="router.back()">返回</el-button>
+        </div>
+      </div>
+    </div>
+
     <!-- Detail Content -->
     <div v-else-if="store.currentVod" class="flex-1 overflow-auto">
       <!-- Video Player at top (shown when playing) -->
@@ -30,6 +49,19 @@
             :resume-progress="store.resumeProgress" :show-subtitle-search="true" @prev="onPrevEpisode"
             @next="onNextEpisode" @ended="onPlayEnded" @progress="onProgress" @search-subtitle="onSearchSubtitle" />
         </div>
+      </div>
+
+      <!-- Play Error (shown above detail info when play fails) -->
+      <div v-if="playError" class="mx-6 mt-4 rounded-lg p-4 flex items-start gap-3"
+        style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3)">
+        <el-icon :size="20" class="flex-shrink-0 mt-0.5" style="color: var(--color-warning)">
+          <WarningFilled />
+        </el-icon>
+        <div class="flex-1 min-w-0">
+          <p class="text-sm font-medium" style="color: var(--color-text-primary)">播放失败</p>
+          <p class="mt-1 text-xs" style="color: var(--color-text-secondary)">{{ playError }}</p>
+        </div>
+        <el-button text size="small" @click="store.playError = ''">关闭</el-button>
       </div>
 
       <!-- Info Section with blurred poster background -->
@@ -140,8 +172,17 @@
         </div>
 
         <!-- No Play Sources (unknown reason) -->
-        <div v-else class="mb-4 rounded-lg p-4 text-center" style="background: var(--color-bg-surface)">
-          <p class="text-sm" style="color: var(--color-text-secondary)">暂无播放源</p>
+        <div v-else class="mb-4 rounded-lg p-6 text-center" style="background: var(--color-bg-surface)">
+          <el-icon :size="40" style="color: var(--color-text-tertiary)">
+            <WarningFilled />
+          </el-icon>
+          <p class="mt-3 text-sm font-medium" style="color: var(--color-text-primary)">
+            {{ detailError || '暂无播放源' }}
+          </p>
+          <p v-if="!detailError" class="mt-1 text-xs" style="color: var(--color-text-tertiary)">
+            该资源可能已下线或分享链接已失效
+          </p>
+          <el-button class="mt-3" size="small" @click="retryLoadDetail">重试</el-button>
         </div>
       </div>
     </div>
@@ -214,6 +255,31 @@ const pendingPlayAfterLogin = ref<{ flag: string; url: string } | null>(null)
 const lastPlayAttempt = ref<{ flag: string; url: string } | null>(null)
 // Disposer for the pan:loginExpired IPC listener — called in onBeforeUnmount.
 let panLoginExpiredDisposer: (() => void) | null = null
+
+// Error state exposed by store — shown as inline prompts on the detail page.
+const detailError = computed(() => store.detailError)
+const playError = computed(() => store.playError)
+
+// Retry loading detail (re-fetch from current source)
+async function retryLoadDetail() {
+  const sourceKey = route.params.sourceKey as string
+  const vodId = route.params.vodId as string
+  if (!sourceKey || !vodId) return
+  store.detailError = ''
+  store.playError = ''
+  loading.value = true
+  try {
+    await store.loadDetail(vodId)
+    if (store.currentVod && playSources.value.length > 0) {
+      activePlaySource.value = playSources.value[0].name
+      refreshPanLoginState(activePlaySource.value)
+    }
+  } catch {
+    ElMessage.error('加载详情失败')
+  } finally {
+    loading.value = false
+  }
+}
 
 const currentPanType = computed<'quark' | 'uc' | 'aliyun' | 'baidu' | 'bili' | '115' | undefined>(() => {
   const flag = activePlaySource.value
@@ -308,6 +374,7 @@ async function playEpisode(flag: string, url: string) {
   }
   console.log('[Detail] playEpisode: logged in, calling loadPlay')
   pendingPlayUrl.value = url
+  store.playError = ''
   const currentSource = playSources.value.find(s => s.name === flag)
   const episodes = currentSource?.episodes || []
   const epIndex = episodes.findIndex(ep => ep.url === url)
@@ -546,6 +613,8 @@ onBeforeUnmount(() => {
   store.currentPlayIndex = 0
   store.currentEpisodes = []
   store.resumeProgress = 0
+  store.detailError = ''
+  store.playError = ''
 })
 
 async function onPrevEpisode() {
