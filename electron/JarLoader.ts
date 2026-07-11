@@ -870,7 +870,7 @@ export class JarLoader {
       'okio.jar',
       'json-patch.jar',
       'json.jar',
-      'gson.jar',
+      'gson-2.8.9.jar',
       'bcprov-jdk18on.jar',
       'tvbox-spider-stubs-complete.jar',
     ];
@@ -1191,7 +1191,7 @@ export class JarLoader {
       'okio.jar',
       'json-patch.jar',
       'json.jar',
-      'gson.jar',
+      'gson-2.8.9.jar',
       'bcprov-jdk18on.jar',
       'tvbox-spider-stubs-complete.jar',
     ];
