@@ -4026,6 +4026,9 @@ export class JarLoader {
    *   NewQuark.OoOoOo0O0o0oO0o0   ← Wex_quark_cookie  (NewQuark.java:901)
    *   NewPanUc.oOoOo0O0Oo0o0OoO   ← Wex_ucpan_cookie  (NewPanUc.java:611,686)
    *   NewPan115.oOoOoOo0oOo0o0oO  ← Wex_pan115_cookie (NewPan115.java:148,481)
+   *   merge.OoOoOo0O0Oo0o0oO.OoOoOo0O0Oo0o0oO.oOoOoOo0O0O0oO0o ← Wex_baidu_cookie
+   *     (Baidu spider core class, OoOoOo0O0Oo0o0oO.java:95,615 — cookie used in
+   *      API headers via oOoOoOo0oO0oO0o0() which puts oOoOoOo0O0O0oO0o as Cookie)
    */
   private setPanCookiesForDetailContent(): void {
     if (!this.java) return;
@@ -4057,6 +4060,20 @@ export class JarLoader {
           prefKey: 'Wex_pan115_cookie',
           label: '115',
         },
+        {
+          className:
+            'com.github.catvod.spider.merge.OoOoOo0O0Oo0o0oO.OoOoOo0O0Oo0o0oO',
+          fieldName: 'oOoOoOo0O0O0oO0o',
+          prefKey: 'Wex_baidu_cookie',
+          label: 'baidu',
+        },
+        {
+          className:
+            'com.github.catvod.spider.merge.OoOoOo0O0Oo0o0oO.OoOoOo0O0Oo0o0oO',
+          fieldName: 'oOoO0o0oOo0oO0Oo',
+          prefKey: 'Wex_baidu_cookie',
+          label: 'baidu-aux',
+        },
       ];
 
       for (const pan of panClasses) {
@@ -4068,15 +4085,21 @@ export class JarLoader {
             );
             continue;
           }
+          console.log(
+            `[JarLoader] setPanCookies: importing ${pan.label} class:`,
+            pan.className,
+          );
           const cls = this.java.importClass(pan.className);
           cls[pan.fieldName] = cookie;
           console.log(
             `[JarLoader] setPanCookies: set ${pan.label} static cookie (len=${cookie.length})`,
           );
         } catch (e: any) {
+          const errMsg = e?.message || String(e);
           console.warn(
             `[JarLoader] setPanCookies: failed to set ${pan.label} cookie:`,
-            e?.message || e,
+            `class=${pan.className}`,
+            `error=${errMsg}`,
           );
         }
       }
