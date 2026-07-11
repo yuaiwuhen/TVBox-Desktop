@@ -2944,6 +2944,11 @@ export class JarLoader {
    * and OkHttp connection pool, so the next call usually completes in time.
    */
   private isMissingPlayUrl(result: string): boolean {
+    // Empty/whitespace result: spider returned nothing (e.g. NewDouBanGuard
+    // detailContent returns '' when the detail page HTTP request fails).
+    // Treat as missing so retry logic kicks in — the first call may have
+    // failed due to a cold connection or transient network issue.
+    if (!result || !result.trim()) return true;
     try {
       const parsed = JSON.parse(result);
       const list = parsed.list;
@@ -2979,7 +2984,9 @@ export class JarLoader {
       }
       return missing;
     } catch {
-      return false;
+      // Non-JSON result (e.g. HTML error page): treat as missing so retry
+      // can attempt to get a valid response.
+      return true;
     }
   }
 
