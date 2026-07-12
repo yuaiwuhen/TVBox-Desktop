@@ -628,10 +628,10 @@ export class JarLoader {
    * Cipher.getInstance("AES/CBC/PKCS7Padding") work. Java's default JCE
    * only knows PKCS5Padding; BouncyCastle accepts both names.
    */
-  private registerBouncyCastle(): void {
-    if (!this.java) return;
+  private registerBouncyCastle(java: JavaBridge): void {
+    if (!java) return;
     try {
-      const Security = this.java.importClass('java.security.Security');
+      const Security = java.importClass('java.security.Security');
       // Check if already registered
       const existing = Security.getProviderSync
         ? Security.getProviderSync('BC')
@@ -640,7 +640,7 @@ export class JarLoader {
         console.log('[JarLoader] BouncyCastle provider already registered');
         return;
       }
-      const BouncyCastleProvider = this.java.importClass(
+      const BouncyCastleProvider = java.importClass(
         'org.bouncycastle.jce.provider.BouncyCastleProvider',
       );
       const provider = new BouncyCastleProvider();
@@ -825,7 +825,7 @@ export class JarLoader {
 
       // Register BouncyCastle provider so spiders using AES/CBC/PKCS7Padding
       // work (default JCE only supports PKCS5Padding).
-      this.registerBouncyCastle();
+      this.registerBouncyCastle(java);
 
       return java;
     } catch (e: any) {
