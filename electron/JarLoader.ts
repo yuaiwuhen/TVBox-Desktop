@@ -3826,6 +3826,11 @@ export class JarLoader {
       // reflection to verify the spider class actually declares init(Context)
       // before calling it.
       //
+      // This check applies to ALL spiders, not just Guard ones. Non-Guard
+      // spiders like YGP (csp_YGP) also override init(Context) to decode
+      // obfuscated config into instance fields. Without this, init resolves
+      // to the empty base-class no-op and homeContent returns "{}".
+      //
       // Additionally, set InitOrigin.oOoOoOo0O0O0oO0o (the static filesDir
       // field) so oOoOoOoOo0Oo0o0o("siteconfig") resolves to
       // <filesDir>/NewWex/siteconfig. Without this, the field is null and
@@ -3833,7 +3838,7 @@ export class JarLoader {
       const hasInitContextOverride = this.hasInitContextOverride(
         instance.spider,
       );
-      if (instance.isGuard && hasInitContextOverride) {
+      if (hasInitContextOverride) {
         try {
           const InitOrigin = this.java.importClass(
             'com.github.catvod.spider.InitOrigin',
@@ -3855,8 +3860,9 @@ export class JarLoader {
         try {
           instance.spider.initSync(context);
           console.log(
-            '[JarLoader] Guard spider initialized with init(Context):',
+            '[JarLoader] Spider initialized with init(Context):',
             key,
+            instance.isGuard ? '(Guard)' : '(non-Guard)',
           );
           // Inspect spider's base URL field directly (field name from decompiled
           // source: `public String oOoOoOoOoOoOoO0o`). This is the only way to
@@ -3865,19 +3871,16 @@ export class JarLoader {
           try {
             const baseUrl = instance.spider.oOoOoOoOoOoOoO0o;
             console.log(
-              '[JarLoader] Guard spider base URL after init:',
+              '[JarLoader] Spider base URL after init:',
               String(baseUrl),
             );
           } catch (e: any) {
-            console.warn(
-              '[JarLoader] Could not read base URL field:',
-              e.message,
-            );
+            // Non-Guard spiders don't have this field — ignore.
           }
           return;
         } catch (ctxInitErr: any) {
           console.warn(
-            '[JarLoader] Guard init(Context) failed, falling back:',
+            '[JarLoader] init(Context) failed, falling back:',
             ctxInitErr.message,
           );
         }
