@@ -635,19 +635,22 @@ export class ProxyServer {
       return;
     }
 
-    // /file/<subdir>/<filename> — serves static files from the local fatcat
+    // /file/<subdir>/<filename> — serves static files from the local working
     // directory. Spiders like PanSearch and MiSou fetch token/cookie files
     // from http://127.0.0.1:9978/file/fatcat/<file>.txt during init.
     if (pathname.startsWith('/file/')) {
       const relativePath = pathname.slice('/file/'.length);
-      const fatcatDir = path.join(process.cwd(), 'fatcat');
-      const filePath = path.join(fatcatDir, relativePath);
-      // Prevent path traversal: resolved path must be inside fatcatDir
+      const baseDir = process.cwd();
+      const filePath = path.join(baseDir, relativePath);
+      // Prevent path traversal: resolved path must be inside baseDir
       const normalized = path.normalize(filePath);
       if (
-        !normalized.startsWith(fatcatDir + path.sep) &&
-        normalized !== fatcatDir
+        !normalized.startsWith(baseDir + path.sep) &&
+        normalized !== baseDir
       ) {
+        console.warn(
+          `[ProxyServer] /file: path traversal blocked: ${normalized} not in ${baseDir}`,
+        );
         res.writeHead(403, { 'Content-Type': 'text/plain' });
         res.end('Forbidden');
         return;
