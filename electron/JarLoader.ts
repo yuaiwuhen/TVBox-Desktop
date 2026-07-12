@@ -644,10 +644,15 @@ export class JarLoader {
         'org.bouncycastle.jce.provider.BouncyCastleProvider',
       );
       const provider = new BouncyCastleProvider();
-      Security.addProviderSync
-        ? Security.addProviderSync(provider)
-        : Security.addProvider(provider);
-      console.log('[JarLoader] BouncyCastle provider registered (BC)');
+      // Insert at position 1 (highest priority) so BC wins algorithm lookups
+      // for names like "RSA/None/PKCS1Padding" that SunRsaSign rejects.
+      // addProvider() appends to the end, letting SunRsaSign veto first.
+      const pos = Security.insertProviderAtSync
+        ? Security.insertProviderAtSync(provider, 1)
+        : Security.insertProviderAt(provider, 1);
+      console.log(
+        `[JarLoader] BouncyCastle provider inserted at position ${pos}`,
+      );
     } catch (e: any) {
       console.warn(
         '[JarLoader] Failed to register BouncyCastle provider:',
