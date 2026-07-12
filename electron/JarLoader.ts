@@ -2456,6 +2456,18 @@ export class JarLoader {
     }
     if (typeof parsed !== 'object' || parsed === null) return jsonStr;
 
+    // Bili spider returns url as an array: [label, url, label, url, ...].
+    // Pick the first URL (odd index) so the rest of this method can treat
+    // parsed.url as a string. Without this, the field-preservation loop
+    // below would copy the array back into out.url, causing
+    // "out.url.substring is not a function" when logging the result.
+    if (Array.isArray(parsed.url) && parsed.url.length >= 2) {
+      const firstUrl = parsed.url[1];
+      if (typeof firstUrl === 'string') {
+        parsed.url = firstUrl;
+      }
+    }
+
     // If "url" already exists, just rewrite it (non-Guard spider path).
     if (typeof parsed.url === 'string') {
       parsed.url = this.rewriteGoProxyUrl(parsed.url, flag);
@@ -2652,6 +2664,27 @@ export class JarLoader {
    * If the URL doesn't match the GoProxy pattern, return it unchanged.
    */
   private rewriteGoProxyUrl(url: string, flag: string): string {
+    // Pattern 0: proxy:// scheme (Bili spider returns URLs like
+    // "proxy://do=bili&aid=...&cid=...&qn=32&type=mpd"). Rewrite to the
+    // local HTTP proxy so the ProxyServer's /proxy?do=bili route can fetch
+    // the actual stream from Bilibili via spider.proxyLocal().
+    if (url.startsWith('proxy://')) {
+      let proxyPort = 9978;
+      try {
+        const { proxyServer } = require('./ProxyServer');
+        const p = proxyServer.getPort();
+        if (p > 0) proxyPort = p;
+      } catch {}
+      const rewritten = url.replace(
+        /^proxy:\/\//,
+        `http://127.0.0.1:${proxyPort}/proxy?`,
+      );
+      console.log(
+        `[JarLoader] rewriteGoProxyUrl (proxy://): rewritten=${rewritten.substring(0, 100)}...`,
+      );
+      return rewritten;
+    }
+
     // Pattern 1: GoProxy URL (http://127.0.0.1:8096/<path>?url=<encoded>)
     const goProxyMatch = url.match(
       /^http:\/\/127\.0\.0\.1:8096\/\w+\?url=(.+)$/,
