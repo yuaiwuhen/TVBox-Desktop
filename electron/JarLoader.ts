@@ -1098,6 +1098,7 @@ export class JarLoader {
 
         case 'detailContent': {
           // detailContent(List<String> ids)
+          // ids may be passed as an array (["id1","id2"]) or a single string ("id1")
           const [ids] = args;
           const ArrayList = this.java.importClass('java.util.ArrayList');
           const list = new ArrayList();
@@ -1105,6 +1106,8 @@ export class JarLoader {
             for (const id of ids) {
               list.addSync(String(id));
             }
+          } else if (ids !== undefined && ids !== null) {
+            list.addSync(String(ids));
           }
           return [list];
         }
