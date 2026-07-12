@@ -45,8 +45,10 @@ test_*.txt
 test_*.png
 test_*.ps1
 test_*.log
+test_*.bat
 check_*.ps1
 decode_vodid.ps1
+decode_bili.cjs
 find_*.ps1
 read_log*.ps1
 inspect_page.cjs
@@ -54,3 +56,8 @@ trigger_detail.cjs
 *_classes.txt
 feimao_*.json
 feimao_*.log
+
+# fatcat runtime token/cookie files (PanSearch/MiSou spiders fetch these
+# via http://127.0.0.1:9978/file/fatcat/<file>.txt). Users populate with
+# their own tokens — keep directory tracked via .gitkeep, ignore contents.
+fatcat/*.txt
