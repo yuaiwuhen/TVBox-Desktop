@@ -33,6 +33,7 @@ dist-ssr
 release/
 jar_cache/
 .dbg/
+jre/
 
 # Tools - decompiled jars/sources are downloaded/generated, not source code
 tools/
@@ -46,7 +47,9 @@ test_*.png
 test_*.ps1
 test_*.log
 test_*.bat
+test_*.mjs
 check_*.ps1
+decode_*.cjs
 decode_vodid.ps1
 decode_bili.cjs
 find_*.ps1

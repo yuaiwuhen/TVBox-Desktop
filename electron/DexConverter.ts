@@ -24,6 +24,7 @@ export class DexConverter {
       path.join(appRoot, 'resources'),
       path.dirname(appRoot),
       path.join(path.dirname(appRoot), 'resources'),
+      process.resourcesPath || '',
     ];
 
     this.toolsDir = '';
@@ -79,6 +80,26 @@ export class DexConverter {
   }
 
   /**
+   * Resolve java executable path.
+   * Prefer bundled JRE (packaged mode), fall back to system java (dev mode).
+   */
+  private resolveJavaExe(): string {
+    const exeName = process.platform === 'win32' ? 'java.exe' : 'java';
+    const bundledJava = path.join(
+      process.resourcesPath || '',
+      'jre',
+      'bin',
+      exeName,
+    );
+    if (fs.existsSync(bundledJava)) {
+      console.log('[DexConverter] Using bundled JRE:', bundledJava);
+      return bundledJava;
+    }
+    console.log('[DexConverter] Using system java (bundled JRE not found)');
+    return exeName;
+  }
+
+  /**
    * Execute shell command
    */
   private execCommand(cmd: string): Promise<string> {
@@ -117,34 +138,11 @@ export class DexConverter {
     console.log('[DexConverter] Input:', dexPath);
     console.log('[DexConverter] Output:', jarPath);
 
-    // Try using d2j-dex2jar script first (handles classpath correctly)
+    // Use bundled JRE's java.exe directly (bypass d2j-dex2jar.bat which
+    // depends on system PATH for java). Falls back to system java in dev.
+    const javaExe = this.resolveJavaExe();
     const libDir = path.join(this.toolsDir, 'dex-tools-v2.4', 'lib');
-    let cmd: string;
-
-    if (process.platform === 'win32') {
-      const batPath = path.join(
-        this.toolsDir,
-        'dex-tools-v2.4',
-        'd2j-dex2jar.bat',
-      );
-      if (fs.existsSync(batPath)) {
-        cmd = `"${batPath}" "${dexPath}" -o "${jarPath}"`;
-      } else {
-        // Fallback: construct classpath manually
-        cmd = `java -cp "${libDir}/*" com.googlecode.dex2jar.tools.Dex2jarCmd "${dexPath}" -o "${jarPath}"`;
-      }
-    } else {
-      const shPath = path.join(
-        this.toolsDir,
-        'dex-tools-v2.4',
-        'd2j-dex2jar.sh',
-      );
-      if (fs.existsSync(shPath)) {
-        cmd = `chmod +x "${shPath}" && "${shPath}" "${dexPath}" -o "${jarPath}"`;
-      } else {
-        cmd = `java -cp "${libDir}/*" com.googlecode.dex2jar.tools.Dex2jarCmd "${dexPath}" -o "${jarPath}"`;
-      }
-    }
+    const cmd = `"${javaExe}" -Xms512m -Xmx2048m -cp "${libDir}/*" com.googlecode.dex2jar.tools.Dex2jarCmd "${dexPath}" -o "${jarPath}"`;
 
     try {
       console.log('[DexConverter] Running:', cmd);

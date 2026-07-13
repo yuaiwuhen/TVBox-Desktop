@@ -6,7 +6,7 @@
  * Based on Box Android's ApiConfig.java and JarLoader.java implementation.
  */
 
-import { ipcMain, BrowserWindow } from 'electron';
+import { ipcMain, BrowserWindow, app } from 'electron';
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -46,6 +46,7 @@ interface JVMOptions {
   libPath?: string | null;
   version?: string | null;
   opts?: string[] | null;
+  isPackagedElectron?: boolean;
 }
 
 interface JavaBridge {
@@ -127,8 +128,12 @@ export class JarLoader {
     this.installGlobalErrorHandlers();
     // Initialize java-bridge
     this.java = this.initJavaBridge();
-    // Create cache directory
-    this.jarCacheDir = path.join(process.cwd(), 'jar_cache');
+    // Create cache directory.
+    // Packaged installs go to Program Files (read-only), so write cache to
+    // %APPDATA%/tvbox-pc/ instead. Dev mode keeps using cwd for backward
+    // compat with existing caches.
+    const baseDir = app.isPackaged ? app.getPath('userData') : process.cwd();
+    this.jarCacheDir = path.join(baseDir, 'jar_cache');
     if (!fs.existsSync(this.jarCacheDir)) {
       fs.mkdirSync(this.jarCacheDir, { recursive: true });
     }
@@ -794,7 +799,7 @@ export class JarLoader {
         // and have minor verifier complaints (e.g. "Call to wrong initialization
         // method" in <clinit>). The verifier is also strict about interfaces
         // implemented by anonymous classes which dex2jar/enjarify don't preserve.
-        const created = java.ensureJvm({
+        const jvmOpts: JVMOptions = {
           classpath: stubPaths,
           opts: [
             '-Xverify:none',
@@ -802,7 +807,29 @@ export class JarLoader {
             '-Dsun.stdout.encoding=UTF-8',
             '-Dsun.stderr.encoding=UTF-8',
           ],
-        });
+        };
+        // In packaged builds, point java-bridge at the bundled JRE's JVM library
+        // so the app doesn't depend on the user having a system JDK.
+        // Path differs by platform:
+        //   Windows: jre/bin/server/jvm.dll
+        //   Linux:   jre/lib/server/libjvm.so
+        //   Mac:     jre/lib/server/libjvm.dylib
+        if (app.isPackaged) {
+          const bundledJre = path.join(process.resourcesPath, 'jre');
+          const jvmLib = this.findBundledJvmLib(bundledJre);
+          if (jvmLib) {
+            jvmOpts.libPath = jvmLib;
+            jvmOpts.isPackagedElectron = true;
+            console.log('[JarLoader] Using bundled JRE:', jvmLib);
+          } else {
+            console.warn(
+              '[JarLoader] Bundled JVM library not found under',
+              bundledJre,
+              '— falling back to system JAVA_HOME',
+            );
+          }
+        }
+        const created = java.ensureJvm(jvmOpts);
         if (created) {
           console.log('[JarLoader] JVM started with stubs on system classpath');
           this.stubsLoaded = true;
@@ -847,6 +874,24 @@ export class JarLoader {
 
       return null;
     }
+  }
+
+  /**
+   * Find the bundled JVM library file for the current platform.
+   * - Windows: jre/bin/server/jvm.dll
+   * - Linux:   jre/lib/server/libjvm.so
+   * - Mac:     jre/lib/server/libjvm.dylib
+   */
+  private findBundledJvmLib(jreDir: string): string | null {
+    const candidates = [
+      path.join(jreDir, 'bin', 'server', 'jvm.dll'),
+      path.join(jreDir, 'lib', 'server', 'libjvm.so'),
+      path.join(jreDir, 'lib', 'server', 'libjvm.dylib'),
+    ];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) return p;
+    }
+    return null;
   }
 
   /**
@@ -1855,6 +1900,15 @@ export class JarLoader {
         process.resourcesPath || '',
         'tools',
         'wexguard_work',
+        'wexguard-spider-enjarify.jar',
+      ),
+      // Packaged flat path: extraResources copies tools/runtime/* to
+      // resources/tools/* (no wexguard_work/ subdir). The runtime JAR
+      // is renamed to wexguard-spider-enjarify.jar (without -final suffix)
+      // to match this lookup.
+      path.join(
+        process.resourcesPath || '',
+        'tools',
         'wexguard-spider-enjarify.jar',
       ),
     ];

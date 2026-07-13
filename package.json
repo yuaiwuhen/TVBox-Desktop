@@ -6,8 +6,14 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc -b && vite build && electron-builder",
-    "build:dir": "vue-tsc -b && vite build && electron-builder --dir",
+    "build": "vite build && electron-builder --publish never",
+    "build:dir": "vite build && electron-builder --dir --publish never",
+    "build:jre": "node scripts/download-jre.mjs",
+    "build:win": "node scripts/download-jre.mjs --target=win && vite build && electron-builder --win --publish never",
+    "build:linux": "node scripts/download-jre.mjs --target=linux && vite build && electron-builder --linux --publish never",
+    "build:mac": "node scripts/download-jre.mjs --target=mac && vite build && electron-builder --mac --publish never",
+    "build:installer": "vite build && electron-builder --publish never",
+    "icon": "node scripts/generate-icon.mjs",
     "preview": "vite preview",
     "test": "vitest run"
   },
@@ -45,6 +51,7 @@
     "electron-builder": "^25.1.8",
     "jsdom": "^29.1.1",
     "playwright": "^1.61.1",
+    "sharp": "^0.33.5",
     "tailwindcss": "^4.3.2",
     "ts-node": "^10.9.2",
     "typescript": "~6.0.2",
@@ -58,7 +65,40 @@
     "productName": "TVBox-PC",
     "asar": true,
     "asarUnpack": [
-      "**/node_modules/java-bridge/**/*"
+      "**/node_modules/java-bridge*/**/*"
+    ],
+    "afterPack": "./scripts/after-pack.mjs",
+    "extraResources": [
+      {
+        "from": "tools/runtime",
+        "to": "tools",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "fatcat",
+        "to": "fatcat",
+        "filter": [
+          ".gitkeep",
+          "token.txt",
+          "kk.txt"
+        ]
+      },
+      {
+        "from": "jre",
+        "to": "jre",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "tools/dex-tools-v2.4",
+        "to": "tools/dex-tools-v2.4",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "directories": {
       "output": "release"
@@ -70,13 +110,32 @@
     ],
     "win": {
       "target": "nsis",
-      "icon": "public/icons.svg"
+      "icon": "build/icon.png",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "TVBox-PC",
+      "deleteAppDataOnUninstall": false
     },
     "mac": {
-      "target": "dmg"
+      "target": [
+        "dmg"
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.video"
     },
     "linux": {
-      "target": "AppImage"
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "build/icon.png",
+      "category": "Video"
     }
   }
 }

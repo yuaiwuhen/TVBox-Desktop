@@ -1,0 +1,59 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to build (all/win/linux/mac)'
+        required: false
+        default: 'all'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-13
+            platform: mac
+            arch: x64
+          - os: macos-14
+            platform: mac
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: TVBox-PC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: TVBox-PC/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build for ${{ matrix.platform }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm build:${{ matrix.platform }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVBox-PC-${{ matrix.platform }}-${{ matrix.arch || 'x64' }}
+          path: |
+            TVBox-PC/release/*.exe
+            TVBox-PC/release/*.AppImage
+            TVBox-PC/release/*.deb
+            TVBox-PC/release/*.dmg
+          if-no-files-found: warn

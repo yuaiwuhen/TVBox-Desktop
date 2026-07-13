@@ -15,17 +15,21 @@ import http from 'http';
 import https from 'https';
 import net from 'net';
 import { URL } from 'url';
+import { fileURLToPath } from 'url';
 import fs from 'fs';
 import path from 'path';
 import { Transform, PassThrough } from 'stream';
 import dns from 'dns';
 import { spawn } from 'child_process';
-import { BrowserWindow } from 'electron';
+import { BrowserWindow, app } from 'electron';
 import { jarLoader } from './JarLoader';
 import { QuarkPanService } from './QuarkPanService';
 import { UCPanService } from './UCPanService';
 import { BaiduPanService } from './BaiduPanService';
 import { dnsOptimizer } from './DnsOptimizer';
+
+// __dirname for ES Modules — used to locate the project root in dev mode.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 type PortCallback = (port: number) => void;
 
@@ -42,8 +46,10 @@ const httpsAgent = new https.Agent({
 // Persistent debug log for streamPanDirect — written to disk so we can
 // inspect 412/403 errors without relying on vite's stdout capture (which
 // gets truncated/buffered in dev mode). Each entry is timestamped.
+// In packaged builds this lives in %APPDATA%/tvbox-pc/ (writable user
+// data dir); in dev mode it stays in the project root for backward compat.
 const PROXY_DEBUG_LOG = path.join(
-  process.env.APPDATA ? path.join(process.env.APPDATA, 'tvbox-pc') : __dirname,
+  app.isPackaged ? app.getPath('userData') : __dirname,
   'proxy-debug.log',
 );
 function debugLog(msg: string): void {
@@ -638,18 +644,41 @@ export class ProxyServer {
     // /file/<subdir>/<filename> — serves static files from the local working
     // directory. Spiders like PanSearch and MiSou fetch token/cookie files
     // from http://127.0.0.1:9978/file/fatcat/<file>.txt during init.
+    // In packaged builds, search the writable userData dir first (so users
+    // can drop their own token.txt there), then fall back to the bundled
+    // read-only copy under resources/fatcat/. In dev mode, use cwd.
     if (pathname.startsWith('/file/')) {
       const relativePath = pathname.slice('/file/'.length);
-      const baseDir = process.cwd();
-      const filePath = path.join(baseDir, relativePath);
-      // Prevent path traversal: resolved path must be inside baseDir
-      const normalized = path.normalize(filePath);
-      if (
-        !normalized.startsWith(baseDir + path.sep) &&
-        normalized !== baseDir
-      ) {
+      const candidates: string[] = [];
+      if (app.isPackaged) {
+        candidates.push(path.join(app.getPath('userData'), relativePath));
+        candidates.push(path.join(process.resourcesPath || '', relativePath));
+      } else {
+        candidates.push(path.join(process.cwd(), relativePath));
+      }
+      const filePath = candidates.find((p) => fs.existsSync(p));
+      if (!filePath) {
         console.warn(
-          `[ProxyServer] /file: path traversal blocked: ${normalized} not in ${baseDir}`,
+          `[ProxyServer] /file: ${relativePath} not found in any of:`,
+          candidates,
+        );
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not Found');
+        return;
+      }
+      // Prevent path traversal: resolved path must be inside one of the
+      // candidate base dirs.
+      const normalized = path.normalize(filePath);
+      const allowedRoots = candidates.map((c) =>
+        path.normalize(c).split(path.sep).slice(0, -1).join(path.sep),
+      );
+      const parentDir = path.dirname(normalized);
+      const isAllowed = allowedRoots.some(
+        (root) => parentDir === root || parentDir.startsWith(root + path.sep),
+      );
+      if (!isAllowed) {
+        console.warn(
+          `[ProxyServer] /file: path traversal blocked: ${normalized}`,
         );
         res.writeHead(403, { 'Content-Type': 'text/plain' });
         res.end('Forbidden');
@@ -657,7 +686,10 @@ export class ProxyServer {
       }
       fs.readFile(normalized, (err, data) => {
         if (err) {
-          console.warn(`[ProxyServer] /file: ${relativePath} not found`);
+          console.warn(
+            `[ProxyServer] /file: ${relativePath} read error:`,
+            err.message,
+          );
           res.writeHead(404, { 'Content-Type': 'text/plain' });
           res.end('Not Found');
           return;

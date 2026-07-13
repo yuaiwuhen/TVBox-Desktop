@@ -1,5 +1,6 @@
-import { app, BrowserWindow, Menu, ipcMain } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, dialog, shell } from 'electron';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { registerJarLoaderIPC, jarLoader } from './JarLoader';
 import { QuarkPanService } from './QuarkPanService';
@@ -31,9 +32,25 @@ process.env.VITE_PUBLIC = app.isPackaged
   ? process.env.DIST
   : path.join(process.env.DIST, '../public');
 
-let win: BrowserWindow | null;
+let win: BrowserWindow;
 
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'];
+
+// Check whether the Visual C++ Redistributable 2015+ runtime is installed.
+// java-bridge's native nodejar.node links against vcruntime140.dll. Without
+// it, requiring java-bridge throws "The specified module could not be found"
+// which is hard to debug from the user's perspective. Show a friendly error
+// instead and link to the official Microsoft download.
+function isVcredistInstalled(): boolean {
+  const sysRoot = process.env.SystemRoot || 'C:\\Windows';
+  // vcruntime140.dll lives in System32 on 64-bit Windows. We check both
+  // System32 (x64) and SysWOW64 (x86) to be safe.
+  const targets = [
+    path.join(sysRoot, 'System32', 'vcruntime140.dll'),
+    path.join(sysRoot, 'SysWOW64', 'vcruntime140.dll'),
+  ];
+  return targets.some((p) => fs.existsSync(p));
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -155,7 +172,7 @@ function createWindow() {
 
   // Open external links in default browser
   win.webContents.setWindowOpenHandler(({ url }) => {
-    require('electron').shell.openExternal(url);
+    shell.openExternal(url);
     return { action: 'deny' };
   });
 }
@@ -183,6 +200,30 @@ app.on('window-all-closed', () => {
 });
 
 app.whenReady().then(async () => {
+  // VC++ Redistributable check — only on Windows. java-bridge's native
+  // nodejar.node links against vcruntime140.dll on Windows. Linux/Mac
+  // don't need this (they use system libc/libobjc instead).
+  if (process.platform === 'win32' && !isVcredistInstalled()) {
+    const choice = dialog.showMessageBoxSync({
+      type: 'error',
+      title: '缺少 Visual C++ Redistributable',
+      message: 'TVBox-PC 缺少运行时依赖',
+      detail:
+        'TVBox-PC 需要 Visual C++ Redistributable 2015+ 才能运行 Java spider。\n\n' +
+        '请前往微软官网下载安装：\n' +
+        'https://aka.ms/vs/17/release/vc_redist.x64.exe\n\n' +
+        '安装完成后重新启动 TVBox-PC。',
+      buttons: ['打开下载页面', '退出'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (choice === 0) {
+      shell.openExternal('https://aka.ms/vs/17/release/vc_redist.x64.exe');
+    }
+    app.quit();
+    return;
+  }
+
   Menu.setApplicationMenu(null);
 
   // DoH (DNS over HTTPS) - prevents ISP DNS hijacking
