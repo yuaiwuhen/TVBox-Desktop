@@ -182,7 +182,7 @@ function extractTarGz(tarPath, destDir) {
   execSync(`tar -xzf "${tarPath}" -C "${destDir}"`, { stdio: 'inherit' });
 }
 
-function flattenJre(extractDir) {
+function flattenJre(extractDir, target) {
   const entries = fs.readdirSync(extractDir);
   const jdkRoot = entries.find((e) => e.startsWith('jdk-'));
   if (!jdkRoot) {
@@ -191,8 +191,34 @@ function flattenJre(extractDir) {
     );
     return false;
   }
-  const srcDir = path.join(extractDir, jdkRoot);
+  let srcDir = path.join(extractDir, jdkRoot);
+
+  // macOS JRE has a special structure: Contents/Home/ contains the actual JRE
+  if (target === 'mac') {
+    const contentsHome = path.join(srcDir, 'Contents', 'Home');
+    if (fs.existsSync(contentsHome)) {
+      console.log(`macOS: Using Contents/Home/ subdirectory`);
+      srcDir = contentsHome;
+    }
+  }
+
   console.log(`Flattening: ${srcDir} -> ${jreDir}`);
+
+  // Debug: list source directory structure
+  console.log(`Source directory entries: ${fs.readdirSync(srcDir).join(', ')}`);
+  const srcLib = path.join(srcDir, 'lib');
+  if (fs.existsSync(srcLib)) {
+    const srcServer = path.join(srcLib, 'server');
+    if (fs.existsSync(srcServer)) {
+      console.log(
+        `Source lib/server entries: ${fs.readdirSync(srcServer).join(', ')}`,
+      );
+    } else {
+      console.log(`Source lib/ entries: ${fs.readdirSync(srcLib).join(', ')}`);
+    }
+  } else {
+    console.log(`Source has no lib/ directory`);
+  }
 
   if (fs.existsSync(jreDir)) {
     fs.rmSync(jreDir, { recursive: true, force: true });
@@ -201,7 +227,31 @@ function flattenJre(extractDir) {
   // when a file in srcDir is locked (e.g. jvm.dll loaded by a lingering
   // previous Electron process). cpSync reads+writes file-by-file, which works
   // even when the source is locked (the new copy in jreDir is a fresh file).
-  fs.cpSync(srcDir, jreDir, { recursive: true, force: true });
+  try {
+    fs.cpSync(srcDir, jreDir, { recursive: true, force: true });
+  } catch (e) {
+    console.error(`cpSync failed: ${e.message}`);
+    return false;
+  }
+
+  // Debug: verify copy succeeded
+  console.log(`Target jre/ entries: ${fs.readdirSync(jreDir).join(', ')}`);
+  const targetLib = path.join(jreDir, 'lib');
+  if (fs.existsSync(targetLib)) {
+    const targetServer = path.join(targetLib, 'server');
+    if (fs.existsSync(targetServer)) {
+      console.log(
+        `Target lib/server entries: ${fs.readdirSync(targetServer).join(', ')}`,
+      );
+    } else {
+      console.log(
+        `Target lib/ entries (no server): ${fs.readdirSync(targetLib).join(', ')}`,
+      );
+    }
+  } else {
+    console.log(`Target has no lib/ directory`);
+  }
+
   return true;
 }
 
@@ -308,7 +358,7 @@ async function main() {
   }
 
   // 5. Flatten to jre/
-  const ok = flattenJre(extractDir);
+  const ok = flattenJre(extractDir, opts.target);
   if (!ok) throw new Error('Failed to flatten JRE directory');
 
   // 6. Verify
