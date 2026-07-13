@@ -36,10 +36,8 @@ jobs:
       - name: Install pnpm
         run: npm install -g pnpm@9
       - name: Install dependencies
-        working-directory: TVBox-PC
         run: pnpm install --frozen-lockfile
       - name: Build for ${{ matrix.platform }}
-        working-directory: TVBox-PC
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm build:${{ matrix.platform }}
@@ -48,8 +46,8 @@ jobs:
         with:
           name: TVBox-PC-${{ matrix.platform }}-${{ matrix.arch || 'x64' }}
           path: |
-            TVBox-PC/release/*.exe
-            TVBox-PC/release/*.AppImage
-            TVBox-PC/release/*.deb
-            TVBox-PC/release/*.dmg
+            release/*.exe
+            release/*.AppImage
+            release/*.deb
+            release/*.dmg
           if-no-files-found: warn
