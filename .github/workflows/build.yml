@@ -28,22 +28,22 @@ jobs:
             platform: mac
             arch: arm64
     runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        working-directory: TVBox-PC
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
           version: 9
+          package_json_file: TVBox-PC/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
           cache-dependency-path: TVBox-PC/pnpm-lock.yaml
       - name: Install dependencies
+        working-directory: TVBox-PC
         run: pnpm install --frozen-lockfile
       - name: Build for ${{ matrix.platform }}
+        working-directory: TVBox-PC
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm build:${{ matrix.platform }}
