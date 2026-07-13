@@ -26,6 +26,7 @@
     "cheerio": "^1.2.0",
     "crypto-js": "^4.2.0",
     "element-plus": "^2.14.2",
+    "hls.js": "^1.5.0",
     "iconv-lite": "^0.7.2",
     "java-bridge": "^2.8.1",
     "localforage": "^1.10.0",
