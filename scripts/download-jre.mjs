@@ -364,6 +364,13 @@ async function main() {
   // 6. Verify
   verifyJre(opts.target);
 
+  // 6.5 Remove legal/ directory (contains symlinks that may cause electron-builder errors)
+  const legalDir = path.join(jreDir, 'legal');
+  if (fs.existsSync(legalDir)) {
+    console.log(`Removing legal/ directory (symlinks may cause build errors)`);
+    fs.rmSync(legalDir, { recursive: true, force: true });
+  }
+
   // 7. Clean up
   fs.rmSync(archivePath, { force: true });
   fs.rmSync(extractDir, { recursive: true, force: true });
