@@ -2,6 +2,10 @@
   "name": "tvbox-pc",
   "private": true,
   "version": "0.0.0",
+  "author": {
+    "name": "TVBox-PC",
+    "email": "tvbox-pc@example.com"
+  },
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
