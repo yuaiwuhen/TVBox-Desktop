@@ -1,4 +1,3 @@
-import axios from 'axios';
 import CryptoJS from 'crypto-js';
 import type {
   SourceBean,
@@ -13,6 +12,30 @@ import type {
 // ---------- Constants ----------
 
 const LOCAL_PROXY = 'http://127.0.0.1:9978';
+
+// Electron IPC bridge - available in renderer with contextIsolation=false
+declare global {
+  interface Window {
+    electronIPC?: {
+      invoke: (channel: string, ...args: any[]) => Promise<any>;
+    };
+  }
+}
+
+function getIPC(): Window['electronIPC'] {
+  if (typeof window !== 'undefined' && window.electronIPC) {
+    return window.electronIPC;
+  }
+  try {
+    const { ipcRenderer } = require('electron');
+    return {
+      invoke: (channel: string, ...args: any[]) =>
+        ipcRenderer.invoke(channel, ...args),
+    };
+  } catch {
+    return undefined;
+  }
+}
 
 const DEFAULT_ADS: string[] = [
   'mimg.0c1q0l.cn',
@@ -277,6 +300,258 @@ function base64UrlDecode(str: string): string {
   return decodeURIComponent(escape(atob(s)));
 }
 
+// ---------- Lenient JSON Parsing ----------
+// Many TVBox configs contain JS comments, unescaped control characters,
+// and trailing commas that strict JSON.parse rejects. These helpers
+// progressively clean the text until it parses.
+
+/** Escape unescaped control characters (0x00-0x1F) inside JSON string literals. */
+function escapeControlCharsInStrings(text: string): string {
+  let result = '';
+  let inString = false;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (inString) {
+      if (c === '\\' && i + 1 < text.length) {
+        result += c + text[i + 1];
+        i += 2;
+        continue;
+      }
+      if (c === '"') {
+        inString = false;
+        result += c;
+        i++;
+        continue;
+      }
+      const code = c.charCodeAt(0);
+      if (code < 0x20) {
+        if (code === 0x0a) result += '\\n';
+        else if (code === 0x0d) result += '\\r';
+        else if (code === 0x09) result += '\\t';
+        else result += '\\u' + code.toString(16).padStart(4, '0');
+        i++;
+        continue;
+      }
+      result += c;
+      i++;
+    } else {
+      if (c === '"') inString = true;
+      result += c;
+      i++;
+    }
+  }
+  return result;
+}
+
+/** Strip JS // line comments and /* block comments while respecting string literals. */
+function stripJsonComments(text: string): string {
+  let result = '';
+  let inString = false;
+  let stringChar = '';
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    const next = text[i + 1];
+    if (inString) {
+      result += c;
+      if (c === '\\' && i + 1 < text.length) {
+        result += next;
+        i += 2;
+        continue;
+      }
+      if (c === stringChar) inString = false;
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inString = true;
+      stringChar = c;
+      result += c;
+      i++;
+      continue;
+    }
+    if (c === '/' && next === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    result += c;
+    i++;
+  }
+  return result;
+}
+
+/** Remove trailing commas before } or ] (e.g., {"a":1,} → {"a":1}). */
+function removeTrailingCommas(text: string): string {
+  return text.replace(/,\s*([\]}])/g, '$1');
+}
+
+/** Try to parse JSON with progressively more lenient preprocessing. */
+function lenientJsonParse(text: string): any | null {
+  // Stage 1: direct
+  try {
+    return JSON.parse(text);
+  } catch {
+    /* try next */
+  }
+  // Stage 2: strip comments
+  try {
+    return JSON.parse(stripJsonComments(text));
+  } catch {
+    /* try next */
+  }
+  // Stage 3: strip comments + escape control chars
+  try {
+    return JSON.parse(escapeControlCharsInStrings(stripJsonComments(text)));
+  } catch {
+    /* try next */
+  }
+  // Stage 4: strip comments + escape control chars + remove trailing commas
+  try {
+    return JSON.parse(
+      removeTrailingCommas(
+        escapeControlCharsInStrings(stripJsonComments(text)),
+      ),
+    );
+  } catch {
+    /* give up */
+  }
+  return null;
+}
+
+/**
+ * Decode a base64 string to UTF-8 text. Tries standard base64 first, then
+ * URL-safe variant.
+ */
+function base64ToText(b64: string): string {
+  try {
+    return atob(b64);
+  } catch {
+    try {
+      return base64UrlDecode(b64);
+    } catch {
+      return '';
+    }
+  }
+}
+
+/**
+ * Try to extract a config JSON from raw bytes. Handles:
+ *  1. Direct lenient JSON
+ *  2. [A-Za-z]{8}** prefix → base64 decode
+ *  3. JPEG steganography (data after FFD8...FFD9)
+ *  4. PNG steganography (data after IEND)
+ * Returns the decoded text (not yet parsed) or null.
+ */
+function tryExtractConfig(bytes: Uint8Array): string | null {
+  // Convert to text for non-binary patterns. Use latin1 to preserve byte values
+  // for steganography scans, then re-encode as utf8 for actual JSON.
+  let text = '';
+  for (let i = 0; i < bytes.length; i++) {
+    text += String.fromCharCode(bytes[i]);
+  }
+
+  // 1. Direct lenient JSON (try utf8 decode first)
+  const utf8Text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  if (lenientJsonParse(utf8Text)) {
+    return utf8Text;
+  }
+
+  // 2. [A-Za-z]{8}** pattern → base64 decode
+  const pattern = /[A-Za-z]{8}\*\*/;
+  const patternMatch = pattern.exec(utf8Text);
+  if (patternMatch) {
+    const b64 = utf8Text.substring(patternMatch.index + 10);
+    const decoded = base64ToText(b64);
+    if (decoded && lenientJsonParse(decoded)) {
+      return decoded;
+    }
+  }
+
+  // 3. JPEG steganography: data after FFD8...FFD9 markers
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    // Find FFD9 (end-of-image marker)
+    for (let i = 2; i < bytes.length - 1; i++) {
+      if (bytes[i] === 0xff && bytes[i + 1] === 0xd9) {
+        const after = new TextDecoder('utf-8', { fatal: false }).decode(
+          bytes.slice(i + 2),
+        );
+        // Try pattern first (饭太硬 uses this)
+        const pm = pattern.exec(after);
+        if (pm) {
+          const b64 = after.substring(pm.index + 10);
+          const decoded = base64ToText(b64);
+          if (decoded && lenientJsonParse(decoded)) {
+            return decoded;
+          }
+        }
+        // Try direct lenient JSON
+        if (lenientJsonParse(after)) {
+          return after;
+        }
+        break;
+      }
+    }
+  }
+
+  // 4. PNG steganography: data after IEND chunk
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    // Find IEND marker (49 45 4E 44)
+    const iend = [0x49, 0x45, 0x4e, 0x44];
+    let iendIdx = -1;
+    for (let i = 0; i < bytes.length - 4; i++) {
+      if (
+        bytes[i] === iend[0] &&
+        bytes[i + 1] === iend[1] &&
+        bytes[i + 2] === iend[2] &&
+        bytes[i + 3] === iend[3]
+      ) {
+        iendIdx = i;
+        break;
+      }
+    }
+    if (iendIdx >= 0) {
+      // IEND chunk is 4 bytes type + 4 bytes CRC = 8 bytes total
+      const afterStart = Math.min(iendIdx + 8, bytes.length);
+      const after = new TextDecoder('utf-8', { fatal: false }).decode(
+        bytes.slice(afterStart),
+      );
+      // Try pattern first
+      const pm = pattern.exec(after);
+      if (pm) {
+        const b64 = after.substring(pm.index + 10);
+        const decoded = base64ToText(b64);
+        if (decoded && lenientJsonParse(decoded)) {
+          return decoded;
+        }
+      }
+      // Try direct lenient JSON
+      if (lenientJsonParse(after)) {
+        return after;
+      }
+    }
+  }
+
+  // 5. Fallback: try latin1 text directly (some configs have mixed encodings)
+  if (lenientJsonParse(text)) {
+    return text;
+  }
+
+  return null;
+}
+
 // ---------- ConfigParser ----------
 
 export class ConfigParser {
@@ -346,45 +621,50 @@ export class ConfigParser {
       `[ConfigParser] resolved configUrl=${configUrl}, key=${configKey ? '***' : null}`,
     );
 
-    // 3. Fetch remote config
-    // Note: browsers silently strip the User-Agent header when set via fetch/XHR,
-    // so we omit it and use the browser's default UA (Chrome on Win/Mac/Linux).
-    // The remote config endpoints are public and accept any UA.
-    try {
-      const response = await axios.get(configUrl, {
-        headers: {
-          Accept:
-            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        },
-        responseType: 'text',
-      });
+    // 3. Fetch remote config via main process IPC.
+    // Many config endpoints (菜妮丝, 欧歌, etc.) only return JSON when the
+    // User-Agent is okhttp/4.9.3 (Android TVBox). Browsers silently strip
+    // User-Agent from fetch/XHR, so we must fetch via main process which can
+    // set any header. The response is returned as base64 to preserve binary
+    // data (some configs are JPEG/PNG images with embedded JSON).
+    const ipc = getIPC();
+    if (!ipc) {
+      throw new Error('Electron IPC not available for config fetch');
+    }
 
-      let json: string =
-        typeof response.data === 'string'
-          ? response.data
-          : JSON.stringify(response.data);
+    try {
+      const result = await ipc.invoke('config:fetchRemote', configUrl);
+      if (!result || !result.ok) {
+        throw new Error(
+          `Failed to fetch config: ${result?.error || `HTTP ${result?.status}`}`,
+        );
+      }
+
+      // Decode base64 body to bytes for steganography detection
+      const binaryString = atob(result.bodyBase64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
 
       console.log(
-        `[ConfigParser] fetched config, length=${json.length}, status=${response.status}`,
+        `[ConfigParser] fetched config, length=${bytes.length}, contentType=${result.contentType}`,
       );
-      let parsedJson: any;
-      try {
-        parsedJson = JSON.parse(json);
-      } catch {
-        parsedJson = json;
-      }
-      console.log('[ConfigParser] fetched config content:', parsedJson);
 
-      // Decrypt content if needed
+      // Try to extract JSON from the bytes (handles direct JSON, [A-Za-z]{8}**
+      // pattern, JPEG steganography, PNG steganography)
+      let json = tryExtractConfig(bytes);
+      if (!json) {
+        // Fall back to raw text + findResult (handles AES-encrypted configs)
+        json = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+        console.warn(
+          `[ConfigParser] tryExtractConfig failed, falling back to findResult with raw text`,
+        );
+      }
+
+      // Decrypt content if a key was provided (e.g., ;pk; in URL)
       json = ConfigParser.findResult(json, configKey);
       console.log(`[ConfigParser] after decryption, length=${json.length}`);
-      let parsedDecrypted: any;
-      try {
-        parsedDecrypted = JSON.parse(json);
-      } catch {
-        parsedDecrypted = json;
-      }
-      console.log('[ConfigParser] decrypted config content:', parsedDecrypted);
 
       // Fix clan:// references if original URL was a clan URL
       const originalBase = url.split(pkSeparator)[0];
@@ -535,7 +815,12 @@ export class ConfigParser {
   // ========== Full JSON Parsing (parseJson equivalent) ==========
 
   private parseJson(apiUrl: string, jsonStr: string): void {
-    const infoJson = JSON.parse(jsonStr);
+    // Use lenient parsing — some configs (especially AES-decrypted ones) may
+    // contain comments or trailing commas that strict JSON.parse rejects.
+    const infoJson = lenientJsonParse(jsonStr);
+    if (!infoJson) {
+      throw new Error(`Failed to parse config JSON from ${apiUrl}`);
+    }
     console.log(`[ConfigParser] parseJson: apiUrl=${apiUrl}`);
 
     // jarCache

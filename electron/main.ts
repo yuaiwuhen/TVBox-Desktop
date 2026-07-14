@@ -235,6 +235,79 @@ ipcMain.handle('config:save', (_event, data: Record<string, string>) => {
   return saveConfigToFile(data);
 });
 
+// Fetch remote TVBox config with okhttp User-Agent.
+// Many config endpoints (菜妮丝, 欧歌, etc.) only return JSON when the request
+// looks like it comes from the Android TVBox app (okhttp/4.9.3). Browsers
+// silently strip User-Agent from fetch/XHR, so this must run in the main
+// process. Returns { ok, status, contentType, bodyBase64, error? }.
+ipcMain.handle(
+  'config:fetchRemote',
+  async (_event, url: string): Promise<{ ok: boolean; status: number; contentType: string; bodyBase64: string; error?: string }> => {
+    return new Promise((resolve) => {
+      const fetchWithRedirect = (u: string, depth = 0) => {
+        if (depth > 5) {
+          resolve({ ok: false, status: 0, contentType: '', bodyBase64: '', error: 'too many redirects' });
+          return;
+        }
+        let urlObj: URL;
+        try {
+          urlObj = new URL(u);
+        } catch (e: any) {
+          resolve({ ok: false, status: 0, contentType: '', bodyBase64: '', error: `invalid URL: ${e.message}` });
+          return;
+        }
+        const lib = urlObj.protocol === 'https:' ? https : http;
+        const req = lib.request(
+          {
+            hostname: urlObj.hostname,
+            port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+            path: urlObj.pathname + urlObj.search,
+            method: 'GET',
+            headers: {
+              'User-Agent': 'okhttp/4.9.3',
+              Accept: '*/*',
+            },
+          },
+          (res: any) => {
+            const status = res.statusCode || 0;
+            // Follow 3xx redirects
+            if (status >= 300 && status < 400 && res.headers.location) {
+              const next = new URL(res.headers.location, u).toString();
+              res.resume();
+              fetchWithRedirect(next, depth + 1);
+              return;
+            }
+            const contentType = res.headers['content-type'] || '';
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer) => chunks.push(c));
+            res.on('end', () => {
+              const buf = Buffer.concat(chunks);
+              resolve({
+                ok: status === 200,
+                status,
+                contentType,
+                bodyBase64: buf.toString('base64'),
+              });
+            });
+            res.on('error', (e: Error) => {
+              resolve({ ok: false, status: 0, contentType: '', bodyBase64: '', error: e.message });
+            });
+          },
+        );
+        req.on('error', (e: Error) => {
+          resolve({ ok: false, status: 0, contentType: '', bodyBase64: '', error: e.message });
+        });
+        req.setTimeout(30000, () => {
+          req.destroy();
+          resolve({ ok: false, status: 0, contentType: '', bodyBase64: '', error: 'timeout' });
+        });
+        req.end();
+      };
+      fetchWithRedirect(url);
+    });
+  },
+);
+
 // Check video format before opening player.
 // Sends a GET (Range bytes=0-65535) so we can sniff magic + Content-Type.
 // Returns: { status, contentType, unsupported, format?, directUrl?, invalid?, error? }
