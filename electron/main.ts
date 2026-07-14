@@ -1,6 +1,18 @@
-import { app, BrowserWindow, Menu, ipcMain, dialog, shell } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  ipcMain,
+  dialog,
+  shell,
+  clipboard,
+  globalShortcut,
+} from 'electron';
 import path from 'path';
 import fs from 'fs';
+import https from 'https';
+import http from 'http';
+import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { registerJarLoaderIPC, jarLoader } from './JarLoader';
 import { QuarkPanService } from './QuarkPanService';
@@ -13,6 +25,7 @@ import { Pan189Service } from './Pan189Service';
 import { Pan115Service } from './Pan115Service';
 import { PanLoginService } from './PanLoginService';
 import { proxyServer } from './ProxyServer';
+import { loadConfigFromFile, saveConfigToFile } from './ConfigPersistence';
 
 // Enable HEVC/H.265 hardware decoding in Chromium.
 // On Windows, this uses Media Foundation's HEVC decoder (requires HEVC Video
@@ -23,7 +36,10 @@ app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport');
 
 // Enable remote debugging for CDP (Chrome DevTools Protocol) access.
 // Used by test scripts to inspect renderer state (HEVC support, playback).
-app.commandLine.appendSwitch('remote-debugging-port', '9222');
+// Port can be overridden via command line: --remote-debugging-port=XXXX
+if (!process.argv.some((arg) => arg.startsWith('--remote-debugging-port'))) {
+  app.commandLine.appendSwitch('remote-debugging-port', '9222');
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -76,12 +92,30 @@ function createWindow() {
     win?.webContents.send('main-process-message', new Date().toLocaleString());
   });
 
+  // Register DevTools shortcut (F12)
+  const registered = globalShortcut.register('F12', () => {
+    if (win) {
+      if (win.webContents.isDevToolsOpened()) {
+        win.webContents.closeDevTools();
+      } else {
+        win.webContents.openDevTools({ mode: 'detach' });
+      }
+    }
+  });
+  if (!registered) {
+    console.error('[Main] Failed to register F12 shortcut');
+  } else {
+    console.log('[Main] F12 shortcut registered successfully');
+  }
+
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL);
-    win.webContents.openDevTools({ mode: 'detach' });
   } else {
     win.loadFile(path.join(process.env.DIST, 'index.html'));
   }
+
+  // Auto-open DevTools on startup (both dev and production)
+  win.webContents.openDevTools({ mode: 'detach' });
 
   // Video header injection + anti-leech interceptor.
   // Some Guard spiders (WexGuaZi) return direct video URLs (https://...) with
@@ -192,7 +226,212 @@ ipcMain.handle('window-is-maximized', () => {
   return win ? win.isMaximized() : false;
 });
 
+// Config persistence IPC handlers
+ipcMain.handle('config:load', () => {
+  return loadConfigFromFile();
+});
+
+ipcMain.handle('config:save', (_event, data: Record<string, string>) => {
+  return saveConfigToFile(data);
+});
+
+// Check video format before opening player.
+// Sends a GET (Range bytes=0-65535) so we can sniff magic + Content-Type.
+// Returns: { status, contentType, unsupported, format?, directUrl?, invalid?, error? }
+ipcMain.handle(
+  'check-video-format',
+  async (_event, videoUrl: string, headerObj?: Record<string, string>) => {
+    return new Promise((resolve) => {
+      const urlObj = new URL(videoUrl);
+      const lib = urlObj.protocol === 'https:' ? https : http;
+
+      const headers: Record<string, string> = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        Range: 'bytes=0-65535',
+        ...headerObj,
+      };
+
+      const req = lib.request(
+        {
+          hostname: urlObj.hostname,
+          port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+          path: urlObj.pathname + urlObj.search,
+          method: 'GET',
+          headers,
+        },
+        (res: any) => {
+          const status = res.statusCode || 0;
+          const contentType = res.headers['content-type'] || '';
+
+          // For 415, ProxyServer returns JSON with directUrl
+          if (status === 415) {
+            let body = '';
+            res.on('data', (chunk: Buffer) => (body += chunk.toString()));
+            res.on('end', () => {
+              try {
+                const json = JSON.parse(body);
+                resolve({
+                  status,
+                  contentType: json.format || contentType,
+                  unsupported: true,
+                  format: json.format,
+                  directUrl: json.directUrl || videoUrl,
+                  message: json.message,
+                });
+              } catch {
+                resolve({
+                  status,
+                  contentType,
+                  unsupported: true,
+                  directUrl: videoUrl,
+                });
+              }
+            });
+            return;
+          }
+
+          // For 4xx/5xx errors, resource may be invalid
+          if (status >= 400) {
+            res.resume();
+            resolve({
+              status,
+              contentType,
+              invalid: true,
+            });
+            return;
+          }
+
+          // Peek body for magic-byte sniff (MKV EBML, FLV, AVI, ftyp/qt)
+          const chunks: Buffer[] = [];
+          let total = 0;
+          res.on('data', (chunk: Buffer) => {
+            if (total < 65536) {
+              chunks.push(chunk);
+              total += chunk.length;
+            }
+          });
+          res.on('end', () => {
+            const buf = Buffer.concat(chunks);
+            const ct = contentType.toLowerCase();
+            let format: string | null = null;
+
+            if (
+              /matroska|x-matroska|\bmkv\b/.test(ct) ||
+              (buf.length >= 4 &&
+                buf[0] === 0x1a &&
+                buf[1] === 0x45 &&
+                buf[2] === 0xdf &&
+                buf[3] === 0xa3 &&
+                !buf.toString('ascii').includes('webm'))
+            ) {
+              format = 'mkv';
+            } else if (
+              /x-msvideo|\bavi\b/.test(ct) ||
+              (buf.length >= 11 &&
+                buf.toString('ascii', 0, 4) === 'RIFF' &&
+                buf.toString('ascii', 8, 11) === 'AVI')
+            ) {
+              format = 'avi';
+            } else if (
+              /x-flv|\bflv\b/.test(ct) ||
+              (buf.length >= 3 && buf.toString('ascii', 0, 3) === 'FLV')
+            ) {
+              format = 'flv';
+            } else if (/x-ms-wmv|\bwmv\b/.test(ct)) {
+              format = 'wmv';
+            } else if (
+              /quicktime/.test(ct) ||
+              (buf.length >= 12 &&
+                buf.toString('ascii', 4, 8) === 'ftyp' &&
+                buf.toString('ascii', 8, 12).startsWith('qt'))
+            ) {
+              format = 'mov';
+            }
+
+            resolve({
+              status,
+              contentType,
+              unsupported: !!format,
+              format: format || undefined,
+              directUrl: videoUrl,
+            });
+          });
+        },
+      );
+
+      req.on('error', (e: Error) => {
+        resolve({ status: 0, contentType: '', error: e.message });
+      });
+
+      req.setTimeout(15000, () => {
+        req.destroy();
+        resolve({ status: 0, contentType: '', error: 'timeout' });
+      });
+
+      req.end();
+    });
+  },
+);
+
+// Open video with external player (VLC, etc.)
+ipcMain.handle(
+  'open-external-player',
+  async (_event, playerPath: string, videoUrl: string) => {
+    try {
+      const player = spawn(playerPath, [videoUrl], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      player.unref();
+      console.log('[Main] External player launched:', playerPath, videoUrl);
+      return { success: true };
+    } catch (e: any) {
+      console.error('[Main] Failed to launch external player:', e);
+      return { success: false, error: e.message };
+    }
+  },
+);
+
+// Show unsupported format dialog — sends event to renderer for modern UI
+ipcMain.handle(
+  'show-unsupported-format-dialog',
+  async (
+    _event,
+    data: {
+      format: string;
+      directUrl: string;
+      hasVlcPath: boolean;
+      vlcPath?: string;
+    },
+  ) => {
+    try {
+      const vlcPath = data.vlcPath || '';
+      win?.webContents?.send('show-format-dialog', {
+        format: data.format,
+        directUrl: data.directUrl,
+        hasVlc: !!vlcPath,
+        vlcPath,
+      });
+      return { handled: true };
+    } catch (e: any) {
+      console.error('[Main] Failed to send format dialog event:', e);
+      return { handled: false, error: e.message };
+    }
+  },
+);
+
+// File picker dialog
+ipcMain.handle('dialog:openFile', async (_event, options: any) => {
+  return dialog.showOpenDialog({
+    title: options?.title || '选择文件',
+    filters: options?.filters || [],
+    properties: ['openFile'],
+  });
+});
+
 app.on('window-all-closed', () => {
+  globalShortcut.unregisterAll();
   if (process.platform !== 'darwin') {
     app.quit();
     win = null;

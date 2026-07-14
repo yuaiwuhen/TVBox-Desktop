@@ -1,6 +1,14 @@
 import axios from 'axios';
 import { ipcMain } from 'electron';
 import { jarLoader } from './JarLoader';
+import fs from 'fs';
+import path from 'path';
+
+const UCPAN_DEBUG_LOG = path.join(
+  process.env.APPDATA || process.cwd(),
+  'TVBox-PC',
+  'ucpan-debug.log',
+);
 
 /**
  * UCPanService - UC网盘 share resolver.
@@ -34,40 +42,102 @@ export class UCPanService {
     return this.syncedCookie;
   }
 
+  private static debugLog(msg: string): void {
+    const line = `[${new Date().toISOString()}] ${msg}\n`;
+    try {
+      fs.appendFileSync(UCPAN_DEBUG_LOG, line, 'utf8');
+    } catch {
+      // ignore
+    }
+  }
+
+  private static encryptUcCookie(cookie: string, xorKey: string): string {
+    const keyChars = xorKey.split('');
+    const out: string[] = [];
+    for (let i = 0; i < cookie.length; i++) {
+      const c = cookie.charCodeAt(i);
+      const k = keyChars[i % keyChars.length].charCodeAt(0);
+      out.push(String.fromCharCode(c ^ k));
+    }
+    const xoredStr = out.join('');
+    const buf = Buffer.from(xoredStr, 'utf8');
+    return buf.toString('base64');
+  }
+
   /**
-   * Sync UC cookie to the Guard spider's SharedPreferences
-   * (NewWexFnw_preferences, key Wex_ucpan_cookie). This lets the spider's
-   * internal pan resolver read the UC cookie when resolving UC share links.
-   * Mirrors QuarkPanService.syncCookieToJVM's guard-prefs step.
+   * Sync UC cookie to the JVM SharedPreferences so the Duopan spider can read it.
+   *
+   * The spider reads UC cookie from:
+   *   1. com.github.catvod.tvbox_preferences — key "mi.uc" (XOR-encrypted with "miwudi")
+   *      or ".uc" (plaintext fallback) — via e_1.d() → e_1.b("mi.uc", ".uc")
+   *   2. NewWexFnw_preferences — key "Wex_ucpan_cookie" — used by guard spider
+   *      (NewPanUc static field set at startup via setPanCookiesForDetailContent)
+   *
+   * Mirrors QuarkPanService.syncCookieToJVM which writes both prefs for Quark.
    */
   static async syncToGuardPrefs(cookie: string): Promise<void> {
-    if (!cookie) return;
+    this.debugLog('syncToGuardPrefs called, cookie length: ' + (cookie?.length ?? 0));
+    if (!cookie) {
+      this.debugLog('syncToGuardPrefs: cookie empty, returning');
+      return;
+    }
     try {
       if (!jarLoader || !jarLoader.java) {
-        console.warn('[UCPanService] JVM not ready, skipping guard prefs sync');
+        const msg = '[UCPanService] JVM not ready, skipping guard prefs sync';
+        this.debugLog(msg);
+        console.warn(msg);
         return;
       }
+      this.debugLog('JVM ready, importing Init class');
       const InitClass = jarLoader.java.importClass(
         'com.github.catvod.spider.Init',
       );
+      this.debugLog('Init class imported, calling contextSync()');
       const ctx = InitClass.contextSync();
       if (!ctx) {
+        this.debugLog('[UCPanService] Init.context() returned null');
         console.warn('[UCPanService] Init.context() returned null');
         return;
       }
+      this.debugLog('Init.context() returned non-null');
+
+      // 1. Write to main spider preferences (com.github.catvod.tvbox_preferences)
+      //    — key "mi.uc" (XOR-encrypted with "miwudi") for e_1.d() -> e_1.b("mi.uc", ".uc")
+      //    — also plaintext ".uc" as fallback
+      const XOR_KEY = 'miwudi';
+      const PREFS_NAME = 'com.github.catvod.tvbox_preferences';
+      const encryptedCookie = this.encryptUcCookie(cookie, XOR_KEY);
+      const prefs = ctx.getSharedPreferencesSync(PREFS_NAME, 0);
+      if (prefs) {
+        const editor = prefs.editSync();
+        editor.putStringSync('mi.uc', encryptedCookie);
+        editor.putStringSync('.uc', cookie);
+        editor.applySync();
+        const msg = `[UCPanService] Synced cookie to ${PREFS_NAME} (mi.uc encrypted + .uc plain), length: ${cookie.length}`;
+        this.debugLog(msg);
+        console.log(msg);
+      } else {
+        this.debugLog(`[UCPanService] Failed to get SharedPreferences: ${PREFS_NAME}`);
+      }
+
+      // 2. Write to guard spider preferences (NewWexFnw_preferences)
+      //    — key "Wex_ucpan_cookie" for setPanCookiesForDetailContent -> NewPanUc static field
       const GUARD_PREFS = 'NewWexFnw_preferences';
       const guardPrefs = ctx.getSharedPreferencesSync(GUARD_PREFS, 0);
-      const editor = guardPrefs.editSync();
-      editor.putStringSync('Wex_ucpan_cookie', cookie);
-      editor.applySync();
-      console.log(
-        `[UCPanService] Synced cookie to ${GUARD_PREFS} (Wex_ucpan_cookie), length: ${cookie.length}`,
-      );
+      if (guardPrefs) {
+        const editor = guardPrefs.editSync();
+        editor.putStringSync('Wex_ucpan_cookie', cookie);
+        editor.applySync();
+        const msg = `[UCPanService] Synced cookie to ${GUARD_PREFS} (Wex_ucpan_cookie), length: ${cookie.length}`;
+        this.debugLog(msg);
+        console.log(msg);
+      } else {
+        this.debugLog(`[UCPanService] Failed to get SharedPreferences: ${GUARD_PREFS}`);
+      }
     } catch (e: any) {
-      console.warn(
-        '[UCPanService] Failed to sync to guard prefs:',
-        e?.message || e,
-      );
+      const errMsg = `[UCPanService] Failed to sync to guard prefs: ${e?.message || e}`;
+      this.debugLog(errMsg);
+      console.warn(errMsg);
     }
   }
 
@@ -508,6 +578,115 @@ export class UCPanService {
       );
     } catch (e: any) {
       console.warn('[UCPanService] deleteFile error:', e.message);
+    }
+  }
+
+  /**
+   * Refresh __puus before playback (mirrors QuarkPanService.refreshCookieForPlayback).
+   * UC uses the same cookie model (__pus / __puus) on pc-api.uc.cn.
+   */
+  static async refreshCookieForPlayback(): Promise<{
+    refreshed: boolean;
+    expired: boolean;
+    cookie?: string;
+  }> {
+    if (!this.syncedCookie) {
+      return { refreshed: false, expired: true };
+    }
+    try {
+      const UA =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0';
+      const headers = {
+        Cookie: this.syncedCookie,
+        'User-Agent': UA,
+        Referer: 'https://drive.uc.cn/',
+        Origin: 'https://drive.uc.cn',
+      };
+      const resp = await axios.get(
+        'https://pc-api.uc.cn/1/clouddrive/file/sort?pr=UCBrowser&fr=pc&pdir_fid=0&_page=1&_size=1&_fetch_total=1&_fetch_sub_dirs=0&_sort=file_type:asc,updated_at:desc',
+        { headers, timeout: 15000, validateStatus: () => true },
+      );
+      if (resp.status === 401 || resp.data?.code === 31001) {
+        console.warn(
+          '[UCPanService] refreshCookieForPlayback: login expired, status=',
+          resp.status,
+          'code=',
+          resp.data?.code,
+        );
+        return { refreshed: false, expired: true };
+      }
+
+      const setCookie = resp.headers['set-cookie'];
+      if (Array.isArray(setCookie)) {
+        const cookies = setCookie.map((c: string) => c.split(';')[0]);
+        const puusEntry = cookies.find((c: string) => c.startsWith('__puus='));
+        if (puusEntry) {
+          const parts = this.syncedCookie
+            .split(';')
+            .map((s) => s.trim())
+            .filter((s) => s && !s.startsWith('__puus='));
+          parts.push(puusEntry);
+          this.syncedCookie = parts.join('; ');
+          console.log(
+            '[UCPanService] refreshCookieForPlayback: refreshed __puus, cookie len=',
+            this.syncedCookie.length,
+          );
+          return {
+            refreshed: true,
+            expired: false,
+            cookie: this.syncedCookie,
+          };
+        }
+      }
+
+      // Secondary check via share token API with a dummy id — code 0 or
+      // share-not-found means cookie is valid; auth errors mean expired.
+      if (resp.data?.code !== 0 && resp.status >= 400) {
+        // Try a lightweight validity probe
+        const tokenResp = await axios.post(
+          'https://pc-api.uc.cn/1/clouddrive/share/sharepage/token?pr=UCBrowser&fr=pc',
+          {
+            pwd_id: 'validity_probe',
+            passcode: '',
+            support_visit_limit_private_share: true,
+          },
+          { headers, timeout: 10000, validateStatus: () => true },
+        );
+        // 31001 / 401 style codes mean login gone
+        if (
+          tokenResp.status === 401 ||
+          tokenResp.data?.code === 31001 ||
+          /登录|login|auth/i.test(tokenResp.data?.message || '')
+        ) {
+          return { refreshed: false, expired: true };
+        }
+      }
+
+      return {
+        refreshed: false,
+        expired: false,
+        cookie: this.syncedCookie,
+      };
+    } catch (e: any) {
+      console.warn(
+        '[UCPanService] refreshCookieForPlayback failed:',
+        e.message,
+      );
+      return {
+        refreshed: false,
+        expired: false,
+        cookie: this.syncedCookie || undefined,
+      };
+    }
+  }
+
+  static async checkTokenValid(): Promise<{ valid: boolean }> {
+    if (!this.syncedCookie) return { valid: false };
+    try {
+      const result = await this.refreshCookieForPlayback();
+      return { valid: !result.expired };
+    } catch {
+      return { valid: false };
     }
   }
 

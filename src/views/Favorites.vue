@@ -22,7 +22,7 @@
           <div class="relative overflow-hidden aspect-[3/4]">
             <img
               v-if="item.vod_pic"
-              :src="item.vod_pic"
+              :src="processImageUrl(item.vod_pic)"
               class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
             />
             <div v-else class="w-full h-full flex items-center justify-center" style="background: var(--color-bg-elevated)">
@@ -61,6 +61,7 @@ import { ElMessage } from 'element-plus'
 import { Star, Delete, Film } from '@element-plus/icons-vue'
 import { useAppStore } from '../store/app'
 import type { FavoriteRecord } from '../core/Database'
+import { processImageUrl } from '../core/models'
 
 const store = useAppStore()
 const router = useRouter()

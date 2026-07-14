@@ -61,7 +61,7 @@
     "ts-node": "^10.9.2",
     "typescript": "~6.0.2",
     "vite": "^6.4.3",
-    "vite-plugin-electron": "^1.1.0",
+    "vite-plugin-electron": "^0.29.1",
     "vitest": "^4.1.9",
     "vue-tsc": "^3.3.5"
   },

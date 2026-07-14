@@ -32,6 +32,14 @@ import { dnsOptimizer } from './DnsOptimizer';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 type PortCallback = (port: number) => void;
+type PanType = 'quark' | 'uc' | 'baidu';
+
+interface KaiserModeOptions {
+  threadCount: number;
+  chunkSizeBytes: number;
+  strategyKey: string;
+  strategyType: string;
+}
 
 // Keep-alive agents so Range requests during video playback reuse the same
 // TCP/TLS connection to the CDN instead of doing a fresh handshake every
@@ -361,6 +369,9 @@ export class ProxyServer {
   private server: http.Server | null = null;
   private port: number = -1;
   private onPortChanged: PortCallback | null = null;
+  // 优先监听 9978 端口（spider的ProxyOrigin.findPort()扫描范围是9978-9999）
+  // 如果9978被占用，尝试9979等。但必须确保ProxyOrigin返回的端口与实际监听端口一致。
+  private static readonly PREFERRED_PORT = 9978;
   private static readonly START_PORT = 9978;
   private static readonly END_PORT = 9999;
   private contentLengthCache = new Map<string, number>();
@@ -531,11 +542,13 @@ export class ProxyServer {
         resolve(this.port);
         return;
       }
-      this.tryListen(ProxyServer.START_PORT, (port) => {
+      // 优先尝试 8096 端口（蜘蛛的 kaiser URL 使用此端口）
+      // 如果失败，跳到 9978 继续尝试
+      this.tryListenWithPreferred(ProxyServer.PREFERRED_PORT, (port) => {
         if (port < 0) {
           reject(
             new Error(
-              `No available port in ${ProxyServer.START_PORT}-${ProxyServer.END_PORT}`,
+              `No available port (tried ${ProxyServer.PREFERRED_PORT} and ${ProxyServer.START_PORT}-${ProxyServer.END_PORT})`,
             ),
           );
           return;
@@ -571,7 +584,21 @@ export class ProxyServer {
     });
   }
 
-  private tryListen(port: number, callback: (port: number) => void): void {
+  /**
+   * Try preferred port first, then fall back to START_PORT-END_PORT range.
+   */
+  private tryListenWithPreferred(
+    preferredPort: number,
+    callback: (port: number) => void,
+  ): void {
+    this.tryListen(preferredPort, true, callback);
+  }
+
+  private tryListen(
+    port: number,
+    isPreferredAttempt: boolean = false,
+    callback: (port: number) => void,
+  ): void {
     if (port > ProxyServer.END_PORT) {
       callback(-1);
       return;
@@ -584,8 +611,11 @@ export class ProxyServer {
 
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
-        console.log(`[ProxyServer] Port ${port} in use, trying ${port + 1}`);
-        this.tryListen(port + 1, callback);
+        // If preferred port (8096) failed, jump to START_PORT (9978)
+        // Otherwise, continue incrementing port
+        const nextPort = isPreferredAttempt ? ProxyServer.START_PORT : port + 1;
+        console.log(`[ProxyServer] Port ${port} in use, trying ${nextPort}`);
+        this.tryListen(nextPort, false, callback);
         return;
       }
       console.error('[ProxyServer] Server error:', err.message);
@@ -625,8 +655,10 @@ export class ProxyServer {
       params[k] = v;
     }
 
-    // Only GET is implemented (matches the spider's expectations)
-    if (method !== 'GET') {
+    // Allow HEAD for video format probing. Node.js http automatically
+    // suppresses response body for HEAD requests (Content-Length is still
+    // set correctly from writeHead/end calls).
+    if (method !== 'GET' && method !== 'HEAD') {
       res.writeHead(405, { 'Content-Type': 'text/plain' });
       res.end('Method Not Allowed');
       return;
@@ -710,7 +742,106 @@ export class ProxyServer {
       return;
     }
 
-    if (pathname !== '/proxy') {
+    // GoProxy compatibility: spiders return http://127.0.0.1:8096/kaiser?url=<CDN>
+    // Android serves this via libwexproxy.so. Desktop rewrites most of these
+    // in JarLoader, but also handle /kaiser here so unre-written URLs work
+    // when ProxyServer lands on the spider's preferred port 8096.
+    if (pathname === '/kaiser') {
+      const cdnUrl = params['url'] || '';
+      if (!cdnUrl) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Missing url parameter');
+        return;
+      }
+      let decoded = cdnUrl;
+      try {
+        decoded = decodeURIComponent(cdnUrl);
+      } catch {}
+      const panType = this.detectPanTypeFromUrl(decoded);
+      if (!panType) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Cannot detect pan type from CDN URL');
+        return;
+      }
+      let headerOverride: Record<string, string> | undefined;
+      try {
+        if (params['header']) headerOverride = JSON.parse(params['header']);
+      } catch {}
+      const externalPlayer = params['player'] === 'external';
+
+      // HEAD: probe and return headers
+      if (req.method === 'HEAD') {
+        const baseHeaders = this.buildPanDirectHeaders(panType, headerOverride);
+        if (!baseHeaders.cookie) {
+          res.writeHead(502, { 'Content-Type': 'text/plain' });
+          res.end(`${panType} cookie not synced`);
+          return;
+        }
+        this.probePanDirectResource(decoded, baseHeaders.headers).then(
+          (probe) => {
+            const headHeaders: Record<string, string> = {
+              'Content-Type': probe.contentType || 'video/mp4',
+              'Accept-Ranges': probe.supportsRange ? 'bytes' : 'none',
+              'Access-Control-Allow-Origin': '*',
+              ...(probe.totalLength > 0
+                ? { 'Content-Length': String(probe.totalLength) }
+                : {}),
+            };
+            res.writeHead(200, headHeaders);
+            res.end();
+          },
+          (e) => {
+            console.warn('[ProxyServer] /kaiser HEAD probe failed:', e.message);
+            res.writeHead(502, { 'Content-Type': 'text/plain' });
+            res.end();
+          },
+        );
+        return;
+      }
+
+      const kaiserMode = this.parseKaiserMode(params);
+      console.log(
+        '[ProxyServer] /kaiser →',
+        panType === 'quark' && kaiserMode ? 'streamPanKaiser' : 'streamPanDirect',
+        panType,
+        decoded.substring(0, 100),
+      );
+      if (panType === 'quark' && kaiserMode) {
+        void this.streamPanKaiser(
+          decoded,
+          req,
+          res,
+          panType,
+          headerOverride,
+          externalPlayer,
+          kaiserMode,
+        );
+        return;
+      }
+      void this.streamPanDirect(
+        decoded,
+        req,
+        res,
+        panType,
+        headerOverride,
+        externalPlayer,
+      );
+      return;
+    }
+
+    // Some spiders (WexYueYue, etc.) return URLs like:
+    //   http://127.0.0.1:9978?do=WexYueYue&domain=...&path=...
+    // without the /proxy path. Android's RemoteServer handles this by
+    // checking the `do` query parameter regardless of pathname. Mirror that
+    // behavior so these spider URLs work on PC too.
+    if (
+      pathname !== '/proxy' &&
+      params['do'] &&
+      (pathname === '/' || pathname === '')
+    ) {
+      // Treat root path with `do` param as /proxy
+      // (fall through to the /proxy handler below)
+    } else if (pathname !== '/proxy') {
       // m3u8 proxy: /m3u8.m3u8?url=<encoded video URL>&header=<encoded JSON>
       // Routes direct video URLs through Node.js (not the browser) so we can
       // set User-Agent/Referer freely and avoid Chromium TLS fingerprinting.
@@ -746,6 +877,54 @@ export class ProxyServer {
         );
         return;
       }
+
+      // Image proxy: /image?url=<encoded image URL with @Referer/@User-Agent>
+      // Handles image URLs like:
+      //   https://img3.doubanio.com/xxx.jpg@Referer=https://movie.douban.com/@User-Agent=Mozilla/5.0...
+      // The spider embeds Referer/User-Agent in the URL; we extract them and
+      // send as actual HTTP headers to bypass the CDN's anti-leech check.
+      if (pathname === '/image') {
+        const rawUrl = params['url'];
+        if (!rawUrl) {
+          res.writeHead(400, { 'Content-Type': 'text/plain' });
+          res.end('Missing url parameter');
+          return;
+        }
+        // Parse @Referer, @User-Agent, @Cookie from URL
+        // Format: <image_url>@Referer=<referer>@User-Agent=<ua>@Cookie=<cookie>
+        // Extract headers first, then get the real image URL (before the first @)
+        const headers: Record<string, string> = {};
+        if (rawUrl.includes('@Referer=')) {
+          const match = rawUrl.match(/@Referer=([^@]*)/);
+          if (match) headers['Referer'] = decodeURIComponent(match[1]);
+        }
+        if (rawUrl.includes('@User-Agent=')) {
+          const match = rawUrl.match(/@User-Agent=([^@]*)/);
+          if (match) headers['User-Agent'] = decodeURIComponent(match[1]);
+        }
+        if (rawUrl.includes('@Cookie=')) {
+          const match = rawUrl.match(/@Cookie=([^@]*)/);
+          if (match) headers['Cookie'] = decodeURIComponent(match[1]);
+        }
+        // Extract real image URL (everything before the first @Referer, @User-Agent, or @Cookie)
+        let imageUrl = rawUrl;
+        const firstHeaderIndex = Math.min(
+          rawUrl.indexOf('@Referer=') >= 0 ? rawUrl.indexOf('@Referer=') : Infinity,
+          rawUrl.indexOf('@User-Agent=') >= 0 ? rawUrl.indexOf('@User-Agent=') : Infinity,
+          rawUrl.indexOf('@Cookie=') >= 0 ? rawUrl.indexOf('@Cookie=') : Infinity,
+        );
+        if (firstHeaderIndex !== Infinity) {
+          imageUrl = rawUrl.substring(0, firstHeaderIndex);
+        }
+        console.log(
+          '[ProxyServer] /image: url=',
+          imageUrl.substring(0, 80),
+          'headers=',
+          Object.keys(headers).join(','),
+        );
+        void this.streamVideoDirect(imageUrl, req, res, headers, true);
+        return;
+      }
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not Found');
       return;
@@ -758,52 +937,95 @@ export class ProxyServer {
       return;
     }
 
-    // quarkDirect/ucDirect/baiduDirect: stream directly from a pan CDN download
-    // URL. Used by resolveQuarkPlayerContent fallback when the spider's pan
-    // resolver can't resolve the share link. The download URL was already
-    // obtained via the pan service's resolveDownloadUrl; we just need to
-    // inject Cookie + Referer + User-Agent and stream the bytes back,
-    // honoring Range requests for video seeking.
-    // (Aliyun's signed download_url works without auth, so it's returned
-    // directly without going through the proxy.)
-    if (
-      params['do'] === 'quarkDirect' ||
-      params['do'] === 'ucDirect' ||
-      params['do'] === 'baiduDirect'
-    ) {
-      const downloadUrl = params['url'];
+    // Pan direct streaming (GoProxy replacement).
+    // JarLoader rewrites /kaiser → /proxy?do=quarkDirect|ucDirect|baiduDirect.
+    // Also used by rewritePanM3u8Manifest for HLS segment URLs.
+    const directMatch = (params['do'] || '').match(
+      /^(quark|uc|baidu)Direct$/i,
+    );
+    if (directMatch) {
+      const panType = directMatch[1].toLowerCase() as PanType;
+      const downloadUrl = params['url'] || '';
       if (!downloadUrl) {
         res.writeHead(400, { 'Content-Type': 'text/plain' });
         res.end('Missing url parameter');
         return;
       }
-      const panType =
-        params['do'] === 'quarkDirect'
-          ? 'quark'
-          : params['do'] === 'ucDirect'
-            ? 'uc'
-            : 'baidu';
-      // Spider's translatePlayerContent encodes spider-provided headers
-      // (User-Agent, Referer) into the proxy URL as &header=<encoded JSON>.
-      // Pass them to streamPanDirect so it can use the spider's UA instead
-      // of the hardcoded default — Baidu CDN's sign validation rejects
-      // mismatched UAs with error_code 31362 "sign error".
+      let decoded = downloadUrl;
+      try {
+        decoded = decodeURIComponent(downloadUrl);
+      } catch {}
       let headerOverride: Record<string, string> | undefined;
-      if (params['header']) {
-        try {
-          const parsed = JSON.parse(params['header']);
-          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-            headerOverride = parsed;
-          }
-        } catch {
-          // ignore parse error, fall back to defaults
+      try {
+        if (params['header']) headerOverride = JSON.parse(params['header']);
+      } catch {}
+      const externalPlayer = params['player'] === 'external';
+
+      // HEAD request: probe the resource and return headers without body.
+      // VideoPlayer.vue sends HEAD to check format (Content-Type) before
+      // deciding between native <video> and hls.js. Without this, the
+      // streaming methods below start chunk downloads but never end the
+      // response for HEAD, causing ERR_EMPTY_RESPONSE.
+      if (req.method === 'HEAD') {
+        const baseHeaders = this.buildPanDirectHeaders(panType, headerOverride);
+        if (!baseHeaders.cookie) {
+          res.writeHead(502, { 'Content-Type': 'text/plain' });
+          res.end(`${panType} cookie not synced`);
+          return;
         }
+        this.probePanDirectResource(decoded, baseHeaders.headers).then(
+          (probe) => {
+            const headHeaders: Record<string, string> = {
+              'Content-Type': probe.contentType || 'video/mp4',
+              'Accept-Ranges': probe.supportsRange ? 'bytes' : 'none',
+              'Access-Control-Allow-Origin': '*',
+              ...(probe.totalLength > 0
+                ? { 'Content-Length': String(probe.totalLength) }
+                : {}),
+            };
+            res.writeHead(200, headHeaders);
+            res.end();
+          },
+          (e) => {
+            console.warn('[ProxyServer] HEAD probe failed:', e.message);
+            res.writeHead(502, { 'Content-Type': 'text/plain' });
+            res.end();
+          },
+        );
+        return;
       }
-      void this.streamPanDirect(downloadUrl, req, res, panType, headerOverride);
+
+      const kaiserMode = this.parseKaiserMode(params);
+      if (panType === 'quark' && kaiserMode) {
+        void this.streamPanKaiser(
+          decoded,
+          req,
+          res,
+          panType,
+          headerOverride,
+          externalPlayer,
+          kaiserMode,
+        );
+        return;
+      }
+      void this.streamPanDirect(
+        decoded,
+        req,
+        res,
+        panType,
+        headerOverride,
+        externalPlayer,
+      );
       return;
     }
 
-    // Other do= values → forward to spider
+    // All proxy requests (including kaiser, quark, uc, baidu) go through
+    // jarLoader.proxyInvoke which will:
+    // 1. Try spider.proxyLocal() if recentSpiderKey is set
+    // 2. Fallback to Proxy.proxy() static method if spider.proxyLocal fails
+    // This ensures compatibility with all spider types and avoids duplicate
+    // logic. The spider's ProxyOrigin.proxy() method handles Cookie/UA/Referer
+    // injection internally (see NewQuark.getHeaders()).
     if (!params['do']) {
       res.writeHead(400, { 'Content-Type': 'text/plain' });
       res.end('Missing "do" parameter');
@@ -904,6 +1126,94 @@ export class ProxyServer {
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ): Promise<void> {
+    // Debug: log params for do=ali requests (pan resolver without pre-resolved url)
+    if (params['do'] === 'ali') {
+      console.log(
+        '[ProxyServer] invokeSpiderProxy: do=ali params=',
+        JSON.stringify(params).substring(0, 500),
+      );
+      console.log(
+        '[ProxyServer] invokeSpiderProxy: do=ali check conditions: hasUrl=',
+        !!params['url'],
+        'site=',
+        params['site'],
+      );
+    }
+
+    // Special handling for do=ali with pan CDN URLs.
+    // First try calling jar's proxy method, if it returns a result, use it.
+    // If it returns null, fall back to streamPanDirect for direct streaming.
+    const site = params['site'];
+    if (params['do'] === 'ali' && params['url'] && site) {
+      const panType: 'quark' | 'uc' | 'baidu' | null =
+        site === 'quark'
+          ? 'quark'
+          : site === 'uc'
+            ? 'uc'
+            : site === 'baidu'
+              ? 'baidu'
+              : null;
+      console.log(
+        '[ProxyServer] invokeSpiderProxy: do=ali panType=',
+        panType,
+        'entering special handling',
+      );
+
+      // First try jar's proxy method
+      console.log(
+        '[ProxyServer] invokeSpiderProxy: do=ali trying jar proxy first...',
+      );
+      const jarResult = jarLoader.proxyInvoke(params);
+      if (jarResult && jarResult.stream) {
+        console.log(
+          '[ProxyServer] invokeSpiderProxy: do=ali jar proxy returned result, mime=',
+          jarResult.mime,
+          'status=',
+          jarResult.status,
+        );
+        // Use jar's result
+        await this.streamSpiderResult(jarResult, req, res, params);
+        return;
+      }
+      console.log(
+        '[ProxyServer] invokeSpiderProxy: do=ali jar proxy returned null, using streamPanDirect for',
+        panType,
+      );
+
+      if (panType) {
+        let headerOverride: Record<string, string> | undefined;
+        try {
+          const headerStr = params['header'];
+          if (headerStr) {
+            headerOverride = JSON.parse(headerStr);
+          }
+        } catch {}
+        const externalPlayer = params['player'] === 'external';
+        const kaiserMode = this.parseKaiserMode(params);
+        if (panType === 'quark' && kaiserMode) {
+          void this.streamPanKaiser(
+            decodeURIComponent(params['url']),
+            req,
+            res,
+            panType,
+            headerOverride,
+            externalPlayer,
+            kaiserMode,
+          );
+          return;
+        }
+        await this.streamPanDirect(
+          decodeURIComponent(params['url']),
+          req,
+          res,
+          panType,
+          headerOverride,
+          externalPlayer,
+        );
+        return;
+      }
+    }
+
     // Decode the upstream URL BEFORE calling spider to detect TS segments.
     // TS segments don't need spider processing — we stream them directly
     // from CDN with ffmpeg transcoding (HEVC→H.264). Checking early avoids
@@ -1021,11 +1331,27 @@ export class ProxyServer {
     const { status, mime, stream, headers } = result;
     const effectiveMime = this.resolveVideoMime(mime, params);
 
+    // Debug: log spider result for do=ali requests
+    if (params['do'] === 'ali') {
+      console.log(
+        '[ProxyServer] invokeSpiderProxy: do=ali result status=',
+        status,
+        'mime=',
+        mime,
+        'effectiveMime=',
+        effectiveMime,
+        'hasStream=',
+        !!stream,
+        'headers=',
+        headers ? JSON.stringify(headers) : 'none',
+      );
+    }
+
     const isM3u8 =
       effectiveMime.includes('mpegurl') || effectiveMime.includes('mpegURL');
 
     const upstreamUrl = params['url'] || '';
-    const site = params['site'];
+    // site was already declared at the top of invokeSpiderProxy
     const totalLength =
       isM3u8 || !upstreamUrl
         ? -1
@@ -1640,6 +1966,589 @@ export class ProxyServer {
   }
 
   /**
+   * Detect pan type from a CDN download URL hostname.
+   */
+  private detectPanTypeFromUrl(
+    downloadUrl: string,
+  ): PanType | null {
+    const u = (downloadUrl || '').toLowerCase();
+    if (u.includes('quark.cn') || u.includes('.quark.')) return 'quark';
+    if (u.includes('uc.cn') || u.includes('drive.uc')) return 'uc';
+    if (u.includes('baidupcs.com') || u.includes('baidu.com')) return 'baidu';
+    return null;
+  }
+
+  private parseKaiserMode(
+    params: Record<string, string>,
+  ): KaiserModeOptions | null {
+    const threadRaw = parseInt(params['thread'] || '', 10);
+    // The spider may pass "chunksize" instead of "chunk".
+    // chunksize=0 means "use default" (same as Android kaiser default).
+    let chunkRaw = parseInt(params['chunk'] || '', 10);
+    if (!Number.isFinite(chunkRaw) || chunkRaw <= 0) {
+      chunkRaw = parseInt(params['chunksize'] || '', 10);
+    }
+    if (!Number.isFinite(threadRaw) || !Number.isFinite(chunkRaw)) {
+      return null;
+    }
+    if (threadRaw <= 1) {
+      return null;
+    }
+    const threadCount = Math.max(2, Math.min(threadRaw, 32));
+    // chunksize=0 means use default 512KB (Android kaiser default)
+    const chunkSizeBytes =
+      chunkRaw <= 0
+        ? 512 * 1024
+        : Math.max(64 * 1024, Math.min(chunkRaw, 4096) * 1024);
+    return {
+      threadCount,
+      chunkSizeBytes,
+      strategyKey: params['key'] || '',
+      strategyType: params['type'] || '',
+    };
+  }
+
+  private buildPanDirectHeaders(
+    panType: PanType,
+    headerOverride?: Record<string, string>,
+    rangeHeader?: string,
+  ): { headers: Record<string, string>; cookie: string | null; userAgent: string } {
+    let cookie: string | null = null;
+    let referer = '';
+    let userAgent = '';
+    if (panType === 'quark') {
+      cookie = QuarkPanService.getSyncedCookie();
+      referer = 'https://pan.quark.cn/';
+      userAgent = QuarkPanService.getQuarkDesktopUA();
+    } else if (panType === 'uc') {
+      cookie = UCPanService.getSyncedCookie();
+      referer = 'https://drive.uc.cn/';
+      userAgent =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+    } else {
+      cookie = BaiduPanService.getSyncedCookie();
+      referer = 'https://pan.baidu.com/';
+      userAgent =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+    }
+    if (headerOverride) {
+      if (headerOverride['User-Agent']) {
+        userAgent = headerOverride['User-Agent'];
+      }
+      if (headerOverride['Referer']) {
+        referer = headerOverride['Referer'];
+      }
+    }
+    const headers: Record<string, string> = {
+      'User-Agent': userAgent,
+      Referer: referer,
+      Accept: '*/*',
+      'Accept-Encoding': 'identity',
+    };
+    if (cookie) {
+      headers['Cookie'] = cookie;
+    }
+    if (rangeHeader) {
+      headers['Range'] = rangeHeader;
+    }
+    return { headers, cookie, userAgent };
+  }
+
+  private probePanDirectResource(
+    downloadUrl: string,
+    upstreamHeaders: Record<string, string>,
+  ): Promise<{
+    totalLength: number;
+    contentType: string;
+    supportsRange: boolean;
+  }> {
+    return new Promise((resolve, reject) => {
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(downloadUrl);
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      const isHttps = parsedUrl.protocol === 'https:';
+      const lib = isHttps ? https : http;
+      const headers = {
+        ...upstreamHeaders,
+        Range: 'bytes=0-0',
+      };
+      const req = lib.request(
+        downloadUrl,
+        {
+          method: 'GET',
+          headers,
+          agent: isHttps ? httpsAgent : httpAgent,
+        },
+        (upstreamRes) => {
+          const contentType = String(upstreamRes.headers['content-type'] || '');
+          const contentRange = String(upstreamRes.headers['content-range'] || '');
+          const contentLength = String(upstreamRes.headers['content-length'] || '');
+          const acceptRanges = String(upstreamRes.headers['accept-ranges'] || '');
+          const status = upstreamRes.statusCode || 0;
+          let totalLength = -1;
+          if (contentRange) {
+            const match = contentRange.match(/bytes \d+-\d+\/(\d+)/);
+            if (match) {
+              totalLength = parseInt(match[1], 10);
+            }
+          }
+          if (totalLength < 0 && contentLength) {
+            totalLength = parseInt(contentLength, 10);
+          }
+          if (totalLength > 0) {
+            this.contentLengthCache.set(downloadUrl, totalLength);
+          }
+          upstreamRes.resume();
+          upstreamRes.once('end', () => {
+            resolve({
+              totalLength,
+              contentType,
+              supportsRange:
+                status === 206 ||
+                acceptRanges.toLowerCase().includes('bytes') ||
+                !!contentRange,
+            });
+          });
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  private parseClientRange(
+    rangeHeader: string | undefined,
+    totalLength: number,
+  ): { start: number; end: number; partial: boolean } | null {
+    if (totalLength <= 0) {
+      return null;
+    }
+    if (!rangeHeader) {
+      return { start: 0, end: totalLength - 1, partial: false };
+    }
+    const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader.trim());
+    if (!match) {
+      return null;
+    }
+    const startStr = match[1];
+    const endStr = match[2];
+    let start = 0;
+    let end = totalLength - 1;
+    if (startStr && endStr) {
+      start = parseInt(startStr, 10);
+      end = parseInt(endStr, 10);
+    } else if (startStr) {
+      start = parseInt(startStr, 10);
+    } else if (endStr) {
+      const suffixLength = parseInt(endStr, 10);
+      if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+        return null;
+      }
+      start = Math.max(0, totalLength - suffixLength);
+    } else {
+      return null;
+    }
+    if (
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      start < 0 ||
+      start >= totalLength ||
+      end < start
+    ) {
+      return null;
+    }
+    end = Math.min(end, totalLength - 1);
+    return { start, end, partial: true };
+  }
+
+  private async waitForWriteDrain(res: http.ServerResponse): Promise<void> {
+    await new Promise<void>((resolve) => res.once('drain', () => resolve()));
+  }
+
+  private async streamPanKaiser(
+    downloadUrl: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    panType: PanType,
+    headerOverride: Record<string, string> | undefined,
+    isExternalPlayer: boolean,
+    kaiserMode: KaiserModeOptions,
+  ): Promise<void> {
+    const baseHeaders = this.buildPanDirectHeaders(panType, headerOverride);
+    if (!baseHeaders.cookie) {
+      console.warn(
+        '[ProxyServer] streamPanKaiser:',
+        panType,
+        'cookie not synced',
+      );
+      if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'text/plain' });
+        res.end(`${panType} cookie not synced`);
+      }
+      return;
+    }
+
+    const clientRangeHeader = req.headers['range']
+      ? String(req.headers['range'])
+      : undefined;
+    console.log(
+      '[ProxyServer] streamPanKaiser: start',
+      `panType=${panType}`,
+      `thread=${kaiserMode.threadCount}`,
+      `chunkKB=${Math.floor(kaiserMode.chunkSizeBytes / 1024)}`,
+      `key=${kaiserMode.strategyKey || '-'}`,
+      `type=${kaiserMode.strategyType || '-'}`,
+      `hasRange=${!!clientRangeHeader}`,
+      downloadUrl.substring(0, 120),
+    );
+    debugLog(
+      `streamPanKaiser START panType=${panType} url=${downloadUrl} thread=${kaiserMode.threadCount} chunkKB=${Math.floor(kaiserMode.chunkSizeBytes / 1024)} key=${kaiserMode.strategyKey} type=${kaiserMode.strategyType} range=${clientRangeHeader || ''}`,
+    );
+
+    let probe: { totalLength: number; contentType: string; supportsRange: boolean };
+    try {
+      probe = await this.probePanDirectResource(downloadUrl, baseHeaders.headers);
+    } catch (e: any) {
+      console.warn(
+        '[ProxyServer] streamPanKaiser: probe failed, fallback to direct:',
+        e.message,
+      );
+      await this.streamPanDirect(
+        downloadUrl,
+        req,
+        res,
+        panType,
+        headerOverride,
+        isExternalPlayer,
+      );
+      return;
+    }
+
+    const lowerContentType = probe.contentType.toLowerCase();
+    const looksM3u8 =
+      lowerContentType.includes('mpegurl') ||
+      lowerContentType.includes('m3u8') ||
+      downloadUrl.toLowerCase().includes('.m3u8');
+    if (looksM3u8 || !probe.supportsRange || probe.totalLength <= 0) {
+      console.log(
+        '[ProxyServer] streamPanKaiser: fallback to direct',
+        `looksM3u8=${looksM3u8}`,
+        `supportsRange=${probe.supportsRange}`,
+        `total=${probe.totalLength}`,
+      );
+      await this.streamPanDirect(
+        downloadUrl,
+        req,
+        res,
+        panType,
+        headerOverride,
+        isExternalPlayer,
+      );
+      return;
+    }
+
+    if (!isExternalPlayer) {
+      const unsupported = this.detectUnsupportedFormat(
+        lowerContentType,
+        downloadUrl,
+      );
+      if (unsupported) {
+        const errorJson = JSON.stringify({
+          error: 'UNSUPPORTED_FORMAT',
+          message: '此视频格式不支持网页播放，请使用外部播放器（如VLC）打开',
+          format: unsupported,
+          directUrl: downloadUrl,
+        });
+        res.writeHead(415, {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        });
+        res.end(errorJson);
+        return;
+      }
+    }
+
+    const clientRange = this.parseClientRange(clientRangeHeader, probe.totalLength);
+    if (!clientRange) {
+      res.writeHead(416, {
+        'Content-Type': 'text/plain',
+        'Content-Range': `bytes */${probe.totalLength}`,
+      });
+      res.end('Invalid Range');
+      return;
+    }
+
+    const responseHeaders: Record<string, string> = {
+      'Content-Type': probe.contentType || 'video/mp4',
+      'Accept-Ranges': 'bytes',
+      'Access-Control-Allow-Origin': '*',
+      'Content-Length': String(clientRange.end - clientRange.start + 1),
+    };
+    const statusCode = clientRange.partial ? 206 : 200;
+    if (clientRange.partial) {
+      responseHeaders['Content-Range'] =
+        `bytes ${clientRange.start}-${clientRange.end}/${probe.totalLength}`;
+    }
+    res.writeHead(statusCode, responseHeaders);
+
+    const chunkSize = kaiserMode.chunkSizeBytes;
+    const startChunk = Math.floor(clientRange.start / chunkSize);
+    const endChunk = Math.floor(clientRange.end / chunkSize);
+    const buffers = new Map<number, Buffer>();
+    const inflight = new Set<http.ClientRequest | https.ClientRequest>();
+    let nextChunkToSchedule = startChunk;
+    let nextChunkToWrite = startChunk;
+    let activeCount = 0;
+    let aborted = false;
+    let settled = false;
+    let flushLoopRunning = false;
+
+    const finishWithError = (message: string) => {
+      if (settled) return;
+      settled = true;
+      aborted = true;
+      console.error('[ProxyServer] streamPanKaiser:', message);
+      debugLog(`streamPanKaiser ERROR ${message}`);
+      inflight.forEach((r) => {
+        try {
+          r.destroy();
+        } catch {}
+      });
+      if (!res.writableEnded) {
+        try {
+          res.destroy(new Error(message));
+        } catch {}
+      }
+    };
+
+    const finishNormally = () => {
+      if (settled) return;
+      settled = true;
+      debugLog(
+        `streamPanKaiser END panType=${panType} start=${clientRange.start} end=${clientRange.end}`,
+      );
+      if (!res.writableEnded) {
+        res.end();
+      }
+    };
+
+    const onClientGone = () => {
+      aborted = true;
+      inflight.forEach((r) => {
+        try {
+          r.destroy();
+        } catch {}
+      });
+    };
+    req.on('close', onClientGone);
+    req.on('error', onClientGone);
+    res.on('close', onClientGone);
+
+    const fetchChunk = (chunkIndex: number) => {
+      activeCount++;
+      const chunkStart = chunkIndex * chunkSize;
+      const chunkEnd = Math.min(probe.totalLength - 1, chunkStart + chunkSize - 1);
+      const rangeHeader = `bytes=${chunkStart}-${chunkEnd}`;
+      const parsedUrl = new URL(downloadUrl);
+      const isHttps = parsedUrl.protocol === 'https:';
+      const lib = isHttps ? https : http;
+      const chunkHeaders = this.buildPanDirectHeaders(
+        panType,
+        headerOverride,
+        rangeHeader,
+      ).headers;
+      const upstreamReq = lib.request(
+        downloadUrl,
+        {
+          method: 'GET',
+          headers: chunkHeaders,
+          agent: isHttps ? httpsAgent : httpAgent,
+        },
+        (upstreamRes) => {
+          const status = upstreamRes.statusCode || 0;
+          if (status !== 206 && !(status === 200 && startChunk === endChunk)) {
+            const bodyChunks: Buffer[] = [];
+            upstreamRes.on('data', (c: Buffer) => bodyChunks.push(c));
+            upstreamRes.on('end', () => {
+              activeCount--;
+              finishWithError(
+                `chunk ${chunkIndex} unexpected status=${status} body=${Buffer.concat(bodyChunks).toString('utf8').substring(0, 300)}`,
+              );
+            });
+            return;
+          }
+          const bodyChunks: Buffer[] = [];
+          upstreamRes.on('data', (c: Buffer) => bodyChunks.push(c));
+          upstreamRes.on('end', () => {
+            activeCount--;
+            if (aborted || settled) {
+              return;
+            }
+            buffers.set(chunkIndex, Buffer.concat(bodyChunks));
+            void flushSequential();
+            scheduleMore();
+          });
+          upstreamRes.on('error', (err) => {
+            activeCount--;
+            finishWithError(`chunk ${chunkIndex} stream error: ${err.message}`);
+          });
+        },
+      );
+      inflight.add(upstreamReq);
+      upstreamReq.on('close', () => inflight.delete(upstreamReq));
+      upstreamReq.on('error', (err) => {
+        activeCount--;
+        finishWithError(`chunk ${chunkIndex} request error: ${err.message}`);
+      });
+      upstreamReq.end();
+    };
+
+    const scheduleMore = () => {
+      if (aborted || settled) return;
+      while (
+        activeCount < kaiserMode.threadCount &&
+        nextChunkToSchedule <= endChunk
+      ) {
+        const current = nextChunkToSchedule;
+        nextChunkToSchedule++;
+        fetchChunk(current);
+      }
+    };
+
+    const flushSequential = async () => {
+      if (flushLoopRunning || aborted || settled) return;
+      flushLoopRunning = true;
+      try {
+        while (!aborted && !settled && buffers.has(nextChunkToWrite)) {
+          const chunkStart = nextChunkToWrite * chunkSize;
+          const buffer = buffers.get(nextChunkToWrite)!;
+          buffers.delete(nextChunkToWrite);
+          let sliceStart = 0;
+          let sliceEnd = buffer.length;
+          if (nextChunkToWrite === startChunk) {
+            sliceStart = clientRange.start - chunkStart;
+          }
+          if (nextChunkToWrite === endChunk) {
+            sliceEnd = clientRange.end - chunkStart + 1;
+          }
+          const out = buffer.subarray(sliceStart, sliceEnd);
+          if (out.length > 0 && !res.write(out)) {
+            await this.waitForWriteDrain(res);
+          }
+          nextChunkToWrite++;
+        }
+        if (
+          !aborted &&
+          !settled &&
+          nextChunkToWrite > endChunk &&
+          activeCount === 0
+        ) {
+          finishNormally();
+        }
+      } finally {
+        flushLoopRunning = false;
+      }
+    };
+
+    scheduleMore();
+  }
+
+  /**
+   * Infer container format from Content-Type, Content-Disposition filename,
+   * URL query filename, AND a small magic-byte peek — matching what native
+   * players do better than pure filename matching.
+   *
+   * Returns a short format label (mkv/mp4/avi/...) or null if unknown /
+   * Chromium-playable.
+   */
+  private detectUnsupportedFormat(
+    contentType: string,
+    downloadUrl: string,
+    magicBuf?: Buffer,
+  ): string | null {
+    const ct = (contentType || '').toLowerCase();
+    const unsupported: Array<{ key: string; label: string }> = [
+      { key: 'matroska', label: 'mkv' },
+      { key: 'x-matroska', label: 'mkv' },
+      { key: 'mkv', label: 'mkv' },
+      { key: 'avi', label: 'avi' },
+      { key: 'x-msvideo', label: 'avi' },
+      { key: 'flv', label: 'flv' },
+      { key: 'x-flv', label: 'flv' },
+      { key: 'wmv', label: 'wmv' },
+      { key: 'x-ms-wmv', label: 'wmv' },
+      { key: 'quicktime', label: 'mov' },
+    ];
+    for (const u of unsupported) {
+      if (ct.includes(u.key)) return u.label;
+    }
+
+    // Magic bytes (preferred over filename)
+    if (magicBuf && magicBuf.length >= 12) {
+      // EBML (MKV/WebM): 1A 45 DF A3
+      if (
+        magicBuf[0] === 0x1a &&
+        magicBuf[1] === 0x45 &&
+        magicBuf[2] === 0xdf &&
+        magicBuf[3] === 0xa3
+      ) {
+        // WebM is Chromium-playable; MKV (doc type matroska) is not.
+        const ascii = magicBuf.toString('ascii');
+        if (ascii.includes('webm')) return null;
+        return 'mkv';
+      }
+      // FLV
+      if (
+        magicBuf[0] === 0x46 &&
+        magicBuf[1] === 0x4c &&
+        magicBuf[2] === 0x56
+      ) {
+        return 'flv';
+      }
+      // RIFF....AVI
+      if (
+        magicBuf.toString('ascii', 0, 4) === 'RIFF' &&
+        magicBuf.toString('ascii', 8, 11) === 'AVI'
+      ) {
+        return 'avi';
+      }
+      // ftyp → mp4/m4v/mov (Chromium plays most; treat 'qt  ' as mov unsupported)
+      if (magicBuf.toString('ascii', 4, 8) === 'ftyp') {
+        const brand = magicBuf.toString('ascii', 8, 12);
+        if (brand.startsWith('qt')) return 'mov';
+        return null; // mp4/isom etc. are fine
+      }
+    }
+
+    // Filename from disposition / query — last resort
+    let fileName = '';
+    try {
+      const u = new URL(downloadUrl);
+      const rcd = u.searchParams.get('response-content-disposition') || '';
+      const m = rcd.match(/filename\*?=(?:utf-8'')?([^;]+)/i);
+      if (m) fileName = decodeURIComponent(m[1]).toLowerCase();
+      if (!fileName) {
+        fileName = (u.searchParams.get('filename') || '').toLowerCase();
+      }
+      if (!fileName) {
+        const path = u.pathname.toLowerCase();
+        const dot = path.lastIndexOf('.');
+        if (dot >= 0) fileName = path.slice(dot);
+      }
+    } catch {
+      fileName = downloadUrl.toLowerCase();
+    }
+    for (const ext of ['mkv', 'avi', 'flv', 'wmv', 'mov']) {
+      if (fileName.includes('.' + ext)) return ext;
+    }
+    return null;
+  }
+
+  /**
    * Stream a pan-CDN download URL directly to the HTTP response.
    *
    * Used by the playerContent fallback path (do=quarkDirect|ucDirect|baiduDirect).
@@ -1653,6 +2562,7 @@ export class ProxyServer {
     res: http.ServerResponse,
     panType: 'quark' | 'uc' | 'baidu',
     headerOverride?: Record<string, string>,
+    isExternalPlayer: boolean = false,
   ): Promise<void> {
     let cookie: string | null = null;
     let referer = '';
@@ -1804,18 +2714,21 @@ export class ProxyServer {
                 });
                 res.end(body);
               }
-              // 412 from Quark CDN can mean: (1) __puus is stale, (2) the
+              // 412 from Quark/UC CDN can mean: (1) __puus is stale, (2) the
               // download URL's auth_key has expired, or (3) Cookie was sent
               // when it shouldn't be. Only case (1) warrants a login prompt —
               // the others just need a fresh playerContent call. So verify
               // login validity before popping up the QR code dialog.
-              if (status === 412 && panType === 'quark') {
+              if (status === 412 && (panType === 'quark' || panType === 'uc')) {
                 let loginActuallyExpired = false;
                 try {
-                  const validity = await QuarkPanService.checkTokenValid();
+                  const validity =
+                    panType === 'quark'
+                      ? await QuarkPanService.checkTokenValid()
+                      : await UCPanService.checkTokenValid();
                   loginActuallyExpired = !validity.valid;
                   console.warn(
-                    '[ProxyServer] streamPanDirect: Quark 412 detected, checkTokenValid=',
+                    `[ProxyServer] streamPanDirect: ${panType} 412 detected, checkTokenValid=`,
                     validity.valid,
                     loginActuallyExpired
                       ? '-> emitting pan:loginExpired'
@@ -1832,7 +2745,7 @@ export class ProxyServer {
                 if (loginActuallyExpired) {
                   try {
                     BrowserWindow.getAllWindows().forEach((w) =>
-                      w.webContents.send('pan:loginExpired', 'quark'),
+                      w.webContents.send('pan:loginExpired', panType),
                     );
                   } catch (e: any) {
                     console.warn(
@@ -1901,7 +2814,106 @@ export class ProxyServer {
             return;
           }
 
-          // TS segment or other media: stream bytes through
+          // Detect unsupported formats for Chromium (MKV/AVI/FLV/...).
+          // Prefer Content-Type + magic bytes over bare filename matching.
+          // Skip when request comes from external player (VLC) via player=external.
+          if (!isExternalPlayer) {
+            // Peek first 64KB to sniff magic while keeping the rest streamable.
+            const peekChunks: Buffer[] = [];
+            let peeked = 0;
+            const PEEK_MAX = 64 * 1024;
+            let settled = false;
+
+            const finishPeek = () => {
+              if (settled) return;
+              settled = true;
+              const peekBuf = Buffer.concat(peekChunks);
+              const format = this.detectUnsupportedFormat(
+                contentType,
+                downloadUrl,
+                peekBuf,
+              );
+              if (format) {
+                console.warn(
+                  '[ProxyServer] streamPanDirect: Unsupported format=',
+                  format,
+                  'ct=',
+                  contentType,
+                  '-> 415 JSON',
+                );
+                upstreamRes.resume();
+                const errorJson = JSON.stringify({
+                  error: 'UNSUPPORTED_FORMAT',
+                  message:
+                    '此视频格式不支持网页播放，请使用外部播放器（如VLC）打开',
+                  format,
+                  directUrl: downloadUrl,
+                });
+                if (!res.headersSent) {
+                  res.writeHead(415, {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                  });
+                  res.end(errorJson);
+                }
+                return;
+              }
+
+              // Supported — stream peeked bytes + remaining body
+              const respHeaders: Record<string, string> = {
+                'Content-Type':
+                  upstreamRes.headers['content-type'] || 'video/mp4',
+                'Accept-Ranges': 'bytes',
+                'Access-Control-Allow-Origin': '*',
+              };
+              if (upstreamRes.headers['content-length']) {
+                respHeaders['Content-Length'] = String(
+                  upstreamRes.headers['content-length'],
+                );
+              }
+              if (upstreamRes.headers['content-range']) {
+                respHeaders['Content-Range'] = String(
+                  upstreamRes.headers['content-range'],
+                );
+              }
+              if (!res.headersSent) {
+                res.writeHead(status, respHeaders);
+              }
+              if (peekBuf.length > 0) {
+                res.write(peekBuf);
+              }
+              upstreamRes.on('error', () => {
+                try {
+                  res.end();
+                } catch {}
+              });
+              upstreamRes.pipe(res);
+            };
+
+            upstreamRes.on('data', (chunk: Buffer) => {
+              if (settled) return;
+              peekChunks.push(chunk);
+              peeked += chunk.length;
+              if (peeked >= PEEK_MAX) {
+                upstreamRes.pause();
+                finishPeek();
+                upstreamRes.resume();
+              }
+            });
+            upstreamRes.on('end', () => {
+              finishPeek();
+            });
+            upstreamRes.on('error', () => {
+              if (!res.headersSent) {
+                try {
+                  res.end();
+                } catch {}
+              }
+            });
+            return;
+          }
+
+          // External player path: stream bytes through without format gate
           const respHeaders: Record<string, string> = {
             'Content-Type': upstreamRes.headers['content-type'] || 'video/mp4',
             'Accept-Ranges': 'bytes',
@@ -2359,6 +3371,99 @@ export class ProxyServer {
     }
     const proxiedUri = `http://127.0.0.1:${port}/ts?url=${encodeURIComponent(absoluteUrl)}${headerParam}`;
     return directive.replace(`URI="${originalUri}"`, `URI="${proxiedUri}"`);
+  }
+
+  /**
+   * Stream the result from spider's proxy method to HTTP response.
+   * Handles the InputStream returned by jar's Proxy.proxy() or spider.proxyLocal().
+   */
+  private async streamSpiderResult(
+    result: {
+      status: number;
+      mime: string;
+      stream: any;
+      headers?: Record<string, string>;
+    },
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    params: Record<string, string>,
+  ): Promise<void> {
+    const { status, mime, stream, headers } = result;
+    const effectiveMime = this.resolveVideoMime(mime, params);
+
+    console.log(
+      '[ProxyServer] streamSpiderResult: status=',
+      status,
+      'mime=',
+      mime,
+      'effectiveMime=',
+      effectiveMime,
+      'hasStream=',
+      !!stream,
+    );
+
+    const headerObj: http.OutgoingHttpHeaders = {
+      'Content-Type': effectiveMime,
+      'Accept-Ranges': 'bytes',
+      Connection: 'keep-alive',
+    };
+
+    if (headers) {
+      for (const [k, v] of Object.entries(headers)) {
+        headerObj[k] = v;
+      }
+    }
+
+    const effectiveStatus = status === 206 ? 200 : status || 200;
+
+    if (!stream) {
+      try {
+        res.writeHead(effectiveStatus, headerObj);
+      } catch {}
+      res.end();
+      return;
+    }
+
+    try {
+      res.writeHead(effectiveStatus, headerObj);
+    } catch {
+      try {
+        stream.closeSync();
+      } catch {}
+      return;
+    }
+
+    // Stream the InputStream to response
+    // The stream is a Java InputStream, we need to read it in chunks
+    const bufferSize = 64 * 1024; // 64KB chunks
+    const buffer = Buffer.alloc(bufferSize);
+
+    try {
+      while (true) {
+        // Read from Java InputStream
+        const bytesRead = await new Promise<number>((resolve) => {
+          stream.read(buffer, 0, bufferSize, (err: any, len: number) => {
+            if (err) resolve(-1);
+            else resolve(len);
+          });
+        });
+
+        if (bytesRead <= 0) break;
+
+        res.write(buffer.slice(0, bytesRead));
+      }
+      res.end();
+    } catch (e: any) {
+      console.error('[ProxyServer] streamSpiderResult: error:', e.message);
+      try {
+        stream.closeSync();
+      } catch {}
+      if (!res.writableEnded) {
+        try {
+          res.end();
+        } catch {}
+      }
+    }
   }
 
   /**

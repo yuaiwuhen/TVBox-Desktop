@@ -41,13 +41,44 @@ export interface PanPlayResult {
 
 export class PanResolver {
   /**
+   * 从 URL 中检测网盘类型（基于域名）
+   *
+   * 这是最准确的方式，因为播放 URL 中直接包含网盘域名。
+   * 优先级高于名称检测。
+   */
+  static detectPanTypeFromUrl(url: string): PanType {
+    if (!url) return 'unknown';
+    const lower = url.toLowerCase();
+
+    // 按域名精确匹配，顺序从最特异的到最通用的
+    if (lower.includes('pan.quark.cn') || lower.includes('quark.cn')) return 'quark';
+    if (lower.includes('pan.baidu.com') || lower.includes('baidupcs.com') || lower.includes('baidu.com/share')) return 'baidu';
+    if (lower.includes('drive.uc.cn') || lower.includes('yun.uc.cn') || lower.includes('uc.cn')) return 'uc';
+    if (lower.includes('aliyundrive.com') || lower.includes('alipan.com') || lower.includes('aliyun.com')) return 'aliyun';
+    if (lower.includes('bilibili.com') || lower.includes('bilivideo.com')) return 'bili';
+    if (lower.includes('115.com')) return '115';
+    if (lower.includes('cloud.189.cn')) return '189';
+    if (lower.includes('yun.139.com')) return '139';
+    if (lower.includes('123pan.com')) return '123';
+
+    return 'unknown';
+  }
+
+  /**
    * 从 flag 和 url 中识别网盘类型
    *
    * 注意：检测顺序很重要。'UC' 必须在 'baidu' 之前（避免"百度"误匹配），
    * '123' 必须在 'uc' 之后（避免"123"误匹配其他）。
    * 各类型关键词对应该 spider jar 中的 vod_play_from 命名（如 "天翼原画"）。
+   *
+   * 优先使用 URL 域名检测，回退到名称检测。
    */
   static detectPanType(flag: string, url: string): PanType {
+    // 优先用 URL 域名检测（最准确）
+    const typeByUrl = this.detectPanTypeFromUrl(url);
+    if (typeByUrl !== 'unknown') return typeByUrl;
+
+    // 回退到名称检测
     const text = `${flag} ${url}`;
     const lower = text.toLowerCase();
 
@@ -103,6 +134,8 @@ export class PanResolver {
     if (
       lower.includes('baidu') ||
       text.includes('百度') ||
+      text.includes('B度') ||
+      text.includes('b度') ||
       lower.includes('pan.baidu')
     ) {
       return 'baidu';

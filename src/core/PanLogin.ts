@@ -5,6 +5,8 @@
  * 支持夸克、UC、阿里云盘、百度网盘、B站 的扫码登录。
  */
 
+import { saveToFile } from './ConfigSync';
+
 export type PanType = 'quark' | 'uc' | 'aliyun' | 'baidu' | 'bili';
 
 export interface PanLoginInfo {
@@ -121,6 +123,7 @@ export class PanLogin {
 
   static saveLoginInfo(info: PanLoginInfo): void {
     localStorage.setItem(STORAGE_KEYS[info.panType], JSON.stringify(info));
+    saveToFile();
     console.log(`[PanLogin] Saved login info for ${info.panType}:`, {
       panType: info.panType,
       nickname: info.nickname,
@@ -135,8 +138,11 @@ export class PanLogin {
   static logout(panType: PanType): void {
     const key = STORAGE_KEYS[panType];
     const beforeRemove = localStorage.getItem(key);
-    console.log(`[PanLogin] logout ${panType}, key=${key}, hadData=${!!beforeRemove}`);
+    console.log(
+      `[PanLogin] logout ${panType}, key=${key}, hadData=${!!beforeRemove}`,
+    );
     localStorage.removeItem(key);
+    saveToFile();
     const afterRemove = localStorage.getItem(key);
     console.log(`[PanLogin] logout ${panType}, after remove: ${!!afterRemove}`);
     const ipc = getIPC();

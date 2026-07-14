@@ -196,3 +196,19 @@ export interface ISpider {
   destroy(): void;
   action(actionId: string, actionData: any): Promise<string>;
 }
+
+/**
+ * Process image URL with embedded headers (@Referer, @User-Agent, @Cookie).
+ * Spider may return URLs like:
+ *   https://img.doubanio.com/xxx.jpg@Referer=https://movie.douban.com/@User-Agent=Mozilla/5.0...
+ * Browser cannot set these headers directly, so we route through proxy.
+ * Returns the proxy URL if headers are embedded, otherwise the original URL.
+ */
+export function processImageUrl(url: string | undefined, proxyPort: number = 9978): string {
+  if (!url) return '';
+  // Check if URL contains embedded headers
+  if (url.includes('@Referer=') || url.includes('@User-Agent=') || url.includes('@Cookie=')) {
+    return `http://127.0.0.1:${proxyPort}/image?url=${encodeURIComponent(url)}`;
+  }
+  return url;
+}

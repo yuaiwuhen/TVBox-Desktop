@@ -70,11 +70,28 @@ export class BaiduPanService {
     return this.syncedCookie;
   }
 
+  private static encryptBaiduCookie(cookie: string, xorKey: string): string {
+    const keyChars = xorKey.split('');
+    const out: string[] = [];
+    for (let i = 0; i < cookie.length; i++) {
+      const c = cookie.charCodeAt(i);
+      const k = keyChars[i % keyChars.length].charCodeAt(0);
+      out.push(String.fromCharCode(c ^ k));
+    }
+    const xoredStr = out.join('');
+    const buf = Buffer.from(xoredStr, 'utf8');
+    return buf.toString('base64');
+  }
+
   /**
-   * Sync Baidu cookie to the Guard spider's SharedPreferences
-   * (NewWexFnw_preferences, key Wex_baidu_cookie). This lets the spider's
-   * internal pan resolver read the Baidu cookie when resolving Baidu shares.
-   * Mirrors QuarkPanService.syncCookieToJVM's guard-prefs step.
+   * Sync Baidu cookie to JVM SharedPreferences so the spider can read it.
+   *
+   * The spider reads Baidu cookie from:
+   *   1. com.github.catvod.tvbox_preferences — key "mi.baidu" (XOR-encrypted with "miwudi")
+   *      or ".baidu" (plaintext fallback) — via e_1.a() -> e_1.b("mi.baidu", ".baidu")
+   *   2. NewWexFnw_preferences — key "Wex_baidu_cookie" — used by guard spider static field
+   *
+   * Mirrors QuarkPanService.syncCookieToJVM which writes both prefs for Quark.
    */
   static async syncToGuardPrefs(cookie: string): Promise<void> {
     if (!cookie) return;
@@ -93,6 +110,25 @@ export class BaiduPanService {
         console.warn('[BaiduPanService] Init.context() returned null');
         return;
       }
+
+      // Write to main spider preferences (com.github.catvod.tvbox_preferences)
+      // — key "mi.baidu" (XOR-encrypted with "miwudi") for e_1.a()
+      // — also plaintext ".baidu" as fallback
+      const XOR_KEY = 'miwudi';
+      const PREFS_NAME = 'com.github.catvod.tvbox_preferences';
+      const encryptedCookie = this.encryptBaiduCookie(cookie, XOR_KEY);
+      const prefs = ctx.getSharedPreferencesSync(PREFS_NAME, 0);
+      if (prefs) {
+        const editor = prefs.editSync();
+        editor.putStringSync('mi.baidu', encryptedCookie);
+        editor.putStringSync('.baidu', cookie);
+        editor.applySync();
+        console.log(
+          `[BaiduPanService] Synced cookie to ${PREFS_NAME} (mi.baidu encrypted + .baidu plain), length: ${cookie.length}`,
+        );
+      }
+
+      // Write to guard spider preferences (NewWexFnw_preferences)
       const GUARD_PREFS = 'NewWexFnw_preferences';
       const guardPrefs = ctx.getSharedPreferencesSync(GUARD_PREFS, 0);
       const editor = guardPrefs.editSync();

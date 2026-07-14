@@ -9,6 +9,7 @@ import {
   type FavoriteRecord,
 } from '../core/Database';
 import { PanLogin, type PanType } from '../core/PanLogin';
+import { saveToFile } from '../core/ConfigSync';
 import type {
   SourceBean,
   Movie,
@@ -155,6 +156,7 @@ export const useAppStore = defineStore('app', () => {
   function setConfigUrl(url: string) {
     configUrl.value = url;
     localStorage.setItem('tvbox_config_url', url);
+    saveToFile();
   }
 
   async function loadConfig(): Promise<boolean> {
@@ -214,6 +216,7 @@ export const useAppStore = defineStore('app', () => {
     );
     activeSiteKey.value = newUniqueKey;
     localStorage.setItem('tvbox_active_site', newUniqueKey);
+    saveToFile();
     if (site) configParser.setHomeSource(site);
     resetHome(oldKey);
   }
@@ -221,6 +224,7 @@ export const useAppStore = defineStore('app', () => {
   function setDefaultParse(name: string) {
     defaultParseName.value = name;
     localStorage.setItem('tvbox_default_parse', name);
+    saveToFile();
     const parse = parses.value.find((p) => p.name === name);
     if (parse) configParser.setDefaultParse(parse);
   }
@@ -470,8 +474,10 @@ export const useAppStore = defineStore('app', () => {
   ) {
     if (!activeSite.value) return;
     categoryLoading.value = true;
-    // Clear current list so skeleton shows during load
-    categoryVodList.value = [];
+    // Only clear the list on page 1 (or first load); scroll-to-bottom appends
+    if (pg === '1') {
+      categoryVodList.value = [];
+    }
     console.log(
       `[Store] loadCategory: site=${activeSite.value.name} key=${activeSite.value.key}, tid=${tid}, pg=${pg}, filterValues=${JSON.stringify(filterValues)}`,
     );
@@ -506,7 +512,13 @@ export const useAppStore = defineStore('app', () => {
         `[Store] loadCategory: parsed list=${result.list?.length || 0}, page=${result.page || pg}, pagecount=${result.pagecount || 1}`,
       );
 
-      categoryVodList.value = result.list || [];
+      if (pg === '1') {
+        categoryVodList.value = result.list || [];
+      } else {
+        // Append for scroll-to-bottom pagination
+        const newItems = result.list || [];
+        categoryVodList.value = [...categoryVodList.value, ...newItems];
+      }
       categoryPage.value = parseInt(result.page || pg);
       categoryPageCount.value = parseInt(result.pagecount || '1');
     } catch (e) {
@@ -619,6 +631,10 @@ export const useAppStore = defineStore('app', () => {
 
     playLoading.value = true;
     playError.value = '';
+    // Clear current URL immediately so old player stops before new
+    // one starts loading. Without this, switching sources leaves the
+    // old video playing until loadPlay completes (seconds later).
+    currentPlayUrl.value = '';
     currentPlayIndex.value = episodeIndex;
     if (episodes) currentEpisodes.value = episodes;
     try {
@@ -662,20 +678,68 @@ export const useAppStore = defineStore('app', () => {
         hasHeader: !!result.header,
         parse: result.parse,
         urlPreview: result.url ? result.url.substring(0, 100) : '(none)',
+        error: (result as any).error,
       });
 
-      if (!result.url) {
-        const isPanType =
-          flag.toLowerCase().includes('quark') ||
-          flag.toLowerCase().includes('uc') ||
-          flag.toLowerCase().includes('baidu') ||
-          flag.toLowerCase().includes('ali');
-        if (isPanType) {
-          playError.value =
-            '网盘资源解析失败，可能是分享链接已失效或网盘登录已过期，请重新登录后再试';
+      // 检查是否是 UNSUPPORTED_FORMAT 错误（由 ProxyServer 返回）
+      if ((result as any).error === 'UNSUPPORTED_FORMAT') {
+        console.warn(
+          '[Store] loadPlay: 不支持的视频格式:',
+          (result as any).format,
+        );
+
+        const vlcPath = localStorage.getItem('tvbox_vlc_path') || '';
+        const directUrl = (result as any).directUrl || '';
+
+        if (vlcPath) {
+          // 已配置VLC，直接使用VLC播放，不弹窗
+          console.log('[Store] loadPlay: 使用VLC播放:', vlcPath, directUrl);
+          const { ipcRenderer } = window.require('electron');
+          await ipcRenderer.invoke('open-external-player', vlcPath, directUrl);
+
+          // 保存播放记录（标记为外部播放）
+          if (currentVod.value) {
+            await Database.saveHistory({
+              ...currentVod.value,
+              sourceKey: activeSite.value.key,
+              playUrl: directUrl,
+              playFlag: flag,
+              playIndex: episodeIndex,
+              progress: 0,
+              duration: 0,
+              timestamp: Date.now(),
+            });
+          }
+
+          playLoading.value = false;
+          return;
         } else {
-          playError.value = '未能获取播放地址，该资源可能已下线';
+          // 没有配置VLC，弹窗提示并显示播放地址
+          playError.value =
+            (result as any).message || '此视频格式不支持网页播放';
+
+          const { ipcRenderer } = window.require('electron');
+          ipcRenderer.invoke('show-unsupported-format-dialog', {
+            format: (result as any).format || '未知格式',
+            directUrl: directUrl,
+            hasVlcPath: false,
+            vlcPath: '',
+          });
+
+          playLoading.value = false;
+          return;
         }
+      }
+
+      if (!result.url) {
+        // 优先使用 spider 返回的具体错误信息
+        const spiderMsg = (result as any).msg || (result as any).errMsg || '';
+        if (spiderMsg) {
+          playError.value = spiderMsg;
+        } else {
+          playError.value = '视频资源已失效，请尝试其他源或稍后重试';
+        }
+        playLoading.value = false;
         return;
       }
       // 先获取历史进度，再设置URL（避免时序问题）
@@ -707,6 +771,94 @@ export const useAppStore = defineStore('app', () => {
         } catch (e) {
           console.warn('[App] VIP parse failed:', e);
         }
+      }
+
+      // 主动检测视频格式（在播放器弹出前）
+      // 通过IPC让主进程发GET请求检测Content-Type
+      // 这比文件名检测更可靠，因为使用实际的HTTP响应头
+      const isProxyUrl =
+        result.url.includes('/proxy?do=ali') ||
+        result.url.includes('/proxy?do=quarkDirect') ||
+        result.url.includes('/proxy?do=ucDirect') ||
+        result.url.includes('/proxy?do=baiduDirect') ||
+        result.url.includes('/proxy?do=aliyunDirect') ||
+        result.url.includes('/proxy?do=115Direct');
+
+      if (isProxyUrl) {
+        console.log(
+          '[Store] loadPlay: 检测视频格式...',
+          result.url.substring(0, 80),
+        );
+        const { ipcRenderer } = window.require('electron');
+        let headerObj: Record<string, string> = {};
+        if (result.header) {
+          try {
+            headerObj = JSON.parse(result.header);
+          } catch {}
+        }
+        let formatInfo: any;
+        try {
+          formatInfo = await ipcRenderer.invoke(
+            'check-video-format',
+            result.url,
+            headerObj,
+          );
+        } catch (e: any) {
+          console.warn(
+            '[Store] loadPlay: 格式检测失败，继续尝试播放:',
+            e.message,
+          );
+          formatInfo = { error: e.message };
+        }
+        console.log('[Store] loadPlay: 格式检测结果:', formatInfo);
+
+        if (formatInfo.unsupported) {
+          const vlcPath = localStorage.getItem('tvbox_vlc_path') || '';
+          // VLC 使用 proxy URL 并添加 player=external 参数
+          // ProxyServer 会跳过格式检测，直接流式传输
+          const separator = result.url.includes('?') ? '&' : '?';
+          const vlcUrl = result.url + separator + 'player=external';
+
+          if (vlcPath) {
+            // 已配置VLC，直接调用VLC播放，不弹窗
+            console.log('[Store] loadPlay: 使用VLC播放:', vlcPath, vlcUrl);
+            await ipcRenderer.invoke('open-external-player', vlcPath, vlcUrl);
+
+            if (currentVod.value) {
+              await Database.saveHistory({
+                ...currentVod.value,
+                sourceKey: activeSite.value.key,
+                playUrl: vlcUrl,
+                playFlag: flag,
+                playIndex: episodeIndex,
+                progress: 0,
+                duration: 0,
+                timestamp: Date.now(),
+              });
+            }
+
+            playLoading.value = false;
+            return;
+          } else {
+            // 没有配置VLC，弹窗提示并显示播放地址
+            playError.value =
+              formatInfo.message ||
+              '此视频格式不支持网页播放，请使用第三方播放器打开';
+            await ipcRenderer.invoke('show-unsupported-format-dialog', {
+              format: formatInfo.format || formatInfo.contentType || '未知格式',
+              directUrl: vlcUrl,
+              hasVlcPath: false,
+              vlcPath: '',
+            });
+            playLoading.value = false;
+            return;
+          }
+        } else if (formatInfo.invalid) {
+          playError.value = '视频资源已失效，请尝试其他源或稍后重试';
+          playLoading.value = false;
+          return;
+        }
+        // 格式支持或检测失败，继续播放
       }
 
       // 设置URL（触发VideoPlayer重新初始化，此时resumeProgress已正确）
@@ -860,26 +1012,32 @@ export const useAppStore = defineStore('app', () => {
   function setPlayType(v: number) {
     playType.value = v;
     localStorage.setItem('tvbox_play_type', String(v));
+    saveToFile();
   }
   function setAutoPlayNext(v: boolean) {
     autoPlayNext.value = v;
     localStorage.setItem('tvbox_autoplay_next', String(v));
+    saveToFile();
   }
   function setDohIndex(v: number) {
     dohIndex.value = v;
     localStorage.setItem('tvbox_doh_index', String(v));
+    saveToFile();
   }
   function setSearchViewMode(v: number) {
     searchViewMode.value = v;
     localStorage.setItem('tvbox_search_view', String(v));
+    saveToFile();
   }
   function setLiveUrl(v: string) {
     liveUrl.value = v;
     localStorage.setItem('tvbox_live_url', v);
+    saveToFile();
   }
   function setEpgUrl(v: string) {
     epgUrl.value = v;
     localStorage.setItem('tvbox_epg_url', v);
+    saveToFile();
   }
 
   return {

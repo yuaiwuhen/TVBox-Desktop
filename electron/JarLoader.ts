@@ -23,6 +23,8 @@ import { DexConverter, dexConverter } from './DexConverter';
 // because neither QuarkPanService nor ProxyServer uses jarLoader at
 // module-load time — only inside method bodies.
 import { QuarkPanService } from './QuarkPanService';
+import { UCPanService } from './UCPanService';
+import { BaiduPanService } from './BaiduPanService';
 import { proxyServer } from './ProxyServer';
 
 // Create require for loading CommonJS modules in ESM
@@ -425,7 +427,28 @@ export class JarLoader {
           'libLoadNiMa.so',
         );
 
-        // If not found in JAR, check InitOrigin.init() download location
+        // If not found in JAR, check the shared native_libs directory
+        // (where InitOrigin.init() downloads libLoadNiMa.so)
+        if (!libPath) {
+          const nativeLibDir = path.join(this.jarCacheDir, 'native_libs');
+          const sharedLibPath = path.join(nativeLibDir, 'libLoadNiMa.so');
+          console.log(
+            '[JarLoader] Checking shared native_libs dir for libLoadNiMa.so:',
+            sharedLibPath,
+          );
+          if (fs.existsSync(sharedLibPath)) {
+            const stat = fs.statSync(sharedLibPath);
+            console.log(
+              '[JarLoader] Found libLoadNiMa.so in native_libs, size:',
+              stat.size,
+              'bytes',
+            );
+            libPath = sharedLibPath;
+          }
+        }
+
+        // If still not found, check InitOrigin.init() download location
+        // (per-spider filesDir, set during spider init)
         if (!libPath) {
           try {
             const InitOrigin = this.java.importClass(
@@ -459,6 +482,23 @@ export class JarLoader {
           }
         }
 
+        // Last resort: trigger manual download to native_libs dir
+        if (!libPath) {
+          console.warn(
+            '[JarLoader] libLoadNiMa.so not found anywhere, attempting manual download...',
+          );
+          const nativeLibDir = path.join(this.jarCacheDir, 'native_libs');
+          if (!fs.existsSync(nativeLibDir)) {
+            fs.mkdirSync(nativeLibDir, { recursive: true });
+          }
+          await this.downloadLibLoadNiMaManually(nativeLibDir);
+          const downloadedPath = path.join(nativeLibDir, 'libLoadNiMa.so');
+          if (fs.existsSync(downloadedPath)) {
+            libPath = downloadedPath;
+            console.log('[JarLoader] Manual download succeeded:', libPath);
+          }
+        }
+
         if (libPath) {
           // Store in source isolation map
           this.sourceIsolation.set(clsKey, {
@@ -466,8 +506,10 @@ export class JarLoader {
             needsUnidbg: true,
           });
 
-          // Set Java system property so stub can find the native library
-          // LoadNiMa-stub reads this property to locate libLoadNiMa.so
+          // Set Java system properties so the LoadNiMa stub can locate:
+          //   1. The native library (libLoadNiMa.so)
+          //   2. The unidbg loader JAR (for subprocess decode)
+          //   3. The java executable (bundled JRE in packaged mode)
           try {
             const SystemClass = this.java.importClass('java.lang.System');
             SystemClass.setPropertySync(
@@ -478,6 +520,61 @@ export class JarLoader {
               `[JarLoader] Set System property for native lib path:`,
               libPath,
             );
+
+            // Locate unidbg loader JAR
+            const unidbgCandidates = [
+              path.join(
+                process.resourcesPath || '',
+                'tools',
+                'unidbg-loader-1.0.0-shaded.jar',
+              ),
+              path.join(
+                process.resourcesPath || '',
+                'tools',
+                'unidbg-loader-1.0.0.jar',
+              ),
+              path.join(
+                process.cwd(),
+                'tools',
+                'unidbg-loader',
+                'target',
+                'unidbg-loader-1.0.0.jar',
+              ),
+              path.join(
+                __dirname,
+                '..',
+                'tools',
+                'unidbg-loader-1.0.0-shaded.jar',
+              ),
+              path.join(__dirname, '..', 'tools', 'unidbg-loader-1.0.0.jar'),
+            ];
+            for (const candidate of unidbgCandidates) {
+              if (fs.existsSync(candidate)) {
+                SystemClass.setPropertySync('tvbox.unidbg.jar', candidate);
+                console.log(
+                  '[JarLoader] Set System property tvbox.unidbg.jar:',
+                  candidate,
+                );
+                break;
+              }
+            }
+
+            // Locate bundled java executable
+            const jreDir = path.join(process.resourcesPath || '', 'jre');
+            const javaExeCandidates = [
+              path.join(jreDir, 'bin', 'java.exe'),
+              path.join(jreDir, 'bin', 'java'),
+            ];
+            for (const candidate of javaExeCandidates) {
+              if (fs.existsSync(candidate)) {
+                SystemClass.setPropertySync('tvbox.java.exe', candidate);
+                console.log(
+                  '[JarLoader] Set System property tvbox.java.exe:',
+                  candidate,
+                );
+                break;
+              }
+            }
           } catch (e: any) {
             console.warn(
               '[JarLoader] Failed to set System property:',
@@ -821,6 +918,21 @@ export class JarLoader {
             jvmOpts.libPath = jvmLib;
             jvmOpts.isPackagedElectron = true;
             console.log('[JarLoader] Using bundled JRE:', jvmLib);
+
+            // CRITICAL: Add jre/bin/ to PATH so Windows can find the JRE's
+            // dependent DLLs (java.dll, jli.dll, zip.dll, etc.) when loading
+            // jvm.dll. When java.exe runs from jre/bin/, the DLL search path
+            // includes jre/bin/ automatically. But when java-bridge loads
+            // jvm.dll (from jre/bin/server/jvm.dll) directly via LoadLibrary,
+            // Windows only searches jre/bin/server/ (the loaded DLL's directory)
+            // and the app's directory — NOT jre/bin/. Without this, the JVM
+            // fails to initialize with "Unable to load JVM" or similar errors.
+            const jreBinDir = path.join(bundledJre, 'bin');
+            if (fs.existsSync(jreBinDir)) {
+              const oldPath = process.env.PATH || '';
+              process.env.PATH = jreBinDir + path.delimiter + oldPath;
+              console.log('[JarLoader] Added JRE bin/ to PATH:', jreBinDir);
+            }
           } else {
             console.warn(
               '[JarLoader] Bundled JVM library not found under',
@@ -858,16 +970,24 @@ export class JarLoader {
     } catch (e: any) {
       console.error('[JarLoader] Failed to load java-bridge:', e.message || e);
       console.error('[JarLoader] Error code:', e.code || 'unknown');
+      console.error('[JarLoader] Error stack:', e.stack || 'no stack');
+      // Log PATH and resourcesPath for debugging
+      console.error('[JarLoader] PATH:', process.env.PATH?.substring(0, 500));
+      console.error(
+        '[JarLoader] resourcesPath:',
+        process.resourcesPath || 'not set',
+      );
+      console.error('[JarLoader] isPackaged:', app.isPackaged);
 
       if (e.code === 'MODULE_NOT_FOUND') {
         this.lastError =
-          'java-bridge module not found. Please run: pnpm install';
-      } else if (e.message && e.message.includes('DLL')) {
-        this.lastError =
-          'java-bridge native DLL failed to load. Check Visual C++ Redistributable 2015+ is installed.';
-      } else if (e.message && e.message.includes('JVM')) {
-        this.lastError =
-          'JVM not found. Check JAVA_HOME points to JDK directory.';
+          'java-bridge 模块未找到。请重新安装应用或执行 pnpm install。';
+      } else if (
+        /jvm|JAVA_HOME|java runtime|cannot find|dll|libjvm|Visual C\+\+/i.test(
+          e.message || '',
+        )
+      ) {
+        this.lastError = `找不到 Java Runtime。打包版请确保 resources/jre 完整；开发版请设置 JAVA_HOME 指向 JDK。若已打包请安装 VC++ 2015+ 运行库。\n详情: ${e.message || '未知错误'}`;
       } else {
         this.lastError = `java-bridge failed: ${e.message || 'unknown error'}`;
       }
@@ -1088,8 +1208,15 @@ export class JarLoader {
         );
       }
 
-      // Write to cache
-      fs.writeFileSync(cachePath, jarData);
+      // Write to cache using temp file + rename with EPERM/EBUSY retry.
+      // Windows antivirus / file locks may transiently block writes to the
+      // cache directory; retrying with backoff avoids a hard failure.
+      const writeOk = await this.writeWithRetry(cachePath, jarData);
+      if (!writeOk) {
+        this.lastError = `Failed to write JAR cache after retries: ${cachePath}`;
+        console.error('[JarLoader]', this.lastError);
+        return false;
+      }
       console.log('[JarLoader] Cached to:', cachePath);
       this.lastError = '';
       return true;
@@ -1098,6 +1225,63 @@ export class JarLoader {
       console.error('[JarLoader] Download failed:', e);
       return false;
     }
+  }
+
+  /**
+   * Write a buffer to cachePath using a temp file + atomic rename.
+   * Retries on EPERM/EBUSY/EACCES (Windows file lock / antivirus).
+   */
+  private async writeWithRetry(
+    cachePath: string,
+    data: Buffer,
+  ): Promise<boolean> {
+    const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+    const maxAttempts = 5;
+    const baseDelayMs = 300;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        // Write to temp file first to avoid partial writes corrupting cache
+        fs.writeFileSync(tmpPath, data);
+
+        // Atomic rename (on same filesystem). If target exists, overwrite.
+        try {
+          fs.renameSync(tmpPath, cachePath);
+        } catch (renameErr: any) {
+          // rename may fail if target is locked; try unlink + rename
+          if (fs.existsSync(cachePath)) {
+            try {
+              fs.unlinkSync(cachePath);
+            } catch {}
+          }
+          fs.renameSync(tmpPath, cachePath);
+        }
+        return true;
+      } catch (e: any) {
+        const code = e.code || '';
+        const isTransient =
+          code === 'EPERM' ||
+          code === 'EBUSY' ||
+          code === 'EACCES' ||
+          code === 'ENOTEMPTY';
+        console.warn(
+          `[JarLoader] Write attempt ${attempt}/${maxAttempts} failed: ${code} ${e.message}`,
+        );
+        // Clean up temp file if it exists
+        try {
+          if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+        } catch {}
+
+        if (!isTransient || attempt === maxAttempts) {
+          console.error('[JarLoader] Write failed permanently:', e);
+          return false;
+        }
+        // Exponential backoff: 300ms, 600ms, 1200ms, 2400ms
+        const delay = baseDelayMs * Math.pow(2, attempt - 1);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+    return false;
   }
 
   /**
@@ -1951,6 +2135,28 @@ export class JarLoader {
           );
         }
 
+        // CRITICAL: Set InitOrigin.oOoOoOo0O0O0oO0o (filesDir) BEFORE calling
+        // InitOrigin.init(). init() reads this field to determine where to
+        // download native libraries (libLoadNiMa.so). If null, init() silently
+        // skips the download, and unidbg can't decrypt API responses —
+        // causing homeContent to return empty for Wex* sources.
+        try {
+          const nativeLibDir = path.join(this.jarCacheDir, 'native_libs');
+          if (!fs.existsSync(nativeLibDir)) {
+            fs.mkdirSync(nativeLibDir, { recursive: true });
+          }
+          InitOrigin.oOoOoOo0O0O0oO0o = nativeLibDir;
+          console.log(
+            '[JarLoader] InitOrigin.oOoOoOo0O0O0oO0o (filesDir) set to:',
+            nativeLibDir,
+          );
+        } catch (dirErr: any) {
+          console.warn(
+            '[JarLoader] Failed to set InitOrigin filesDir:',
+            dirErr.message,
+          );
+        }
+
         // Verify context
         const ctx = await InitOrigin.context();
         console.log('[JarLoader] InitOrigin.context() =', ctx ? 'OK' : 'null');
@@ -2522,26 +2728,54 @@ export class JarLoader {
       }
     }
 
-    // If "url" already exists, just rewrite it (non-Guard spider path).
+    // If "url" already exists, use it directly (non-Guard spider path).
+    // Still must rewrite GoProxy /kaiser URLs — libwexproxy.so is ARM-only
+    // and cannot run on Desktop. Convert to our streamPanDirect endpoints.
     if (typeof parsed.url === 'string') {
-      parsed.url = this.rewriteGoProxyUrl(parsed.url, flag);
-      if (parsed.header) {
-        const headerStr =
-          typeof parsed.header === 'object'
-            ? JSON.stringify(parsed.header)
-            : parsed.header;
-        // Encode header into proxy URL so ProxyServer can use spider-provided
-        // UA/Referer. Baidu CDN's sign is bound to the spider's Android UA;
-        // without this, the proxy sends a Windows UA → 31362 "sign error".
-        if (
-          typeof parsed.url === 'string' &&
-          parsed.url.includes('/proxy?do=') &&
-          !parsed.url.includes('header=')
-        ) {
-          parsed.url = parsed.url + '&header=' + encodeURIComponent(headerStr);
-        }
+      let headerStr: string | undefined;
+      if (parsed.header && typeof parsed.header === 'object') {
+        headerStr = JSON.stringify(parsed.header);
         parsed.header = headerStr;
+      } else if (typeof parsed.header === 'string') {
+        headerStr = parsed.header;
       }
+      parsed.url = this.rewriteKaiserToPanDirect(parsed.url, flag, headerStr);
+      parsed.url = this.rewriteProxyScheme(parsed.url);
+
+      // Auto-route direct pan CDN URLs to ProxyServer if no headers provided.
+      // Pan CDNs (Quark/UC/Baidu) require specific headers (Cookie/UA/Referer).
+      // If spider returns direct CDN URL without headers, route through
+      // streamPanDirect which injects the synced cookie and UA.
+      if (parsed.url.startsWith('https://')) {
+        const panType = this.detectPanTypeFromFlagOrUrl(flag, parsed.url);
+        if (panType) {
+          const proxyPort = proxyServer.getPort();
+          if (proxyPort > 0) {
+            const encodedUrl = encodeURIComponent(parsed.url);
+            if (headerStr) {
+              // Spider provided custom headers: route through streamPanDirect
+              // with the headers as header= override. streamPanDirect will
+              // inject pan Cookie + default UA/Referer, then header override
+              // takes precedence for User-Agent/Referer. This also handles
+              // m3u8 manifests (rewrites TS segment URLs through proxy).
+              parsed.url = `http://127.0.0.1:${proxyPort}/proxy?do=${panType}Direct&url=${encodedUrl}&header=${encodeURIComponent(headerStr)}`;
+              console.log(
+                `[JarLoader] Auto-routing direct ${panType} CDN URL (with headers) through proxy:`,
+                parsed.url.substring(0, 120),
+              );
+            } else {
+              // No headers: route through streamPanDirect which injects the
+              // synced Cookie/UA/Referer automatically.
+              parsed.url = `http://127.0.0.1:${proxyPort}/proxy?do=${panType}Direct&url=${encodedUrl}`;
+              console.log(
+                `[JarLoader] Auto-routing direct ${panType} CDN URL to ProxyServer:`,
+                parsed.url.substring(0, 120),
+              );
+            }
+          }
+        }
+      }
+
       return JSON.stringify(parsed);
     }
 
@@ -2614,45 +2848,67 @@ export class JarLoader {
     }
 
     const out: Record<string, any> = {};
-    let rewrittenUrl = this.rewriteGoProxyUrl(urlValue, flag);
-    // If spider provided custom headers, encode them into the URL — but ONLY
-    // for proxy URLs (containing /proxy?do=). For direct video URLs (e.g.
-    // https://vd.wmvbo.com/.../index.m3u8), appending &header= would be a
-    // spurious query parameter that the CDN may reject. The renderer reads
-    // out.header separately for direct URLs.
+    const headerJson = headerValue ? JSON.stringify(headerValue) : undefined;
+    // Rewrite GoProxy /kaiser → /proxy?do=*Direct, then fix port / proxy://.
+    let finalUrl = this.rewriteKaiserToPanDirect(urlValue, flag, headerJson);
+    finalUrl = this.rewriteProxyScheme(finalUrl);
+
+    // If spider provided custom headers, encode them into the URL for proxy URLs.
     if (headerField && headerValue) {
-      out.header = JSON.stringify(headerValue);
-      if (
-        rewrittenUrl.includes('/proxy?do=') &&
-        !rewrittenUrl.includes('header=')
-      ) {
-        const encodedHeader = encodeURIComponent(out.header);
-        rewrittenUrl = rewrittenUrl + '&header=' + encodedHeader;
-      } else if (!rewrittenUrl.includes('/proxy?do=')) {
-        // Direct video URL (not proxied): rewrite to route through our
-        // /m3u8.m3u8 proxy endpoint. Node.js makes the upstream request with
-        // the spider-provided headers (User-Agent, Referer) — avoiding the
-        // browser's forbidden-header restrictions AND Chromium's TLS
-        // fingerprinting (which CDNs use to detect third-party access even
-        // when headers are spoofed). The proxy also rewrites the m3u8
-        // manifest to route TS segments through itself.
+      out.header = headerJson;
+      if (finalUrl.includes('/proxy?do=') && !finalUrl.includes('header=')) {
+        const encodedHeader = encodeURIComponent(out.header!);
+        finalUrl = finalUrl + '&header=' + encodedHeader;
+      } else if (!finalUrl.includes('/proxy?do=')) {
+        // Direct video URL (not proxied). Check if it's a pan CDN URL
+        // (Quark/UC/Baidu) that needs Cookie injection in addition to
+        // the custom headers. For pan URLs, route through streamPanDirect
+        // which injects the synced Cookie + UA/Referer, then applies the
+        // custom header override. For non-pan URLs, fall back to /m3u8.m3u8.
+        let panType = this.detectPanTypeFromFlagOrUrl(flag, finalUrl);
         const proxyPort = proxyServer.getPort();
         if (proxyPort > 0) {
-          const encodedUrl = encodeURIComponent(rewrittenUrl);
-          const encodedHeader = encodeURIComponent(out.header);
-          rewrittenUrl = `http://127.0.0.1:${proxyPort}/m3u8.m3u8?url=${encodedUrl}&header=${encodedHeader}`;
-          console.log(
-            '[JarLoader] Rewrote direct video URL to proxy:',
-            rewrittenUrl.substring(0, 120),
-          );
+          const encodedUrl = encodeURIComponent(finalUrl);
+          const encodedHeader = encodeURIComponent(out.header!);
+          if (panType) {
+            // Pan CDN URL: route through streamPanDirect which injects
+            // the synced Cookie/UA/Referer + custom header override.
+            finalUrl = `http://127.0.0.1:${proxyPort}/proxy?do=${panType}Direct&url=${encodedUrl}&header=${encodedHeader}`;
+            console.log(
+              `[JarLoader] Auto-routing direct ${panType} CDN URL (with headers) through proxy:`,
+              finalUrl.substring(0, 120),
+            );
+          } else {
+            // Non-pan URL: route through /m3u8.m3u8 proxy which injects
+            // the custom headers and handles TLS fingerprinting.
+            finalUrl = `http://127.0.0.1:${proxyPort}/m3u8.m3u8?url=${encodedUrl}&header=${encodedHeader}`;
+            console.log(
+              '[JarLoader] Routing direct video URL through /m3u8.m3u8 proxy:',
+              finalUrl.substring(0, 120),
+            );
+          }
         } else {
-          // Fallback: register headers for webRequest injection (less
-          // reliable — CDN may still detect browser TLS fingerprint)
-          this.registerVideoUrlHeaders(rewrittenUrl, headerValue);
+          // Fallback: register headers for webRequest injection
+          this.registerVideoUrlHeaders(finalUrl, headerValue);
+        }
+      }
+    } else if (finalUrl.startsWith('https://')) {
+      // Auto-route direct pan CDN URLs to ProxyServer if no headers provided.
+      // Pan CDNs (Quark/UC/Baidu) require specific headers (Cookie/UA/Referer).
+      const panType = this.detectPanTypeFromFlagOrUrl(flag, finalUrl);
+      if (panType) {
+        const proxyPort = proxyServer.getPort();
+        if (proxyPort > 0) {
+          const encodedUrl = encodeURIComponent(finalUrl);
+          finalUrl = `http://127.0.0.1:${proxyPort}/proxy?do=${panType}Direct&url=${encodedUrl}`;
+          console.log(
+            `[JarLoader] Auto-routing direct ${panType} CDN URL to ProxyServer:`,
+            finalUrl.substring(0, 120),
+          );
         }
       }
     }
-    out.url = rewrittenUrl;
+    out.url = finalUrl;
     // Preserve any non-obfuscated fields verbatim.
     for (const [k, v] of Object.entries(parsed)) {
       if (k === urlField || k === headerField) continue;
@@ -2712,183 +2968,158 @@ export class JarLoader {
   }
 
   /**
-   * Rewrite a GoProxy URL (http://127.0.0.1:8096/<path>?url=<encoded>) to
-   * point at our local ProxyServer's streamPanDirect handler.
+   * Convert GoProxy kaiser URLs to Desktop streamPanDirect endpoints.
    *
-   * If the URL doesn't match the GoProxy pattern, return it unchanged.
+   * Guard spiders return:
+   *   http://127.0.0.1:8096/kaiser?url=<CDN>
+   * Android loads libwexproxy.so to serve /kaiser with pan cookies. That
+   * native ARM binary cannot run on Desktop, so we rewrite to:
+   *   http://127.0.0.1:<port>/proxy?do=<pan>Direct&url=<CDN>
+   * which ProxyServer.streamPanDirect serves with the synced Cookie/UA.
    */
-  private rewriteGoProxyUrl(url: string, flag: string): string {
-    // Pattern 0: proxy:// scheme (Bili spider returns URLs like
-    // "proxy://do=bili&aid=...&cid=...&qn=32&type=mpd"). Rewrite to the
-    // local HTTP proxy so the ProxyServer's /proxy?do=bili route can fetch
-    // the actual stream from Bilibili via spider.proxyLocal().
-    if (url.startsWith('proxy://')) {
-      let proxyPort = 9978;
+  private rewriteKaiserToPanDirect(
+    url: string,
+    flag: string,
+    headerJson?: string,
+  ): string {
+    if (!url || !url.includes('/kaiser')) return url;
+
+    let cdnUrl = '';
+    let thread: string | null = null;
+    let chunk: string | null = null;
+    let key: string | null = null;
+    let type: string | null = null;
+
+    try {
+      const parsed = new URL(url);
+      if (!parsed.pathname.includes('kaiser')) return url;
+      cdnUrl = parsed.searchParams.get('url') || '';
+      thread = parsed.searchParams.get('thread');
+      chunk = parsed.searchParams.get('chunk');
+      key = parsed.searchParams.get('key');
+      type = parsed.searchParams.get('type');
+      // URL may already be percent-encoded once — keep as-is for re-encode.
+      if (!cdnUrl) return url;
       try {
-        const { proxyServer } = require('./ProxyServer');
-        const p = proxyServer.getPort();
-        if (p > 0) proxyPort = p;
-      } catch {}
+        cdnUrl = decodeURIComponent(cdnUrl);
+      } catch {
+        /* keep raw */
+      }
+    } catch {
+      const m = url.match(/[?&]url=([^&]+)/);
+      if (!m) return url;
+      try {
+        cdnUrl = decodeURIComponent(m[1]);
+      } catch {
+        cdnUrl = m[1];
+      }
+      // 尝试从原始 URL 中提取其他参数
+      const threadMatch = url.match(/[?&]thread=([^&]+)/);
+      const chunkMatch = url.match(/[?&]chunk=([^&]+)/);
+      const keyMatch = url.match(/[?&]key=([^&]+)/);
+      const typeMatch = url.match(/[?&]type=([^&]+)/);
+      if (threadMatch) thread = threadMatch[1];
+      if (chunkMatch) chunk = chunkMatch[1];
+      if (keyMatch) key = keyMatch[1];
+      if (typeMatch) type = typeMatch[1];
+    }
+
+    const panType = this.detectPanTypeFromFlagOrUrl(flag, cdnUrl);
+    if (!panType) {
+      console.warn(
+        '[JarLoader] rewriteKaiserToPanDirect: cannot detect pan type, flag=',
+        flag,
+        'cdn=',
+        cdnUrl.substring(0, 80),
+      );
+      return url;
+    }
+
+    let proxyPort = 9978;
+    try {
+      const p = proxyServer.getPort();
+      if (p > 0) proxyPort = p;
+    } catch {}
+
+    let rewritten = `http://127.0.0.1:${proxyPort}/proxy?do=${panType}Direct&url=${encodeURIComponent(cdnUrl)}`;
+    if (thread) rewritten += `&thread=${thread}`;
+    if (chunk) rewritten += `&chunk=${chunk}`;
+    if (key) rewritten += `&key=${encodeURIComponent(key)}`;
+    if (type) rewritten += `&type=${encodeURIComponent(type)}`;
+    if (headerJson && !rewritten.includes('header=')) {
+      rewritten += `&header=${encodeURIComponent(headerJson)}`;
+    }
+    console.log(
+      `[JarLoader] rewriteKaiserToPanDirect: /kaiser → do=${panType}Direct, port=${proxyPort}, thread=${thread}, chunk=${chunk}, key=${key}, type=${type}, cdn=${cdnUrl.substring(0, 80)}`,
+    );
+    return rewritten;
+  }
+
+  /**
+   * Detect pan type from play flag name and/or CDN hostname.
+   */
+  private detectPanTypeFromFlagOrUrl(
+    flag: string,
+    cdnUrl: string,
+  ): 'quark' | 'uc' | 'baidu' | null {
+    const f = (flag || '').toLowerCase();
+    if (/夸克|夸父|quark/.test(f)) return 'quark';
+    if (/uc原画|uc盘|\buc\b|优视/.test(f)) return 'uc';
+    if (/百度|baidu|b度/.test(f)) return 'baidu';
+
+    const u = (cdnUrl || '').toLowerCase();
+    if (u.includes('quark.cn') || u.includes('quark')) return 'quark';
+    if (u.includes('uc.cn') || u.includes('drive.uc')) return 'uc';
+    if (u.includes('baidupcs.com') || u.includes('baidu.com')) return 'baidu';
+    return null;
+  }
+
+  /**
+   * Rewrite proxy URLs to use the actual ProxyServer port.
+   *
+   * 1. proxy:// URLs → http://127.0.0.1:<port>/proxy?
+   *    (Bili, MQiTV, Local, WebDAV spiders use this scheme)
+   *
+   * 2. http://127.0.0.1:8096 URLs → http://127.0.0.1:<port>
+   *    (Spiders return URLs with hardcoded 8096 port, but ProxyServer
+   *    may listen on a different port if 8096 is unavailable)
+   */
+  private rewriteProxyScheme(url: string): string {
+    let proxyPort = 8096;
+    try {
+      const p = proxyServer.getPort();
+      if (p > 0) proxyPort = p;
+    } catch {}
+
+    // Pattern 1: proxy:// URLs
+    if (url.startsWith('proxy://')) {
       const rewritten = url.replace(
         /^proxy:\/\//,
         `http://127.0.0.1:${proxyPort}/proxy?`,
       );
       console.log(
-        `[JarLoader] rewriteGoProxyUrl (proxy://): rewritten=${rewritten.substring(0, 100)}...`,
+        `[JarLoader] rewriteProxyScheme: proxy:// → http://127.0.0.1:${proxyPort}/proxy?`,
       );
       return rewritten;
     }
 
-    // Pattern 1: GoProxy URL (http://127.0.0.1:8096/<path>?url=<encoded>)
-    const goProxyMatch = url.match(
-      /^http:\/\/127\.0\.0\.1:8096\/\w+\?url=(.+)$/,
-    );
-    if (goProxyMatch) {
-      const encodedUrl = goProxyMatch[1];
-      let upstreamUrl: string;
-      try {
-        upstreamUrl = decodeURIComponent(encodedUrl);
-      } catch {
-        upstreamUrl = encodedUrl;
-      }
-
-      // Determine pan type from flag
-      const flagLower = flag.toLowerCase();
-      let panType = 'quark';
-      if (flagLower.includes('uc') || flag.includes('优熙')) {
-        panType = 'uc';
-      } else if (flag.includes('百度') || flag.includes('百渡')) {
-        panType = 'baidu';
-      } else if (flag.includes('天翼')) {
-        panType = 'aliyun';
-      } else if (flag.includes('夸克') || flag.includes('夸父')) {
-        panType = 'quark';
-      }
-
-      let proxyPort = 9978;
-      try {
-        const { proxyServer } = require('./ProxyServer');
-        const p = proxyServer.getPort();
-        if (p > 0) proxyPort = p;
-      } catch {}
-
-      const newUrl = `http://127.0.0.1:${proxyPort}/proxy?do=${panType}Direct&url=${encodedUrl}`;
-      console.log(
-        `[JarLoader] rewriteGoProxyUrl (GoProxy): panType=${panType}, port=${proxyPort}, upstream=${upstreamUrl.substring(0, 80)}...`,
+    // Pattern 2: Spider hardcoded localhost ports → actual ProxyServer port
+    if (
+      proxyPort > 0 &&
+      /127\.0\.0\.1:(8096|9978|9979|9980)/.test(url) &&
+      !url.includes(`127.0.0.1:${proxyPort}`)
+    ) {
+      const rewritten = url.replace(
+        /127\.0\.0\.1:(8096|9978|9979|9980)/g,
+        `127.0.0.1:${proxyPort}`,
       );
-      return newUrl;
-    }
-
-    // Pattern 2: Internal proxy URL missing /proxy path
-    // (http://127.0.0.1:9978?do=xxx&url=... → http://127.0.0.1:9978/proxy?do=xxx&url=...)
-    const missingProxyPathMatch = url.match(
-      /^http:\/\/127\.0\.0\.1:(\d+)\?do=(\w+)&url=(.+)$/,
-    );
-    if (missingProxyPathMatch) {
-      const port = missingProxyPathMatch[1];
-      const doType = missingProxyPathMatch[2];
-      const encodedUrl = missingProxyPathMatch[3];
-      const fixedUrl = `http://127.0.0.1:${port}/proxy?do=${doType}&url=${encodedUrl}`;
       console.log(
-        `[JarLoader] rewriteGoProxyUrl (fixPath): added /proxy to URL, do=${doType}, port=${port}`,
+        `[JarLoader] rewriteProxyScheme: localhost port → ${proxyPort}`,
       );
-      return fixedUrl;
+      return rewritten;
     }
 
-    // Pattern 3: Already correct proxy URL - no change needed
-    if (url.includes('/proxy?do=')) {
-      return url;
-    }
-
-    // Not a proxy URL - return unchanged
     return url;
-  }
-
-  /**
-   * Replace a Quark download URL (dl-pc-zb, always 412s) with a streaming
-   * URL (video-play-*, from /file/v2/play) obtained via
-   * QuarkPanService.resolveQuarkDownloadUrl.
-   *
-   * The spider's playerContent generates download URLs that the Quark CDN
-   * rejects with 412 Precondition Failed. This method:
-   * 1. Decodes the vod_id (Base64 JSON) to extract shareId and fid
-   * 2. Populates shareFidTokenCache from the vod_id's shareFidToken
-   * 3. Calls resolveQuarkDownloadUrl to get a working streaming URL
-   * 4. Rebuilds the proxy URL around the streaming URL
-   *
-   * Returns the modified JSON string, or the original on any failure.
-   */
-  private async replaceQuarkDownloadUrl(
-    jsonStr: string,
-    vodIdBase64: string,
-  ): Promise<string> {
-    try {
-      const parsed = JSON.parse(jsonStr);
-      if (!parsed?.url || typeof parsed.url !== 'string') return jsonStr;
-      if (!parsed.url.includes('dl-pc')) return jsonStr;
-
-      const vodInfo = QuarkPanService.cacheShareFidTokenFromVodId(vodIdBase64);
-      if (!vodInfo) {
-        console.warn(
-          '[JarLoader] replaceQuarkDownloadUrl: failed to decode vod_id',
-        );
-        return jsonStr;
-      }
-
-      console.log(
-        '[JarLoader] replaceQuarkDownloadUrl: replacing dl-pc URL for shareId=',
-        vodInfo.shareId,
-        'fid=',
-        vodInfo.fid,
-      );
-
-      const streamingUrl = await QuarkPanService.resolveQuarkDownloadUrl(
-        vodInfo.shareId,
-        vodInfo.fid,
-      );
-      if (!streamingUrl) {
-        console.warn(
-          '[JarLoader] replaceQuarkDownloadUrl: resolveQuarkDownloadUrl returned null',
-        );
-        return jsonStr;
-      }
-
-      const domain = streamingUrl.match(/https?:\/\/([^/]+)/)?.[1] || 'unknown';
-      console.log(
-        '[JarLoader] replaceQuarkDownloadUrl: got streaming URL, domain=',
-        domain,
-        'length=',
-        streamingUrl.length,
-      );
-
-      let proxyPort = 9978;
-      try {
-        const { proxyServer } = require('./ProxyServer');
-        const p = proxyServer.getPort();
-        if (p > 0) proxyPort = p;
-      } catch {}
-
-      const encodedUrl = encodeURIComponent(streamingUrl);
-      let newProxyUrl = `http://127.0.0.1:${proxyPort}/proxy?do=quarkDirect&url=${encodedUrl}`;
-
-      if (parsed.header) {
-        const headerStr =
-          typeof parsed.header === 'string'
-            ? parsed.header
-            : JSON.stringify(parsed.header);
-        newProxyUrl += '&header=' + encodeURIComponent(headerStr);
-      }
-
-      parsed.url = newProxyUrl;
-      console.log(
-        '[JarLoader] replaceQuarkDownloadUrl: rebuilt proxy URL, length=',
-        newProxyUrl.length,
-      );
-      return JSON.stringify(parsed);
-    } catch (e: any) {
-      console.warn('[JarLoader] replaceQuarkDownloadUrl error:', e.message);
-      return jsonStr;
-    }
   }
 
   /**
@@ -3276,6 +3507,70 @@ export class JarLoader {
       }
     }
 
+    // Pre-playback UC cookie refresh (same __pus/__puus model as Quark).
+    if (
+      method === 'playerContent' &&
+      typeof args[0] === 'string' &&
+      /uc|UC|优视/i.test(args[0]) &&
+      UCPanService.getSyncedCookie()
+    ) {
+      try {
+        const refreshResult = await UCPanService.refreshCookieForPlayback();
+        if (refreshResult.expired) {
+          console.warn(
+            '[JarLoader] playerContent: UC login expired, emitting pan:loginExpired',
+          );
+          try {
+            BrowserWindow.getAllWindows().forEach((w) =>
+              w.webContents.send('pan:loginExpired', 'uc'),
+            );
+          } catch (e: any) {
+            console.warn(
+              '[JarLoader] Failed to emit pan:loginExpired:',
+              e.message,
+            );
+          }
+          throw new Error('UC login expired, please re-scan QR code');
+        }
+        if (refreshResult.refreshed && refreshResult.cookie) {
+          UCPanService.setSyncedCookie(refreshResult.cookie);
+          await UCPanService.syncToGuardPrefs(refreshResult.cookie);
+        }
+      } catch (e: any) {
+        if (e.message?.includes('UC login expired')) throw e;
+        console.warn(
+          '[JarLoader] playerContent: UC cookie refresh failed, continuing:',
+          e.message,
+        );
+      }
+    }
+
+    // Pre-playback Baidu login check.
+    // Baidu doesn't have a refreshCookieForPlayback like Quark/UC — the BDUSS
+    // cookie is long-lived. But if no cookie is saved at all, skip the spider
+    // call and prompt re-login immediately.
+    if (
+      method === 'playerContent' &&
+      typeof args[0] === 'string' &&
+      /百度|baidu|B度/i.test(args[0]) &&
+      !BaiduPanService.getSyncedCookie()
+    ) {
+      console.warn(
+        '[JarLoader] playerContent: Baidu cookie missing, emitting pan:loginExpired',
+      );
+      try {
+        BrowserWindow.getAllWindows().forEach((w) =>
+          w.webContents.send('pan:loginExpired', 'baidu'),
+        );
+      } catch (e: any) {
+        console.warn(
+          '[JarLoader] Failed to emit pan:loginExpired:',
+          e.message,
+        );
+      }
+      throw new Error('Baidu login required, please scan QR code');
+    }
+
     // Pre-detailContent pan cookie injection.
     //
     // The spider's pan resolver (NewQuark/NewPanUc/NewPan115) stores the
@@ -3528,20 +3823,6 @@ export class JarLoader {
             console.log(
               '[JarLoader] playerContent: translatePlayerContent returned unchanged',
             );
-          }
-          // Quark download URLs (dl-pc-zb.drive.quark.cn, sp=100) always
-          // return 412 Precondition Failed — verified by direct PowerShell
-          // testing with and without Cookie. The spider's playerContent
-          // generates these download URLs, but only streaming URLs
-          // (video-play-*, from /file/v2/play) work. When we detect a
-          // dl-pc URL, call resolveQuarkDownloadUrl to get a working
-          // streaming URL and rebuild the proxy URL around it.
-          if (
-            typeof args[1] === 'string' &&
-            (args[0].includes('夸克') || args[0].includes('夸父')) &&
-            result.includes('dl-pc')
-          ) {
-            result = await this.replaceQuarkDownloadUrl(result, args[1]);
           }
           console.log(
             '[JarLoader] ========== end playerContent debug ==========',
@@ -3940,11 +4221,35 @@ export class JarLoader {
           );
           const tmpDir = process.env.TEMP || process.env.TMP || '/tmp';
           const filesDir = path.join(tmpDir, 'tvbox_' + sanitizedKey);
+          if (!fs.existsSync(filesDir)) {
+            fs.mkdirSync(filesDir, { recursive: true });
+          }
           InitOrigin.oOoOoOo0O0O0oO0o = filesDir;
           console.log(
             '[JarLoader] Set InitOrigin.oOoOoOo0O0O0oO0o =',
             filesDir,
           );
+
+          // Copy libLoadNiMa.so from shared native_libs dir to per-spider
+          // filesDir so the spider's unidbg loader can find it. The spider
+          // reads InitOrigin.oOoOoOo0O0O0oO0o to locate filesDir, then looks
+          // for filesDir/libLoadNiMa.so. Without this copy, the per-spider
+          // filesDir override breaks libLoadNiMa.so discovery.
+          const sharedLibPath = path.join(
+            this.jarCacheDir,
+            'native_libs',
+            'libLoadNiMa.so',
+          );
+          if (fs.existsSync(sharedLibPath)) {
+            const perSpiderLibPath = path.join(filesDir, 'libLoadNiMa.so');
+            if (!fs.existsSync(perSpiderLibPath)) {
+              fs.copyFileSync(sharedLibPath, perSpiderLibPath);
+              console.log(
+                '[JarLoader] Copied libLoadNiMa.so to per-spider filesDir:',
+                perSpiderLibPath,
+              );
+            }
+          }
         } catch (e: any) {
           console.warn(
             '[JarLoader] Failed to set InitOrigin filesDir:',
@@ -4206,6 +4511,40 @@ export class JarLoader {
           console.log(
             `[JarLoader] setPanCookies: set ${pan.label} static cookie (len=${cookie.length})`,
           );
+          // Also write to com.github.catvod.tvbox_preferences for the
+          // spider's SharedPreferences-based read path (e_1.b / e_1.a / e_1.d).
+          // Both UC and Baidu use the same XOR-with-"miwudi" encryption.
+          if (pan.label === 'uc' || pan.label === 'baidu') {
+            try {
+              const PREFS = 'com.github.catvod.tvbox_preferences';
+              const XOR_KEY = 'miwudi';
+              const prefs = ctx.getSharedPreferencesSync(PREFS, 0);
+              if (prefs) {
+                const editor = prefs.editSync();
+                // Encrypted: XOR with "miwudi" then Base64 (mirrors e_1.b)
+                const keyChars = XOR_KEY.split('');
+                const out: string[] = [];
+                for (let i = 0; i < cookie.length; i++) {
+                  const c = cookie.charCodeAt(i);
+                  const k = keyChars[i % keyChars.length].charCodeAt(0);
+                  out.push(String.fromCharCode(c ^ k));
+                }
+                const encrypted = Buffer.from(out.join(''), 'utf8').toString('base64');
+                const prefsKey = pan.label === 'uc' ? 'uc' : 'baidu';
+                editor.putStringSync(`mi.${prefsKey}`, encrypted);
+                editor.putStringSync(`.${prefsKey}`, cookie);
+                editor.applySync();
+                console.log(
+                  `[JarLoader] setPanCookies: also synced ${pan.label} cookie to ${PREFS} (mi.${prefsKey} + .${prefsKey})`,
+                );
+              }
+            } catch (e2: any) {
+              console.warn(
+                `[JarLoader] setPanCookies: failed to write ${pan.label} to ${PREFS}:`,
+                e2?.message || e2,
+              );
+            }
+          }
         } catch (e: any) {
           const errMsg = e?.message || String(e);
           console.warn(
@@ -5369,16 +5708,27 @@ export function registerJarLoaderIPC(): void {
       extraCookies?: Record<string, string>,
     ) => {
       // 在调用 spider 方法前，同步网盘 cookie 到 JVM SharedPreferences
+      // 以及 Desktop pan service 内存缓存（streamPanDirect 依赖）。
       if (extraCookies && method === 'playerContent') {
+        const cookieSummary = Object.keys(extraCookies).map(
+          (k) => `${k}(len=${extraCookies[k].length})`,
+        );
         console.log(
           '[JarLoader] jar:callMethod received cookies:',
-          Object.keys(extraCookies).map(
-            (k) => `${k}(len=${extraCookies[k].length})`,
-          ),
+          cookieSummary,
         );
+        // Also log to file via the debug channel if available later
         try {
           if (extraCookies.quark) {
             await QuarkPanService.syncCookieToJVM(extraCookies.quark);
+          }
+          if (extraCookies.uc) {
+            UCPanService.setSyncedCookie(extraCookies.uc);
+            await UCPanService.syncToGuardPrefs(extraCookies.uc);
+          }
+          if (extraCookies.baidu) {
+            BaiduPanService.setSyncedCookie(extraCookies.baidu);
+            await BaiduPanService.syncToGuardPrefs(extraCookies.baidu);
           }
         } catch (e: any) {
           console.error('[JarLoader] Failed to sync cookies:', e.message);

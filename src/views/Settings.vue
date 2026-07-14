@@ -81,6 +81,22 @@
           </el-radio-group>
         </el-form-item>
 
+        <el-form-item label="外部播放器路径">
+          <div class="flex gap-2 items-center">
+            <el-input
+              v-model="vlcPathValue"
+              placeholder="如: C:\Program Files\VideoLAN\VLC\vlc.exe"
+              clearable
+              @change="onVlcPathChange"
+              class="flex-1"
+            />
+            <el-button @click="selectVlcPath" size="small">浏览</el-button>
+          </div>
+          <div class="text-xs mt-1" style="color:var(--color-text-tertiary)">
+            用于播放不支持网页格式的视频（如MKV）
+          </div>
+        </el-form-item>
+
         <el-divider />
 
         <!-- Section: 字幕设置 -->
@@ -193,6 +209,7 @@ import { useAppStore } from '../store/app'
 import { WebDAV } from '../core/WebDAV'
 import { remoteServer } from '../core/RemoteServer'
 import { localProxy } from '../core/LocalProxyServer'
+import { saveToFile } from '../core/ConfigSync'
 
 const store = useAppStore()
 
@@ -201,6 +218,7 @@ const configLoading = ref(false)
 const parseName = ref('')
 const autoPlayNext = ref(true)
 const playTypeValue = ref(0)
+const vlcPathValue = ref(localStorage.getItem('tvbox_vlc_path') || '')
 const screenDisplayValue = ref(true)
 const liveUrlInput = ref('')
 const epgUrlInput = ref('')
@@ -257,6 +275,7 @@ function saveUrlToHistory(url: string) {
   if (list.length > 10) list.length = 10
   configUrlHistory.value = list
   localStorage.setItem('tvbox_config_url_history', JSON.stringify(list))
+  saveToFile()
 }
 
 async function loadConfig() {
@@ -292,6 +311,35 @@ function onScreenDisplayChange(val: boolean) {
 
 function onPlayTypeChange(val: number) {
   store.setPlayType(val)
+}
+
+function onVlcPathChange(val: string) {
+  localStorage.setItem('tvbox_vlc_path', val)
+  saveToFile()
+}
+
+async function selectVlcPath() {
+  try {
+    const { ipcRenderer } = window.require('electron')
+    const result = await ipcRenderer.invoke('dialog:openFile', {
+      title: '选择外部播放器',
+      filters: [
+        { name: '可执行文件', extensions: ['exe'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    })
+    if (result && !result.canceled && result.filePaths.length > 0) {
+      vlcPathValue.value = result.filePaths[0]
+      onVlcPathChange(result.filePaths[0])
+    }
+  } catch (e) {
+    // Fallback: show input prompt
+    const path = prompt('请输入播放器路径:', vlcPathValue.value)
+    if (path) {
+      vlcPathValue.value = path
+      onVlcPathChange(path)
+    }
+  }
 }
 
 function onLiveUrlChange(val: string) {

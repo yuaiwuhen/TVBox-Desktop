@@ -43,38 +43,53 @@
       <div v-if="store.currentPlayUrl" class="w-full px-6 pt-4 player-enter-container">
         <div class="rounded-xl overflow-hidden detail-player-shadow player-enter-animation"
           style="aspect-ratio: 16/9; background: black">
-          <VideoPlayer ref="videoPlayerRef" :url="store.currentPlayUrl" :headers="store.currentPlayHeader"
-            :title="playerTitle" :has-prev="store.currentPlayIndex > 0"
+          <VideoPlayer :key="store.currentPlayUrl" ref="videoPlayerRef" :url="store.currentPlayUrl"
+            :headers="store.currentPlayHeader" :title="playerTitle" :has-prev="store.currentPlayIndex > 0"
             :has-next="store.currentPlayIndex < store.currentEpisodes.length - 1"
             :resume-progress="store.resumeProgress" :show-subtitle-search="true" @prev="onPrevEpisode"
             @next="onNextEpisode" @ended="onPlayEnded" @progress="onProgress" @search-subtitle="onSearchSubtitle" />
         </div>
       </div>
 
-      <!-- Play Error (shown above detail info when play fails) -->
-      <div v-if="playError" class="mx-6 mt-4 rounded-lg p-4 flex items-start gap-3"
-        style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3)">
-        <el-icon :size="20" class="flex-shrink-0 mt-0.5" style="color: var(--color-warning)">
-          <WarningFilled />
-        </el-icon>
-        <div class="flex-1 min-w-0">
-          <p class="text-sm font-medium" style="color: var(--color-text-primary)">播放失败</p>
-          <p class="mt-1 text-xs" style="color: var(--color-text-secondary)">{{ playError }}</p>
-        </div>
-        <el-button text size="small" @click="store.playError = ''">关闭</el-button>
-      </div>
+      <!-- Play Error Dialog (centered modal) -->
+      <Teleport to="body">
+        <transition name="play-error-dialog">
+          <div v-if="playError" class="play-error-overlay" @click.self="store.playError = ''">
+            <div class="play-error-card">
+              <div class="play-error-glow" aria-hidden="true"></div>
+              <div class="play-error-icon">
+                <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.8"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="13" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+              </div>
+              <h3 class="play-error-title">播放失败</h3>
+              <p class="play-error-source">播放源: {{ activePlaySource || '未知' }}</p>
+              <p class="play-error-message">{{ formatPlayError(playError) }}</p>
+              <div class="play-error-actions">
+                <button class="play-error-btn play-error-btn-primary" @click="store.playError = ''">
+                  知道了
+                </button>
+              </div>
+            </div>
+          </div>
+        </transition>
+      </Teleport>
 
       <!-- Info Section with blurred poster background -->
       <div class="detail-hero relative overflow-hidden">
         <div v-if="store.currentVod.vod_pic" class="absolute inset-0 bg-cover bg-center"
-          :style="{ backgroundImage: `url(${store.currentVod.vod_pic})` }" />
+          :style="{ backgroundImage: `url(${processImageUrl(store.currentVod.vod_pic)})` }" />
         <div class="absolute inset-0"
           style="background: linear-gradient(to right, var(--color-bg-base) 0%, var(--color-bg-base) 40%, rgba(15,17,23,0.85) 70%, rgba(15,17,23,0.6) 100%)">
         </div>
         <div class="relative flex flex-col md:flex-row gap-6 p-6">
           <div class="w-44 h-60 flex-shrink-0 rounded-lg overflow-hidden detail-poster-shadow"
             style="background: var(--color-bg-elevated)">
-            <img v-if="store.currentVod.vod_pic" :src="store.currentVod.vod_pic" class="w-full h-full object-cover" />
+            <img v-if="store.currentVod.vod_pic" :src="processImageUrl(store.currentVod.vod_pic)"
+              class="w-full h-full object-cover" />
             <div v-else class="w-full h-full flex items-center justify-center">
               <el-icon :size="48" style="color: var(--color-text-tertiary)">
                 <Film />
@@ -132,7 +147,7 @@
                 <el-radio-group v-model="activeEpisodeGroup" size="small">
                   <el-radio-button v-for="(group, gi) in getEpisodeGroups(source.episodes)" :key="gi" :value="gi">{{
                     group.label
-                    }}</el-radio-button>
+                  }}</el-radio-button>
                 </el-radio-group>
               </div>
               <!-- Episode grid: fixed column width ensures vertical alignment -->
@@ -156,7 +171,8 @@
         </div>
 
         <!-- Pan Login Required Prompt -->
-        <div v-else-if="needPanLogin" class="mb-4 rounded-lg p-6 text-center" style="background: var(--color-bg-surface)">
+        <div v-else-if="needPanLogin" class="mb-4 rounded-lg p-6 text-center"
+          style="background: var(--color-bg-surface)">
           <el-icon :size="40" style="color: var(--color-warning)">
             <WarningFilled />
           </el-icon>
@@ -230,6 +246,7 @@ import { PanLogin } from '../core/PanLogin'
 import { QuarkPan } from '../core/QuarkPan'
 import VideoPlayer from '../components/VideoPlayer.vue'
 import QRLoginDialog from '../components/QRLoginDialog.vue'
+import { processImageUrl } from '../core/models'
 
 const route = useRoute()
 const router = useRouter()
@@ -273,6 +290,10 @@ async function retryLoadDetail() {
     if (store.currentVod && playSources.value.length > 0) {
       activePlaySource.value = playSources.value[0].name
       refreshPanLoginState(activePlaySource.value)
+      // Initialize login state for all sources
+      for (const source of playSources.value) {
+        refreshPanLoginState(source.name)
+      }
     }
   } catch {
     ElMessage.error('加载详情失败')
@@ -283,7 +304,7 @@ async function retryLoadDetail() {
 
 const currentPanType = computed<'quark' | 'uc' | 'aliyun' | 'baidu' | 'bili' | '115' | undefined>(() => {
   const flag = activePlaySource.value
-  const url = ''
+  const url = getFirstEpisodeUrl(flag)
   const type = PanResolver.detectPanType(flag, url)
   return type === 'unknown' ? undefined : type
 })
@@ -309,17 +330,40 @@ const panLoginTitle = computed(() => {
 })
 
 function isPanSource(flag: string): boolean {
-  const type = PanResolver.detectPanType(flag, '')
-  const result = type !== 'unknown'
-  console.log('[Detail] isPanSource:', { flag, type, result })
-  return result
+  // First try name-based detection
+  const typeByName = PanResolver.detectPanType(flag, '')
+  if (typeByName !== 'unknown') {
+    console.log('[Detail] isPanSource: name match:', { flag, type: typeByName })
+    return true
+  }
+
+  // Then try URL-based detection from the source's episodes
+  const source = playSources.value.find(s => s.name === flag)
+  if (source?.episodes?.length) {
+    const firstUrl = source.episodes[0].url || ''
+    const typeByUrl = PanResolver.detectPanTypeFromUrl(firstUrl)
+    if (typeByUrl !== 'unknown') {
+      console.log('[Detail] isPanSource: URL match:', { flag, type: typeByUrl, url: firstUrl.substring(0, 80) })
+      return true
+    }
+  }
+
+  console.log('[Detail] isPanSource: no match:', { flag })
+  return false
 }
 
 // 网盘登录状态缓存（按 source name 存储，响应式对象保证模板能感知变化）
 const panLoginStates = reactive<Record<string, boolean>>({})
 
+/** Get the first episode URL for a source flag, for URL-based pan detection */
+function getFirstEpisodeUrl(flag: string): string {
+  const source = playSources.value.find(s => s.name === flag)
+  return source?.episodes?.[0]?.url || ''
+}
+
 function refreshPanLoginState(flag: string) {
-  const type = PanResolver.detectPanType(flag, '')
+  const url = getFirstEpisodeUrl(flag)
+  const type = PanResolver.detectPanType(flag, url)
   if (type === 'unknown' || type === '115') {
     panLoginStates[flag] = false
     return
@@ -338,7 +382,8 @@ function startLoginPolling() {
   stopLoginPolling()
   loginPollTimer = setInterval(() => {
     if (!activePlaySource.value) return
-    const type = PanResolver.detectPanType(activePlaySource.value, '')
+    const url = getFirstEpisodeUrl(activePlaySource.value)
+    const type = PanResolver.detectPanType(activePlaySource.value, url)
     if (type === 'unknown' || type === '115') return
     const newState = PanLogin.isLoggedIn(type as import('../core/PanLogin').PanType)
     if (panLoginStates[activePlaySource.value] !== newState) {
@@ -365,14 +410,9 @@ async function playEpisode(flag: string, url: string) {
   })
   // Remember this attempt so pan:loginExpired can retry after re-login.
   lastPlayAttempt.value = { flag, url }
-  // 直接从 panLoginStates 读取状态
-  if (isPanSource(flag) && !panLoginStates[flag]) {
-    console.log('[Detail] playEpisode: not logged in, showing login dialog')
-    pendingPlayAfterLogin.value = { flag, url }
-    showPanLogin.value = true
-    return
-  }
-  console.log('[Detail] playEpisode: logged in, calling loadPlay')
+  // 不再阻止网盘源播放。Spider 的 SharedPreferences 中保存的 cookie 跨重启持久化，
+  // 即使前端 localStorage 无登录数据，spider 仍可能持有有效 cookie。
+  // 让 spider 尝试播放；若失败且为网盘源，再弹登录二维码。
   pendingPlayUrl.value = url
   store.playError = ''
   const currentSource = playSources.value.find(s => s.name === flag)
@@ -381,9 +421,50 @@ async function playEpisode(flag: string, url: string) {
   try {
     await store.loadPlay(flag, url, epIndex >= 0 ? epIndex : 0, episodes)
     console.log('[Detail] playEpisode: loadPlay completed, currentPlayUrl=', store.currentPlayUrl?.substring(0, 80))
-  } catch (e) {
+    // 仅当播放失败且错误信息明确指向登录/鉴权时才弹登录框。
+    // 格式不支持、资源失效、网络错误等不应误报「请登录」。
+    if (!store.currentPlayUrl) {
+      const err = (store.playError || '').toLowerCase()
+      const needsLogin =
+        /登录|login|未登录|auth|expired|cookie|令牌|token/.test(err) ||
+        /Quark login expired|UC login expired/i.test(store.playError || '')
+      if (needsLogin) {
+        // 即使 isPanSource 未匹配（如源名使用变体"B度"），
+        // 也从错误信息中检测网盘类型
+        if (!isPanSource(flag)) {
+          const panType = detectPanTypeFromError(store.playError || '', flag)
+          if (panType) {
+            console.log('[Detail] playEpisode: detected pan from error:', panType)
+          }
+        }
+        console.log('[Detail] playEpisode: auth failure, showing login dialog')
+        pendingPlayAfterLogin.value = { flag, url }
+        showPanLogin.value = true
+      } else if (isPanSource(flag)) {
+        console.log(
+          '[Detail] playEpisode: pan play failed but not auth-related:',
+          store.playError,
+        )
+      }
+    }
+  } catch (e: any) {
     console.error('[Detail] playEpisode: loadPlay failed:', e)
-    ElMessage.error('播放失败')
+    const msg = String(e?.message || e || '')
+    if (
+      /登录|login|未登录|expired|auth|cookie/i.test(msg)
+    ) {
+      // Fallback: if isPanSource doesn't catch but error mentions login
+      if (!isPanSource(flag)) {
+        const panType = detectPanTypeFromError(msg, flag)
+        if (panType) {
+          console.log('[Detail] playEpisode: detected pan from catch error:', panType)
+        }
+      }
+      pendingPlayAfterLogin.value = { flag, url }
+      showPanLogin.value = true
+    } else {
+      ElMessage.error(msg || '播放失败')
+    }
   }
   finally { pendingPlayUrl.value = '' }
 }
@@ -399,6 +480,34 @@ function onPanLoginSuccess() {
 }
 
 /**
+ * Fallback: detect pan type from error message and/or flag.
+ * Used when isPanSource() doesn't catch the flag (e.g., obfuscated names like "B度").
+ */
+function detectPanTypeFromError(error: string, flag: string): string | null {
+  const text = `${error} ${flag}`
+  const lower = text.toLowerCase()
+  if (text.includes('百度') || lower.includes('baidu') || text.includes('B度')) return 'baidu'
+  if (lower.includes('quark') || text.includes('夸克')) return 'quark'
+  if (text.includes('uc') || text.includes('UC')) return 'uc'
+  if (text.includes('阿里') || lower.includes('aliyun')) return 'aliyun'
+  if (text.includes('b站') || lower.includes('bili') || lower.includes('bilibili')) return 'bili'
+  if (text.includes('115')) return '115'
+  return null
+}
+
+/**
+ * Format play error message to be more user-friendly.
+ * Maps common pan source names to their display names.
+ */
+function formatPlayError(error: string): string {
+  if (!error) return ''
+
+  let formatted = error
+
+  return formatted
+}
+
+/**
  * Handle pan:loginExpired event from the main process.
  *
  * Fired when JarLoader detects Quark cookie expiry before playerContent, or
@@ -408,8 +517,10 @@ function onPanLoginSuccess() {
  */
 function onPanLoginExpired(panType: string) {
   console.warn('[Detail] pan:loginExpired received, panType=', panType)
-  if (panType !== 'quark') return
-  ElMessage.warning('夸克网盘登录已失效，请重新扫码登录')
+  if (panType !== 'quark' && panType !== 'uc' && panType !== 'baidu') return
+  const labels: Record<string, string> = { uc: 'UC网盘', quark: '夸克网盘', baidu: '百度网盘' }
+  const label = labels[panType] || panType
+  ElMessage.warning(`${label}登录已失效，请重新扫码登录`)
   if (lastPlayAttempt.value) {
     pendingPlayAfterLogin.value = { ...lastPlayAttempt.value }
   }
@@ -482,15 +593,15 @@ function goToConfigCenter() {
   router.replace('/')
   // Check if config center already exists in the site list, otherwise use hardcoded selection
   setTimeout(() => {
-    const hasConfig = store.sites.some(s => 
-      (s.key?.toLowerCase() === 'config') || 
+    const hasConfig = store.sites.some(s =>
+      (s.key?.toLowerCase() === 'config') ||
       (s.name?.includes('配置')) ||
       (s.api?.toLowerCase().includes('config'))
     )
     if (hasConfig) {
       // Find the config site by key/name/api and select it
-      const configSite = store.sites.find(s => 
-        (s.key?.toLowerCase() === 'config') || 
+      const configSite = store.sites.find(s =>
+        (s.key?.toLowerCase() === 'config') ||
         (s.name?.includes('配置')) ||
         (s.api?.toLowerCase().includes('config'))
       )
@@ -563,6 +674,13 @@ watch([() => store.currentPlayUrl, playSources], () => {
   }
 })
 
+// Refresh pan login state when user switches source tab
+watch(activePlaySource, (newFlag) => {
+  if (newFlag) {
+    refreshPanLoginState(newFlag)
+  }
+})
+
 onMounted(async () => {
   const sourceKey = route.params.sourceKey as string
   const vodId = route.params.vodId as string
@@ -589,6 +707,10 @@ onMounted(async () => {
     if (store.currentVod && playSources.value.length > 0) {
       activePlaySource.value = playSources.value[0].name
       refreshPanLoginState(activePlaySource.value)
+      // Initialize login state for all sources
+      for (const source of playSources.value) {
+        refreshPanLoginState(source.name)
+      }
     }
     // 启动轮询，每2秒检测localStorage中的登录状态变化
     startLoginPolling()
@@ -786,5 +908,187 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
     max-height: 100vh;
     transform: none;
   }
+}
+
+/* Play Error Dialog */
+.play-error-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(12px) saturate(1.1);
+  -webkit-backdrop-filter: blur(12px) saturate(1.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9998;
+}
+
+.play-error-card {
+  position: relative;
+  width: 400px;
+  max-width: calc(100vw - 32px);
+  background: linear-gradient(160deg, rgba(26, 31, 46, 0.96), rgba(15, 18, 28, 0.94));
+  border-radius: 20px;
+  padding: 32px 28px 24px;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+    0 24px 48px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
+  text-align: center;
+}
+
+.play-error-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 20px;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02) 50%, rgba(255, 255, 255, 0.04));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+.play-error-glow {
+  position: absolute;
+  top: -80px;
+  right: -60px;
+  width: 200px;
+  height: 200px;
+  background: radial-gradient(circle at 30% 40%, rgba(239, 68, 68, 0.18), rgba(239, 68, 68, 0.05) 50%, transparent 70%);
+  pointer-events: none;
+  animation: play-error-glow-pulse 3s ease-in-out infinite;
+}
+
+@keyframes play-error-glow-pulse {
+
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.9;
+    transform: scale(1.1);
+  }
+}
+
+.play-error-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.2), rgba(239, 68, 68, 0.08));
+  color: #f87171;
+  margin-bottom: 16px;
+  animation: play-error-icon-pulse 2s ease-in-out infinite;
+}
+
+@keyframes play-error-icon-pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.15);
+  }
+
+  50% {
+    box-shadow: 0 0 0 8px rgba(239, 68, 68, 0.05);
+  }
+}
+
+.play-error-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #f1f5f9;
+  margin: 0 0 6px;
+}
+
+.play-error-source {
+  font-size: 12px;
+  color: #64748b;
+  margin: 0 0 12px;
+  padding: 4px 12px;
+  background: rgba(100, 116, 139, 0.15);
+  border-radius: 6px;
+  display: inline-block;
+}
+
+.play-error-message {
+  font-size: 14px;
+  color: #94a3b8;
+  margin: 0 0 24px;
+  line-height: 1.5;
+}
+
+.play-error-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}
+
+.play-error-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 28px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  border: none;
+  outline: none;
+}
+
+.play-error-btn-primary {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  color: white;
+  box-shadow: 0 4px 16px rgba(239, 68, 68, 0.3);
+}
+
+.play-error-btn-primary:hover {
+  box-shadow: 0 6px 20px rgba(239, 68, 68, 0.4);
+  transform: translateY(-1px);
+}
+
+.play-error-btn-primary:active {
+  transform: translateY(0) scale(0.97);
+}
+
+/* Dialog animations */
+.play-error-dialog-enter-active {
+  transition: opacity 0.2s ease;
+}
+
+.play-error-dialog-leave-active {
+  transition: opacity 0.15s ease;
+}
+
+.play-error-dialog-enter-active .play-error-card {
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease;
+}
+
+.play-error-dialog-leave-active .play-error-card {
+  transition: transform 0.12s ease, opacity 0.1s ease;
+}
+
+.play-error-dialog-enter-from,
+.play-error-dialog-leave-to {
+  opacity: 0;
+}
+
+.play-error-dialog-enter-from .play-error-card {
+  opacity: 0;
+  transform: translateY(20px) scale(0.94);
+}
+
+.play-error-dialog-leave-to .play-error-card {
+  opacity: 0;
+  transform: translateY(-8px) scale(0.97);
 }
 </style>

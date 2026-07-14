@@ -22,7 +22,9 @@
           <div v-if="isConfigCenter" class="flex items-center justify-between mb-4 px-1">
             <h2 class="text-lg font-semibold" style="color: var(--color-text-primary)">配置中心</h2>
             <el-button size="small" :loading="store.homeLoading" @click="refreshConfigCenter">
-              <el-icon><Refresh /></el-icon>
+              <el-icon>
+                <Refresh />
+              </el-icon>
               <span class="ml-1">刷新</span>
             </el-button>
           </div>
@@ -57,7 +59,7 @@
                 'relative overflow-hidden',
                 isConfigCenter ? 'aspect-square' : 'aspect-[3/4]',
               ]">
-                <img v-if="vod.vod_pic" :src="vod.vod_pic" :class="[
+                <img v-if="vod.vod_pic" :src="processImageUrl(vod.vod_pic)" :class="[
                   'group-hover:scale-105 transition-transform duration-500',
                   isConfigCenter
                     ? 'w-3/5 h-3/5 object-contain absolute inset-0 m-auto'
@@ -103,10 +105,21 @@
             <p class="text-xs mt-2">请检查 DevTools 控制台日志，或尝试切换其他源</p>
           </div>
 
-          <!-- Pagination -->
-          <div v-if="isCategoryActive && store.categoryPageCount > 1" class="flex justify-center py-6">
-            <el-pagination :current-page="store.categoryPage" :page-count="store.categoryPageCount"
-              layout="prev, pager, next" small background @current-change="onPageChange" />
+          <!-- Scroll-to-bottom loading indicator -->
+          <div v-if="isCategoryActive && store.categoryLoading" class="flex justify-center py-6">
+            <div class="flex items-center gap-2 text-sm" style="color: var(--color-text-tertiary)">
+              <el-icon class="is-loading">
+                <Loading />
+              </el-icon>
+              <span>加载中...</span>
+            </div>
+          </div>
+
+          <!-- End of list indicator -->
+          <div
+            v-if="isCategoryActive && !store.categoryLoading && store.categoryPage >= store.categoryPageCount && store.categoryVodList.length > 0"
+            class="flex justify-center py-6">
+            <span class="text-xs" style="color: var(--color-text-tertiary)">— 已加载全部 —</span>
           </div>
         </template>
       </div>
@@ -120,13 +133,14 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onActivated, onDeactivated } from 'vue'
 import { useRouter } from 'vue-router'
-import { Box, Film, Refresh } from '@element-plus/icons-vue'
+import { Box, Film, Refresh, Loading } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore } from '../store/app'
 import { spiderEngine } from '../core/SpiderEngine'
 import { PanLogin, type PanType } from '../core/PanLogin'
 import QRLoginDialog from '../components/QRLoginDialog.vue'
 import type { Movie, SourceBean } from '../core/models'
+import { processImageUrl } from '../core/models'
 
 const store = useAppStore()
 const router = useRouter()
@@ -269,8 +283,18 @@ onDeactivated(() => {
 })
 
 function onScroll() {
-  if (scrollContainer.value) {
-    scrollTop.value = scrollContainer.value.scrollTop
+  if (!scrollContainer.value) return
+  scrollTop.value = scrollContainer.value.scrollTop
+
+  // Scroll-to-bottom auto-load next page
+  if (isCategoryActive.value && !store.categoryLoading) {
+    const el = scrollContainer.value
+    const scrollBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    // Trigger when within 200px of bottom
+    if (scrollBottom < 200 && store.categoryPage < store.categoryPageCount) {
+      console.log('[Home] scroll-to-bottom, loading next page:', store.categoryPage + 1)
+      store.loadCategory(currentTid.value, String(store.categoryPage + 1), store.filterValues)
+    }
   }
 }
 
@@ -285,14 +309,6 @@ function onCategoryChange(tid: string) {
 }
 
 // onFilterSelect 已移到 App.vue 的顶栏筛选按钮中
-
-function onPageChange(pg: number) {
-  // Scroll to top immediately so user sees the loading skeleton
-  if (scrollContainer.value) {
-    scrollContainer.value.scrollTop = 0
-  }
-  store.loadCategory(currentTid.value, String(pg), store.filterValues)
-}
 
 async function handleVodClick(vod: Movie) {
   if (vod.action) {

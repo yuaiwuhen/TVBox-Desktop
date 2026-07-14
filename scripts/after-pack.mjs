@@ -1,18 +1,9 @@
 /**
  * electron-builder afterPack hook.
  *
- * Fixes file permissions for the bundled JRE on Linux and macOS. When the JRE
- * is downloaded/extracted on Windows (or when electron-builder copies files
- * from a Windows filesystem), the executable bit on Unix binaries is lost.
- * Without this, jre/bin/java cannot be executed on Linux/macOS and the
- * spider loader fails silently.
- *
- * Also chmods jre/lib/ recursively because jspawnhelper (used by JVM's
- * ProcessBuilder to spawn child processes) lives there and must be executable.
- * Without +x on jspawnhelper, spiders calling Runtime.exec() fail with
- * "Cannot run program" IOException.
- *
- * On Windows, this hook is a no-op (Windows has no executable bit concept).
+ * 1. Fixes file permissions for the bundled JRE on Linux/macOS.
+ * 2. Verifies jvm.dll / libjvm.so exists — fail the pack if JRE is missing
+ *    so installers never ship without a Java runtime.
  */
 
 import fs from 'fs';
@@ -22,6 +13,10 @@ function findJreDir(startDir, maxDepth = 6) {
   if (maxDepth <= 0 || !fs.existsSync(startDir)) return null;
   if (fs.existsSync(path.join(startDir, 'jre', 'bin'))) {
     return path.join(startDir, 'jre');
+  }
+  // Also check resources/jre (extraResources destination for electron-builder)
+  if (fs.existsSync(path.join(startDir, 'resources', 'jre', 'bin'))) {
+    return path.join(startDir, 'resources', 'jre');
   }
   for (const entry of fs.readdirSync(startDir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
@@ -38,8 +33,10 @@ function chmodRecursive(dir) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const p = path.join(dir, entry.name);
     if (entry.isFile()) {
-      fs.chmodSync(p, 0o755);
-      fixed++;
+      try {
+        fs.chmodSync(p, 0o755);
+        fixed++;
+      } catch {}
     } else if (entry.isDirectory()) {
       fixed += chmodRecursive(p);
     }
@@ -47,22 +44,46 @@ function chmodRecursive(dir) {
   return fixed;
 }
 
+function verifyJvmLib(jreDir) {
+  const candidates = [
+    path.join(jreDir, 'bin', 'server', 'jvm.dll'),
+    path.join(jreDir, 'lib', 'server', 'libjvm.so'),
+    path.join(jreDir, 'lib', 'server', 'libjvm.dylib'),
+  ];
+  const found = candidates.find((p) => fs.existsSync(p));
+  if (!found) {
+    throw new Error(
+      `[afterPack] Bundled JRE is incomplete — no jvm library under ${jreDir}. ` +
+        `Run "pnpm build:jre" before packaging.`,
+    );
+  }
+  console.log(`[afterPack] Verified JVM library: ${found}`);
+  return found;
+}
+
 export default async function afterPack(context) {
+  const appOutDir = context.appOutDir;
   const platform = context.electronPlatformName;
-  if (platform !== 'linux' && platform !== 'darwin') return;
 
-  const jreDir = findJreDir(context.appOutDir);
+  const jreDir = findJreDir(appOutDir);
   if (!jreDir) {
-    console.log('[afterPack] JRE directory not found, skipping');
-    return;
+    throw new Error(
+      `[afterPack] No jre/ directory found in ${appOutDir}. ` +
+        `Run "pnpm build:jre" before packaging.`,
+    );
   }
 
-  console.log(`[afterPack] Fixing permissions under ${jreDir}`);
-  let fixed = 0;
-  // chmod jre/bin/ (java executable), jre/lib/ (jspawnhelper, jexec),
-  // jre/lib/server/ (libjvm.so / libjvm.dylib).
-  for (const sub of ['bin', 'lib']) {
-    fixed += chmodRecursive(path.join(jreDir, sub));
+  verifyJvmLib(jreDir);
+
+  if (platform === 'linux' || platform === 'darwin') {
+    let fixed = 0;
+    for (const sub of ['bin', 'lib']) {
+      fixed += chmodRecursive(path.join(jreDir, sub));
+    }
+    console.log(
+      `[afterPack] chmod +x on ${fixed} files under ${jreDir} (${platform})`,
+    );
+  } else {
+    console.log(`[afterPack] Windows: JRE verified at ${jreDir}`);
   }
-  console.log(`[afterPack] Fixed ${fixed} files to 0755`);
 }

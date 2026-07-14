@@ -1,0 +1,6 @@
+{
+  "name": "tvbox-e2e-tests",
+  "version": "1.0.0",
+  "description": "E2E test suite for TVBox Desktop using POM design pattern",
+  "type": "commonjs"
+}

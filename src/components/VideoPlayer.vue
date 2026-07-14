@@ -84,6 +84,10 @@ const playbackRate = ref(1);
 const isLoading = ref(true);
 const hasError = ref(false);
 const errorMessage = ref('');
+const unsupportedFormat = ref<{
+  format: string;
+  directUrl: string;
+} | null>(null);
 const showControls = ref(true);
 const isFullscreen = ref(false);
 const isAppFullscreen = ref(false);
@@ -124,6 +128,47 @@ const skipIndicator = ref('');
 
 // Screen lock
 const screenLocked = ref(false);
+
+// External player for unsupported formats
+const openWithExternalPlayer = async () => {
+  if (!unsupportedFormat.value?.directUrl) return;
+
+  const url = unsupportedFormat.value.directUrl;
+
+  // Check if VLC path is configured
+  const vlcPath = localStorage.getItem('tvbox_vlc_path');
+
+  if (vlcPath) {
+    try {
+      // Use Electron's shell.openExternal or spawn VLC
+      const { ipcRenderer } = window.require('electron');
+      await ipcRenderer.invoke('open-external-player', vlcPath, url);
+      console.log('[VideoPlayer-hevc] 已使用VLC打开:', vlcPath, url);
+    } catch (e) {
+      console.error('[VideoPlayer-hevc] 启动VLC失败:', e);
+      // Fallback: copy to clipboard
+      copyVideoUrl();
+    }
+  } else {
+    // No VLC configured, copy URL to clipboard
+    copyVideoUrl();
+  }
+};
+
+const copyVideoUrl = async () => {
+  if (!unsupportedFormat.value?.directUrl) return;
+
+  try {
+    await navigator.clipboard.writeText(unsupportedFormat.value.directUrl);
+    console.log('[VideoPlayer-hevc] URL已复制到剪贴板');
+    // Show a brief notification
+    alert('视频链接已复制到剪贴板，请粘贴到播放器中打开');
+  } catch (e) {
+    console.error('[VideoPlayer-hevc] 复制失败:', e);
+    // Fallback: show URL in a prompt
+    prompt('请复制以下链接到播放器中打开:', unsupportedFormat.value.directUrl);
+  }
+};
 
 // Double-click / long-press
 const clickFeedback = ref<{ x: number; y: number; icon: string } | null>(null);
@@ -220,7 +265,11 @@ const initPlayer = async () => {
     // 初始化HEVC解码器（备选方案）
     if (!decoderInitialized) {
       console.log('[VideoPlayer-hevc] 初始化HEVC解码器...');
-      hevcDecoder = await HEVCDecoder.create({ wasmBinaryUrl: '/wasm/hevc-decode.wasm' });
+      // Use URL constructor to properly resolve WASM path relative to current page
+      // This works for both http:// (dev server) and file:// (Electron production)
+      const wasmUrl = new URL('wasm/hevc-decode.wasm', window.location.href).href;
+      console.log('[VideoPlayer-hevc] Loading WASM from:', wasmUrl);
+      hevcDecoder = await HEVCDecoder.create({ wasmBinaryUrl: wasmUrl });
       decoderInitialized = true;
       console.log('[VideoPlayer-hevc] ✅ HEVC解码器初始化成功');
     }
@@ -233,16 +282,21 @@ const initPlayer = async () => {
     // do= parameter: do=m3u8/mxn/proxy with m3u8 content uses hls.js;
     // do=quarkDirect/ucDirect/baiduDirect are direct mp4 streams.
     const urlLower = props.url.toLowerCase();
+    // do=ali is a special proxy type for pan resolvers (quark/uc/baidu/aliyun)
+    // that returns direct video files (mp4/mkv/etc). Use native video.src for
+    // proper handling of non-m3u8 content.
     const isM3u8Url =
       urlLower.includes('.m3u8') ||
       urlLower.includes('do=m3u8') ||
       urlLower.includes('do=mxn') ||
       urlLower.includes('do=hls') ||
-      (urlLower.includes('do=proxy') && !urlLower.includes('do=quarkdirect') && !urlLower.includes('do=ucdirect') && !urlLower.includes('do=baidudirect'));
+      urlLower.includes('do=hxq') ||
+      (urlLower.includes('do=proxy') && !urlLower.includes('do=quarkdirect') && !urlLower.includes('do=ucdirect') && !urlLower.includes('do=baidudirect') && !urlLower.includes('do=ali'));
     const isDirectVideoUrl =
       urlLower.includes('do=quarkdirect') ||
       urlLower.includes('do=ucdirect') ||
       urlLower.includes('do=baidudirect') ||
+      urlLower.includes('do=ali') ||
       /\.(mp4|mkv|webm|avi|mov|flv|m4v)(\?|$)/i.test(props.url);
 
     console.log('[VideoPlayer-hevc] URL type detection:', {
@@ -263,6 +317,32 @@ const initPlayer = async () => {
         hlsPlayer.destroy();
         hlsPlayer = null;
       }
+
+      // First, probe the URL to check if the format is supported
+      // The server may return 415 UNSUPPORTED_FORMAT for MKV/AVI etc.
+      try {
+        console.log('[VideoPlayer-hevc] 探测视频格式...');
+        const probeRes = await fetch(props.url, { method: 'HEAD' });
+        if (probeRes.status === 415) {
+          // Server indicated unsupported format, get the error details
+          const errorJson = await fetch(props.url).then(r => r.json()).catch(() => null);
+          if (errorJson?.error === 'UNSUPPORTED_FORMAT') {
+            console.warn('[VideoPlayer-hevc] 不支持的视频格式:', errorJson.format);
+            hasError.value = true;
+            errorMessage.value = '此视频格式不支持网页播放';
+            unsupportedFormat.value = {
+              format: errorJson.format || '未知格式',
+              directUrl: errorJson.directUrl || props.url,
+            };
+            isLoading.value = false;
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn('[VideoPlayer-hevc] 探测请求失败，继续尝试加载:', e);
+        // Continue to try loading the video
+      }
+
       videoElement.value.src = props.url;
       videoElement.value.load();
       videoElement.value.currentTime = 0;
@@ -1356,9 +1436,34 @@ defineExpose({
 
       <!-- 错误状态 -->
       <div v-if="hasError" class="absolute inset-0 flex items-center justify-center bg-black/80 z-50">
-        <div class="text-white text-center">
-          <div class="text-2xl mb-2">❌</div>
-          <div>{{ errorMessage }}</div>
+        <div class="text-white text-center px-6">
+          <div class="text-3xl mb-4">⚠️</div>
+          <div class="text-lg mb-2">{{ errorMessage }}</div>
+
+          <!-- Unsupported format specific UI -->
+          <div v-if="unsupportedFormat" class="mt-4 space-y-3">
+            <div class="text-sm text-gray-300">
+              格式: {{ unsupportedFormat.format }}
+            </div>
+            <div class="flex gap-3 justify-center">
+              <button
+                @click="openWithExternalPlayer"
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm flex items-center gap-2"
+              >
+                <el-icon><Monitor /></el-icon>
+                外部播放器打开
+              </button>
+              <button
+                @click="copyVideoUrl"
+                class="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded-lg text-sm"
+              >
+                复制链接
+              </button>
+            </div>
+            <div class="text-xs text-gray-400 mt-2">
+              提示: 可在设置中配置VLC播放器路径
+            </div>
+          </div>
         </div>
       </div>
 

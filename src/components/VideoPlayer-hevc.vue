@@ -80,8 +80,11 @@ const initPlayer = async () => {
     // 初始化HEVC解码器
     if (!decoderInitialized) {
       console.log('[VideoPlayer-hevc] 初始化HEVC解码器...');
-      // Use wasmBinaryUrl to load .wasm file directly (public files can't be imported)
-      hevcDecoder = await HEVCDecoder.create({ wasmBinaryUrl: '/wasm/hevc-decode.wasm' });
+      // Use URL constructor to properly resolve WASM path relative to current page
+      // This works for both http:// (dev server) and file:// (Electron production)
+      const wasmUrl = new URL('wasm/hevc-decode.wasm', window.location.href).href;
+      console.log('[VideoPlayer-hevc] Loading WASM from:', wasmUrl);
+      hevcDecoder = await HEVCDecoder.create({ wasmBinaryUrl: wasmUrl });
       decoderInitialized = true;
       console.log('[VideoPlayer-hevc] ✅ HEVC解码器初始化成功');
     }
