@@ -1157,37 +1157,29 @@ export class JarLoader {
 
       let jarData: Buffer;
 
-      // Check if this is a PNG file (by magic number or isImgJar flag)
-      if (isImgJar || this.looksLikePng(rawData)) {
+      // Check if data is actually a JAR/DEX file (regardless of URL extension).
+      // Many "image" URLs (e.g. *.jpg) actually serve JAR or DEX content directly.
+      // Check this FIRST before attempting steganography extraction.
+      if (this.isJarFile(rawData)) {
         console.log(
-          '[JarLoader] File is PNG image, extracting steganography data...',
+          '[JarLoader] File is JAR format (despite image URL extension)',
+        );
+        jarData = rawData;
+      } else if (this.isDexFile(rawData)) {
+        console.log('[JarLoader] File is DEX format');
+        jarData = rawData;
+      } else if (isImgJar || this.looksLikeImage(rawData)) {
+        console.log(
+          '[JarLoader] File is image (PNG/JPG), extracting steganography data...',
         );
 
-        // Extract JAR from PNG steganography
+        // Extract JAR from image steganography
         jarData = this.extractJdFromBinary(rawData);
 
         if (jarData.length === 0) {
-          console.error('[JarLoader] Failed to extract JAR from PNG');
-
-          // Fallback: maybe the file is already a JAR/DEX (no steganography)
-          if (this.isDexFile(rawData)) {
-            console.log('[JarLoader] File is DEX format directly');
-            jarData = rawData;
-          } else if (this.isJarFile(rawData)) {
-            console.log('[JarLoader] File is JAR format directly');
-            jarData = rawData;
-          } else {
-            return false;
-          }
+          console.error('[JarLoader] Failed to extract JAR from image');
+          return false;
         }
-      } else if (this.isDexFile(rawData)) {
-        // Direct DEX file
-        console.log('[JarLoader] File is DEX format');
-        jarData = rawData;
-      } else if (this.isJarFile(rawData)) {
-        // Direct JAR file
-        console.log('[JarLoader] File is JAR format');
-        jarData = rawData;
       } else {
         // Unknown format
         console.warn('[JarLoader] Unknown file format, treating as raw JAR');
@@ -1296,6 +1288,29 @@ export class JarLoader {
       data[2] === 0x4e &&
       data[3] === 0x47
     );
+  }
+
+  /**
+   * Check if data looks like an image (PNG or JPG) by magic number.
+   * Both formats can carry Box Android's steganography: the JAR bytes are
+   * appended after the image's end marker (IEND for PNG, FFD9 for JPG).
+   */
+  private looksLikeImage(data: Buffer): boolean {
+    if (data.length < 3) return false;
+    // PNG magic: 89 50 4E 47
+    if (
+      data[0] === 0x89 &&
+      data[1] === 0x50 &&
+      data[2] === 0x4e &&
+      data[3] === 0x47
+    ) {
+      return true;
+    }
+    // JPG magic: FF D8 FF
+    if (data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -1657,11 +1672,17 @@ export class JarLoader {
     console.log('[JarLoader] Actual JAR URL:', actualJarUrl);
     console.log('[JarLoader] Expected MD5:', actualMd5);
 
-    // Check for img+ prefix (explicit PNG steganography marker)
-    // OR check if URL ends with .png (implicit PNG steganography)
+    // Check for img+ prefix (explicit image steganography marker)
+    // OR check if URL ends with .png/.jpg/.jpeg (implicit image steganography)
+    // Box Android's getImgJar works on both PNG and JPG files: it searches for
+    // the [A-Za-z]{8}** pattern anywhere in the file, which is appended after
+    // the image's end marker (IEND for PNG, FFD9 for JPG).
+    const lowerUrl = actualJarUrl.toLowerCase();
     const isImgJar =
       actualJarUrl.startsWith('img+') ||
-      actualJarUrl.toLowerCase().endsWith('.png');
+      lowerUrl.endsWith('.png') ||
+      lowerUrl.endsWith('.jpg') ||
+      lowerUrl.endsWith('.jpeg');
 
     actualJarUrl = actualJarUrl.replace('img+', '');
 
@@ -3563,10 +3584,7 @@ export class JarLoader {
           w.webContents.send('pan:loginExpired', 'baidu'),
         );
       } catch (e: any) {
-        console.warn(
-          '[JarLoader] Failed to emit pan:loginExpired:',
-          e.message,
-        );
+        console.warn('[JarLoader] Failed to emit pan:loginExpired:', e.message);
       }
       throw new Error('Baidu login required, please scan QR code');
     }
@@ -4529,7 +4547,9 @@ export class JarLoader {
                   const k = keyChars[i % keyChars.length].charCodeAt(0);
                   out.push(String.fromCharCode(c ^ k));
                 }
-                const encrypted = Buffer.from(out.join(''), 'utf8').toString('base64');
+                const encrypted = Buffer.from(out.join(''), 'utf8').toString(
+                  'base64',
+                );
                 const prefsKey = pan.label === 'uc' ? 'uc' : 'baidu';
                 editor.putStringSync(`mi.${prefsKey}`, encrypted);
                 editor.putStringSync(`.${prefsKey}`, cookie);
