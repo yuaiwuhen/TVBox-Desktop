@@ -110,6 +110,25 @@ async function main() {
   }
   console.log('✓ JAR 加载成功\n');
 
+  // ========== 同步网盘 cookie 到 JVM ==========
+  // E2E 测试直接调用 jar:callMethod IPC，绕过了 JarSpider.callMethod()，
+  // 后者会自动从 localStorage 读取 pan cookie。这里通过 pan:syncAllCookies
+  // IPC 把 localStorage 的 cookie 同步到 spider 的 SharedPreferences，
+  // 同时 getPlayerContent 也会直接传 extraCookies 给 IPC。
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('Phase 1.5: 同步网盘 cookie 到 JVM');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+  try {
+    const syncResult = await homePage.syncPanCookiesToJVM();
+    if (syncResult.synced.length > 0) {
+      console.log(`✓ 已同步 ${syncResult.synced.length} 个网盘: ${syncResult.synced.join(', ')}\n`);
+    } else {
+      console.log('⚠ 未检测到任何网盘登录信息（localStorage 无 pan_login_*）\n');
+    }
+  } catch (e) {
+    console.log(`⚠ 同步 cookie 失败: ${e.message}\n`);
+  }
+
   // ========== Phase 2: 所有源首页测试 ==========
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('Phase 2: 所有源首页功能验证');

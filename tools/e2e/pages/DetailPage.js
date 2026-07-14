@@ -85,19 +85,26 @@ class DetailPage extends BasePage {
 
   /**
    * 调用 playerContent 获取播放地址
+   *
+   * E2E 测试直接调用 jar:callMethod IPC，绕过了 JarSpider.callMethod()，
+   * 后者会自动从 localStorage 读取 pan cookie 并作为 extraCookies 传给 IPC。
+   * 这里需要手动从 localStorage 读取并传递，否则网盘源会返回"未登录"错误。
+   *
    * @param {string} key - 源 key
    * @param {string} flag - 播放源标识
    * @param {string} playId - 播放 ID
    * @returns {Promise<{url: string, msg: string, raw: string}>}
    */
   async getPlayerContent(key, flag, playId) {
+    // 从 localStorage 读取所有网盘 cookie，作为 extraCookies 传给 IPC
+    const extraCookies = await this.getPanCookiesFromStorage();
     const raw = await this.invokeWithTimeout(
       30000,
       'jar:callMethod',
       key,
       'playerContent',
       [flag, playId, ['']],
-      {},
+      extraCookies || {},
     );
     let parsed = {};
     try {

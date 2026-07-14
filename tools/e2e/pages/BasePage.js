@@ -53,6 +53,72 @@ class BasePage {
   }
 
   /**
+   * 从 localStorage 读取所有网盘的 cookie，用于 playerContent 调用
+   *
+   * 正常流程中 JarSpider.callMethod() 会自动从 localStorage 读取 pan cookie
+   * 并作为 extraCookies 传给 jar:callMethod。E2E 测试直接调用 IPC 绕过了
+   * JarSpider，所以需要手动读取并传递。
+   *
+   * @returns {Promise<Record<string, string>>} panType -> cookie 的映射
+   */
+  async getPanCookiesFromStorage() {
+    return await this.page.evaluate(() => {
+      const panTypes = ['quark', 'uc', 'aliyun', 'baidu', 'bili'];
+      const cookies = {};
+      for (const pt of panTypes) {
+        try {
+          const saved = localStorage.getItem(`pan_login_${pt}`);
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            if (parsed.cookie) {
+              cookies[pt] = parsed.cookie;
+            }
+          }
+        } catch {}
+      }
+      return cookies;
+    });
+  }
+
+  /**
+   * 同步所有网盘 cookie 到 JVM（调用 pan:syncAllCookies IPC）
+   *
+   * 这会将 localStorage 中的登录信息同步到 spider 的 SharedPreferences，
+   * 确保后续 playerContent 调用能正确读取到 cookie。
+   *
+   * @returns {Promise<{success: boolean, synced: string[], error?: string}>}
+   */
+  async syncPanCookiesToJVM() {
+    return await this.page.evaluate(async () => {
+      const { ipcRenderer } = require('electron');
+      const panTypes = ['quark', 'uc', 'aliyun', 'baidu', 'bili'];
+      const loginInfoData = {};
+      const synced = [];
+      for (const pt of panTypes) {
+        try {
+          const saved = localStorage.getItem(`pan_login_${pt}`);
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            if (parsed.cookie) {
+              loginInfoData[pt] = parsed;
+              synced.push(pt);
+            }
+          }
+        } catch {}
+      }
+      if (synced.length === 0) {
+        return { success: true, synced: [] };
+      }
+      try {
+        const result = await ipcRenderer.invoke('pan:syncAllCookies', loginInfoData);
+        return { success: result?.success !== false, synced, error: result?.error };
+      } catch (e) {
+        return { success: false, synced, error: e.message };
+      }
+    });
+  }
+
+  /**
    * 在页面上下文中执行函数
    * @param {Function} fn - 要执行的函数
    * @param  {...any} args - 参数
