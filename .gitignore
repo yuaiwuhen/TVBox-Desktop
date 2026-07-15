@@ -64,3 +64,12 @@ feimao_*.log
 # via http://127.0.0.1:9978/file/fatcat/<file>.txt). Users populate with
 # their own tokens — keep directory tracked via .gitkeep, ignore contents.
 fatcat/*.txt
+
+# Debug scripts (temporary development files)
+scripts/
+dev/
+*.error.zip
+commit_msg.txt
+test-playback*.mjs
+test-playback*.js
+pnpm-workspace.yaml
