@@ -366,18 +366,22 @@ async function main() {
           );
         }
 
-        // Find first non-msearch video for detail test
+        // Find candidate non-msearch videos for detail test.
+        // Collect up to 3 candidates so we can retry if the first one
+        // returns null vod (transient spider issue with specific videos).
         const items = homeResult.items || [];
-        const realVideo = items.find(
-          (v) => v.vod_id && !String(v.vod_id).startsWith('msearch:'),
-        );
+        const realVideos = items
+          .filter(
+            (v) => v.vod_id && !String(v.vod_id).startsWith('msearch:'),
+          )
+          .slice(0, 3);
         const msearchVideo = items.find((v) =>
           String(v.vod_id || '').startsWith('msearch:'),
         );
 
-        if (realVideo) {
+        if (realVideos.length > 0) {
           console.log(
-            `    → detail test: ${realVideo.vod_name} (id=${realVideo.vod_id})`,
+            `    → detail test: ${realVideos.length} candidate(s) (first: ${realVideos[0].vod_name} id=${realVideos[0].vod_id})`,
           );
         } else if (msearchVideo) {
           r.detailSkipped = 'all home videos are msearch: (Douban search)';
@@ -394,85 +398,104 @@ async function main() {
           );
         }
         // Store for later use in detail test
-        r._detailVideo = realVideo || null;
+        r._detailVideos = realVideos;
         r._msearchVideo = msearchVideo || null;
         r._siteKey = homeResult.siteKey;
       }
 
-      // Test detailContent only if we have a real (non-msearch) video
-      if (r._detailVideo) {
-        try {
-          const detailResult = await withTimeout(
-            page.evaluate(
-              async ({ siteKey, vodId }) => {
-                try {
-                  const { useAppStore } = await import('/src/store/app.ts');
-                  const store = useAppStore();
-                  store.setActiveSite(siteKey);
-                  await store.loadDetail(vodId);
-                  const vod = store.currentVod;
-                  if (!vod) {
-                    return { ok: false, error: 'detail returned null vod' };
-                  }
-                  // Parse episodes from vod_play_url (same logic as Detail.vue).
-                  // store.currentEpisodes is only populated after loadPlay,
-                  // so we parse here to verify the spider returned playable data.
-                  let episodes = [];
-                  if (vod.vod_play_from && vod.vod_play_url) {
-                    const sources = String(vod.vod_play_from).split('$$$');
-                    const urlGroups = String(vod.vod_play_url).split('$$$');
-                    const firstUrlGroup = urlGroups[0] || '';
-                    episodes = firstUrlGroup
-                      .split('#')
-                      .filter((s) => s)
-                      .map((ep, idx) => {
-                        const parts = ep.split('$');
-                        if (parts.length >= 2) {
-                          return {
-                            name: parts[0] || '正片',
-                            url: parts[1] || '',
-                          };
-                        }
-                        return { name: String(idx + 1), url: parts[0] || '' };
-                      })
-                      .filter((ep) => ep.url);
+      // Test detailContent only if we have at least one real (non-msearch) video.
+      // Try up to 3 candidate videos so that transient spider issues
+      // (e.g. null vod for one specific video) don't fail the whole config.
+      if (r._detailVideos && r._detailVideos.length > 0) {
+        for (let vi = 0; vi < r._detailVideos.length; vi++) {
+          const detailVideo = r._detailVideos[vi];
+          if (vi > 0) {
+            console.log(
+              `    → retry detail candidate #${vi + 1}: ${detailVideo.vod_name} (id=${detailVideo.vod_id})`,
+            );
+          }
+          try {
+            const detailResult = await withTimeout(
+              page.evaluate(
+                async ({ siteKey, vodId }) => {
+                  try {
+                    const { useAppStore } = await import('/src/store/app.ts');
+                    const store = useAppStore();
+                    store.setActiveSite(siteKey);
+                    await store.loadDetail(vodId);
+                    const vod = store.currentVod;
+                    if (!vod) {
+                      return { ok: false, error: 'detail returned null vod' };
+                    }
+                    // Parse episodes from vod_play_url (same logic as Detail.vue).
+                    // store.currentEpisodes is only populated after loadPlay,
+                    // so we parse here to verify the spider returned playable data.
+                    let episodes = [];
+                    if (vod.vod_play_from && vod.vod_play_url) {
+                      const sources = String(vod.vod_play_from).split('$$$');
+                      const urlGroups = String(vod.vod_play_url).split('$$$');
+                      const firstUrlGroup = urlGroups[0] || '';
+                      episodes = firstUrlGroup
+                        .split('#')
+                        .filter((s) => s)
+                        .map((ep, idx) => {
+                          const parts = ep.split('$');
+                          if (parts.length >= 2) {
+                            return {
+                              name: parts[0] || '正片',
+                              url: parts[1] || '',
+                            };
+                          }
+                          return { name: String(idx + 1), url: parts[0] || '' };
+                        })
+                        .filter((ep) => ep.url);
+                      return {
+                        ok: true,
+                        vodName: vod.vod_name,
+                        vodPlayFrom: vod.vod_play_from,
+                        sourcesCount: sources.length,
+                        urlGroupCount: urlGroups.length,
+                        episodesCount: episodes.length,
+                        firstEpisode: episodes[0]
+                          ? { name: episodes[0].name, url: episodes[0].url }
+                          : null,
+                      };
+                    }
                     return {
                       ok: true,
                       vodName: vod.vod_name,
-                      vodPlayFrom: vod.vod_play_from,
-                      sourcesCount: sources.length,
-                      urlGroupCount: urlGroups.length,
-                      episodesCount: episodes.length,
-                      firstEpisode: episodes[0]
-                        ? { name: episodes[0].name, url: episodes[0].url }
-                        : null,
+                      episodesCount: 0,
+                      firstEpisode: null,
+                      noPlayUrl: true,
                     };
+                  } catch (e) {
+                    return { ok: false, error: e.message || String(e) };
                   }
-                  return {
-                    ok: true,
-                    vodName: vod.vod_name,
-                    episodesCount: 0,
-                    firstEpisode: null,
-                    noPlayUrl: true,
-                  };
-                } catch (e) {
-                  return { ok: false, error: e.message || String(e) };
-                }
-              },
-              { siteKey: r._siteKey, vodId: r._detailVideo.vod_id },
-            ),
-            60000,
-            `detailContent ${cfg.name}`,
-          );
-
-          if (detailResult.ok) {
-            r.detailOk = true;
-            r.detailEpisodes = detailResult.episodesCount;
-            console.log(
-              `  ✓ detailContent: ${detailResult.vodName}, ${detailResult.episodesCount} episodes (sources: ${detailResult.sourcesCount || 0})`,
+                },
+                { siteKey: r._siteKey, vodId: detailVideo.vod_id },
+              ),
+              60000,
+              `detailContent ${cfg.name} candidate#${vi + 1}`,
             );
 
-            // Test playerContent
+            if (!detailResult.ok) {
+              // This candidate failed - record error and try next one
+              r.detailError = detailResult.error;
+              console.log(
+                `    ✗ candidate #${vi + 1} (${detailVideo.vod_name}) failed: ${r.detailError}`,
+              );
+              continue;
+            }
+
+            // Success - record details
+            r.detailOk = true;
+            r.detailEpisodes = detailResult.episodesCount;
+            r.detailError = '';
+            console.log(
+              `  ✓ detailContent: ${detailResult.vodName}, ${detailResult.episodesCount} episodes (sources: ${detailResult.sourcesCount || 0})${vi > 0 ? ` [after ${vi} retries]` : ''}`,
+            );
+
+            // Test playerContent with this successful candidate
             if (detailResult.firstEpisode) {
               try {
                 const playResult = await withTimeout(
@@ -505,7 +528,7 @@ async function main() {
                     },
                     {
                       siteKey: r._siteKey,
-                      vodId: r._detailVideo.vod_id,
+                      vodId: detailVideo.vod_id,
                       epName: detailResult.firstEpisode.name,
                       epUrl: detailResult.firstEpisode.url,
                       // Use the first source name from vod_play_from. If not
@@ -538,13 +561,20 @@ async function main() {
                 console.log(`  ✗ playerContent timeout/error: ${e.message}`);
               }
             }
-          } else {
-            r.detailError = detailResult.error;
-            console.log(`  ✗ detailContent failed: ${r.detailError}`);
+            // Detail succeeded - stop retrying
+            break;
+          } catch (e) {
+            r.detailError = e.message;
+            console.log(
+              `    ✗ candidate #${vi + 1} (${detailVideo.vod_name}) timeout/error: ${e.message}`,
+            );
+            // Continue to next candidate
           }
-        } catch (e) {
-          r.detailError = e.message;
-          console.log(`  ✗ detailContent timeout/error: ${e.message}`);
+        }
+        if (!r.detailOk) {
+          console.log(
+            `  ✗ detailContent failed after trying ${r._detailVideos.length} candidates: ${r.detailError}`,
+          );
         }
       } else if (r._msearchVideo) {
         // For msearch-only sites, try searchContent as the detail-test analog
@@ -638,7 +668,7 @@ async function main() {
   const logPath = path.join(reportDir, `configs_app_${ts}.log`);
   // Strip internal _ fields before saving
   const cleanResults = results.map((r) => {
-    const { _detailVideo, _msearchVideo, _siteKey, ...rest } = r;
+    const { _detailVideos, _msearchVideo, _siteKey, ...rest } = r;
     return rest;
   });
   const bom = '\uFEFF';
