@@ -5,12 +5,27 @@ import { JsonRuleParser } from './JsonRuleParser';
 import { JarSpider } from './JarSpider';
 import { XbpqSpider } from './XbpqSpider';
 import { XyqhikerSpider } from './XyqhikerSpider';
-import { DrpySpider } from './DrpySpider';
+// DrpySpider no longer used — drpy spiders are handled by JsSpider
 
 export class SpiderEngine {
   private spiderCache: Map<string, ISpider> = new Map();
   private spiderBaseUrl: string = '';
   private spiderUrl: string = ''; // Full spider URL from config (e.g. "https://xxx.png;md5;hash")
+  private configBaseUrl: string = ''; // Base URL from config URL for resolving relative paths
+
+  /** Set the config URL (the URL that was used to load the config JSON).
+   * Used as a fallback base URL for resolving relative paths when
+   * the spider field is not present.
+   */
+  setConfigUrl(url: string): void {
+    if (!url) return;
+    try {
+      const parsed = new URL(url);
+      this.configBaseUrl = parsed.origin + parsed.pathname.substring(0, parsed.pathname.lastIndexOf('/') + 1);
+    } catch {
+      // Not a valid URL, ignore
+    }
+  }
 
   /** Set the spider URL from the config's "spider" field.
    * Format: "https://xxx.png;md5;hash" or "https://xxx.jar;md5;hash"
@@ -100,14 +115,21 @@ export class SpiderEngine {
       return api;
     }
 
-    // If api has .js extension but no protocol, prepend spider base URL
-    if (/\.js(\?|$)/i.test(api) && this.spiderBaseUrl) {
-      return this.spiderBaseUrl + api;
+    // If api has .js extension but no protocol, prepend base URL
+    if (/\.js(\?|$)/i.test(api)) {
+      const base = this.spiderBaseUrl || this.configBaseUrl;
+      if (base) return base + api;
     }
 
-    // If api has .py extension but no protocol, prepend spider base URL
-    if (/\.py(\?|$)/i.test(api) && this.spiderBaseUrl) {
-      return this.spiderBaseUrl + api;
+    // If api has .py extension but no protocol, prepend base URL
+    if (/\.py(\?|$)/i.test(api)) {
+      const base = this.spiderBaseUrl || this.configBaseUrl;
+      if (base) return base + api;
+    }
+
+    // For other relative paths, try configBaseUrl as fallback
+    if (api && !/^https?:\/\//i.test(api) && this.configBaseUrl) {
+      return this.configBaseUrl + api;
     }
 
     // For other cases, return api as-is
@@ -162,44 +184,52 @@ export class SpiderEngine {
 
     let spider: ISpider | null = null;
 
-    // Check for Drpy spider (api contains drpy library URL)
+    // Determine if this source has a JAR URL available
+    const hasJarUrl = !!this.resolveJarUrl(source);
+    const apiStr = source.api || '';
+
+    // Check for drpy spider (api contains drpy library URL or key starts with drpy_js_)
+    // drpy spiders are JS-based — route to JsSpider which has full VM + pdfh/pdfa/cheerio
     if (
-      api.includes('drpy') ||
-      api.includes('drpy2') ||
+      apiStr.includes('drpy') ||
       key.startsWith('drpy_js_')
     ) {
       console.log(
-        `[SpiderEngine] Creating DrpySpider: key=${uniqueKey}, api=${api}`,
+        `[SpiderEngine] Creating JsSpider for drpy: key=${uniqueKey}, api=${api}`,
       );
-      spider = new DrpySpider(source);
+      // For drpy spiders, api is the drpy library URL, ext is the spider rules URL
+      // JsSpider will load both files
+      spider = new JsSpider(key, api, source.ext);
     }
-    // Check for XYQHiker spider (rule-based with XPath-like syntax)
-    else if ((source.api || '').startsWith('csp_XYQHiker')) {
-      console.log(
-        `[SpiderEngine] Creating XyqhikerSpider: key=${uniqueKey}, api=${source.api}`,
-      );
-      spider = new XyqhikerSpider(source);
-    }
-    // Check for XBPQ spider (rule-based web scraper)
-    else if ((source.api || '').startsWith('csp_XBPQ')) {
-      console.log(
-        `[SpiderEngine] Creating XbpqSpider: key=${uniqueKey}, api=${source.api}`,
-      );
-      spider = new XbpqSpider(source);
-    }
-    // Check for JAR spider (csp_ prefix)
-    else if ((source.api || '').startsWith('csp_')) {
+    // Check for JAR spider (csp_ prefix) — this includes csp_XBPQ, csp_XYQHiker, etc.
+    // When a JAR URL is available, JarSpider loads the actual Java class which is more reliable
+    else if (apiStr.startsWith('csp_')) {
       const jarUrl = api; // api is now the spiderUrl from resolveApiUrl
-      if (!jarUrl) {
-        console.warn(
-          `[SpiderEngine] JAR spider "${source.name || key}" has no spider URL`,
+      if (!jarUrl && !hasJarUrl) {
+        // No JAR URL — try custom implementations as fallback
+        if (apiStr.startsWith('csp_XYQHiker')) {
+          console.log(
+            `[SpiderEngine] No JAR, creating XyqhikerSpider: key=${uniqueKey}, api=${apiStr}`,
+          );
+          spider = new XyqhikerSpider(source);
+        } else if (apiStr.startsWith('csp_XBPQ')) {
+          console.log(
+            `[SpiderEngine] No JAR, creating XbpqSpider: key=${uniqueKey}, api=${apiStr}`,
+          );
+          spider = new XbpqSpider(source);
+        } else {
+          console.warn(
+            `[SpiderEngine] JAR spider "${source.name || key}" has no spider URL`,
+          );
+          return null;
+        }
+      } else {
+        // JAR URL available — use JarSpider for all csp_* spiders including XBPQ/XYQHiker
+        console.log(
+          `[SpiderEngine] Creating JarSpider: key=${uniqueKey}, api=${apiStr}, jarUrl=${jarUrl}`,
         );
-        return null;
+        spider = new JarSpider(uniqueKey, apiStr, jarUrl, source.ext);
       }
-      console.log(
-        `[SpiderEngine] Creating JarSpider: key=${uniqueKey}, api=${source.api}, jarUrl=${jarUrl}`,
-      );
-      spider = new JarSpider(uniqueKey, source.api || '', jarUrl, source.ext);
     } else if (api && /\.js(\?|$)/i.test(api)) {
       spider = new JsSpider(key, api, source.ext);
     } else if ((api && /\.py(\?|$)/i.test(api)) || key.startsWith('py_')) {

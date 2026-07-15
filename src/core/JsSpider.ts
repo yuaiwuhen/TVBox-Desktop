@@ -63,6 +63,20 @@ function transpileESM(code: string): string {
     "const $1 = __require__('$2');",
   );
 
+  // 3b. import X, { Y } from 'Z'  (combined default + named)
+  out = out.replace(
+    /import\s+(\w+)\s*,\s*\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]\s*;?/g,
+    (_match, defName: string, names: string, mod: string) => {
+      return `const ${defName} = __require__('${mod}'); const { ${names.trim()} } = __require__('${mod}');`;
+    },
+  );
+
+  // 3c. import 'Y' (side-effect import)
+  out = out.replace(
+    /import\s+['"]([^'"]+)['"]\s*;?/g,
+    "__require__('$1');",
+  );
+
   // 4. export default { ... } — replace with assignment to __exports__
   out = out.replace(/export\s+default\s+/g, '__exports_default__ = ');
 
@@ -1305,44 +1319,22 @@ export class JsSpider implements ISpider {
 
   async init(extend: string): Promise<void> {
     this.ext = extend || this.ext;
+    const isDrpy = this.key.startsWith('drpy_js_') || this.api.includes('drpy');
     console.log(
-      `[JsSpider] init: key=${this.key}, api=${this.api}, ext=${this.ext.substring(0, 80)}`,
+      `[JsSpider] init: key=${this.key}, api=${this.api}, ext=${this.ext.substring(0, 80)}, isDrpy=${isDrpy}`,
     );
-
-    // Download JS source
-    // Note: browsers block User-Agent header in fetch/XHR, so we omit it.
-    // The spider JS files are public and accept any UA.
-    let code: string;
-    try {
-      const resp = await axios.get(this.api, {
-        responseType: 'text',
-        timeout: 15000,
-      });
-      code =
-        typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-      console.log(
-        `[JsSpider] fetched code length: ${code.length} for ${this.key}`,
-      );
-    } catch (e) {
-      throw new Error(`[JsSpider] Failed to fetch spider ${this.key}: ${e}`);
-    }
-
-    // Decode bytecode if needed
-    code = decodeBytecode(code);
-
-    // Transpile ESM → CJS
-    code = transpileESM(code);
 
     // Build vm context with all global injections
     this.buildContext();
 
-    // Wrap and evaluate
-    const wrapped = this.wrapCode(code);
-    try {
-      vm.runInContext(wrapped, this.context!, { timeout: 10000 });
-      console.log(`[JsSpider] code evaluated successfully for ${this.key}`);
-    } catch (e) {
-      throw new Error(`[JsSpider] Failed to evaluate spider ${this.key}: ${e}`);
+    if (isDrpy) {
+      // Drpy spiders need two JS files: spider rules (ext) + drpy library (api)
+      // The spider rules define `var rule = { ... }` and the drpy library
+      // processes the rule to create spider methods
+      await this.initDrpy();
+    } else {
+      // Normal JS spider — single file
+      await this.initNormal();
     }
 
     // Resolve the spider object from the three possible formats
@@ -1375,6 +1367,154 @@ export class JsSpider implements ISpider {
         console.error(`[JsSpider] init() error for ${this.key}:`, e);
       }
     }
+  }
+
+  /**
+   * Initialize a normal (non-drpy) JS spider.
+   * Loads a single JS file from the api URL.
+   */
+  private async initNormal(): Promise<void> {
+    let code: string;
+    try {
+      const resp = await axios.get(this.api, {
+        responseType: 'text',
+        timeout: 15000,
+      });
+      code =
+        typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      console.log(
+        `[JsSpider] fetched code length: ${code.length} for ${this.key}`,
+      );
+    } catch (e) {
+      throw new Error(`[JsSpider] Failed to fetch spider ${this.key}: ${e}`);
+    }
+
+    // Decode bytecode if needed
+    code = decodeBytecode(code);
+
+    // Transpile ESM → CJS
+    code = transpileESM(code);
+
+    // Wrap and evaluate
+    const wrapped = this.wrapCode(code);
+    try {
+      vm.runInContext(wrapped, this.context!, { timeout: 10000 });
+      console.log(`[JsSpider] code evaluated successfully for ${this.key}`);
+    } catch (e) {
+      throw new Error(`[JsSpider] Failed to evaluate spider ${this.key}: ${e}`);
+    }
+  }
+
+  /**
+   * Initialize a drpy-type spider.
+   * Loads two JS files: spider rules (ext) + drpy library (api).
+   * The spider rules define `var rule = { ... }` and the drpy library
+   * processes the rule to create spider methods.
+   */
+  private async initDrpy(): Promise<void> {
+    // Resolve URLs: ext is the spider rules, api is the drpy library
+    const rulesUrl = this.resolveUrl(this.ext);
+    const libUrl = this.resolveUrl(this.api);
+
+    console.log(
+      `[JsSpider] drpy init: rulesUrl=${rulesUrl}, libUrl=${libUrl}`,
+    );
+
+    // 1. Fetch spider rules JS
+    let rulesCode: string;
+    try {
+      const resp = await axios.get(rulesUrl, {
+        responseType: 'text',
+        timeout: 15000,
+      });
+      rulesCode =
+        typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      console.log(
+        `[JsSpider] drpy rules fetched: ${rulesCode.length} bytes from ${rulesUrl}`,
+      );
+    } catch (e) {
+      throw new Error(
+        `[JsSpider] Failed to fetch drpy rules ${rulesUrl}: ${e}`,
+      );
+    }
+
+    // 2. Fetch drpy library JS
+    let libCode: string;
+    try {
+      const resp = await axios.get(libUrl, {
+        responseType: 'text',
+        timeout: 15000,
+      });
+      libCode =
+        typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      console.log(
+        `[JsSpider] drpy library fetched: ${libCode.length} bytes from ${libUrl}`,
+      );
+    } catch (e) {
+      console.warn(
+        `[JsSpider] Failed to fetch drpy library ${libUrl}: ${e}, continuing without it`,
+      );
+      libCode = '';
+    }
+
+    // 3. Decode bytecode if needed
+    rulesCode = decodeBytecode(rulesCode);
+    libCode = decodeBytecode(libCode);
+
+    // 4. Transpile both
+    rulesCode = transpileESM(rulesCode);
+    if (libCode) {
+      libCode = transpileESM(libCode);
+    }
+
+    // 5. Update baseUrl to the rules URL for resolving relative imports
+    this.baseUrl = rulesUrl.substring(0, rulesUrl.lastIndexOf('/') + 1);
+
+    // 6. Evaluate: spider rules first (defines `var rule`), then drpy library
+    // The drpy library processes the `rule` object to create spider methods
+    const combinedCode = libCode
+      ? `${rulesCode}\n// --- drpy library ---\n${libCode}`
+      : rulesCode;
+
+    const wrapped = this.wrapCode(combinedCode);
+    try {
+      vm.runInContext(wrapped, this.context!, { timeout: 15000 });
+      console.log(`[JsSpider] drpy code evaluated successfully for ${this.key}`);
+    } catch (e) {
+      // If combined evaluation fails, try rules-only (the rules might already
+      // implement the spider methods directly without needing the drpy library)
+      console.warn(
+        `[JsSpider] drpy combined eval failed for ${this.key}: ${e}, trying rules-only`,
+      );
+      const rulesOnlyWrapped = this.wrapCode(rulesCode);
+      try {
+        vm.runInContext(rulesOnlyWrapped, this.context!, { timeout: 10000 });
+        console.log(
+          `[JsSpider] drpy rules-only evaluated for ${this.key}`,
+        );
+      } catch (e2) {
+        throw new Error(
+          `[JsSpider] Failed to evaluate drpy spider ${this.key}: ${e2}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Resolve a potentially relative URL against the spider base URL.
+   */
+  private resolveUrl(url: string): string {
+    if (!url) return '';
+    if (/^https?:\/\//i.test(url)) return url;
+    if (url.startsWith('//')) return 'https:' + url;
+    if (url.startsWith('./') || url.startsWith('../') || url.startsWith('/')) {
+      try {
+        return new URL(url, this.baseUrl).href;
+      } catch {
+        return this.baseUrl + url.replace(/^\.\//, '');
+      }
+    }
+    return this.baseUrl + url;
   }
 
   async homeContent(filter: boolean): Promise<string> {

@@ -19,6 +19,14 @@ public class Proxy {
         return "http://127.0.0.1:" + port;
     }
 
+    /**
+     * Returns the local proxy URL for XYQHiker/XYQBiu spiders.
+     * Called during spider init to build request URLs through the proxy.
+     */
+    public static String localProxyUrl() {
+        return "http://127.0.0.1:" + port;
+    }
+
     public static Object[] proxy(java.util.Map<String, String> params) {
         // Delegate to ProxyOrigin.proxy if available
         try {

@@ -129,6 +129,12 @@ export class JarLoader {
   // java-bridge async methods, not on the Node.js event loop).
   private guardSpiderJarPromise: Promise<boolean> | null = null;
 
+  // Case-insensitive class name lookup for Guard spiders. Config API names
+  // use lowercase (e.g. csp_WexzhizhenGuard → "Wexzhizhen") but JAR classes
+  // use CamelCase (e.g. "NewZhiZhen"). Map from lowercaseSimpleName → actual
+  // full class name (e.g. "wexzhizhen" → "com.github.catvod.spider.NewZhiZhen").
+  private guardClassNameMap: Map<string, string> = new Map();
+
   constructor() {
     // Install global error handlers to capture all Java-related errors
     this.installGlobalErrorHandlers();
@@ -937,12 +943,29 @@ export class JarLoader {
               process.env.PATH = jreBinDir + path.delimiter + oldPath;
               console.log('[JarLoader] Added JRE bin/ to PATH:', jreBinDir);
             }
-          } else {
+
+      } else {
             console.warn(
               '[JarLoader] Bundled JVM library not found under',
               bundledJre,
               '— falling back to system JAVA_HOME',
             );
+          }
+        }
+
+        // Add project directory to PATH so Java Runtime.exec() can find
+        // getprop.exe and chmod.exe stubs. Guard spiders call
+        // Runtime.exec("getprop ro.product.cpu.abi") during init to detect
+        // CPU architecture. On Windows, ProcessBuilder only finds .exe files
+        // via PATH — not from cwd alone.
+        const stubExeDir = app.isPackaged
+          ? path.join(process.resourcesPath, 'tools')
+          : process.cwd();
+        if (fs.existsSync(path.join(stubExeDir, 'getprop.exe'))) {
+          const curPath = process.env.PATH || '';
+          if (!curPath.includes(stubExeDir)) {
+            process.env.PATH = stubExeDir + path.delimiter + curPath;
+            console.log('[JarLoader] Added stub exe dir to PATH:', stubExeDir);
           }
         }
         const created = java.ensureJvm(jvmOpts);
@@ -1014,6 +1037,23 @@ export class JarLoader {
     ];
     for (const p of candidates) {
       if (fs.existsSync(p)) return p;
+    }
+    return null;
+  }
+
+  /**
+   * Find the JRE bin directory containing jar/jar.exe.
+   * Used by loadGuardSpiderJar() to run `jar tf` for class name enumeration.
+   */
+  private getBundledJreBinDir(): string | null {
+    const candidateDirs = [
+      path.join(process.resourcesPath || '', 'jre', 'bin'),
+      path.join(process.cwd(), 'jre', 'bin'),
+      path.join(path.dirname(process.cwd()), 'jre', 'bin'),
+    ];
+    for (const d of candidateDirs) {
+      const jarExe = path.join(d, process.platform === 'win32' ? 'jar.exe' : 'jar');
+      if (fs.existsSync(jarExe)) return d;
     }
     return null;
   }
@@ -2036,6 +2076,21 @@ export class JarLoader {
       }
     }
 
+    // 4. XYQHiker → XYQBiu mapping
+    // Bili.jar and other JARs use "XYQBiu" instead of "XYQHiker"
+    if (baseName === 'XYQHiker' || baseName === 'XYQHikerAL') {
+      const biuName = baseName.replace('XYQHiker', 'XYQBiu');
+      if (!candidates.includes(biuName)) candidates.push(biuName);
+      const newBiuName = 'New' + biuName;
+      if (!candidates.includes(newBiuName)) candidates.push(newBiuName);
+    }
+    if (baseName === 'XYQBiu' || baseName === 'XYQBiuAL') {
+      const hikerName = baseName.replace('XYQBiu', 'XYQHiker');
+      if (!candidates.includes(hikerName)) candidates.push(hikerName);
+      const newHikerName = 'New' + hikerName;
+      if (!candidates.includes(newHikerName)) candidates.push(newHikerName);
+    }
+
     return candidates;
   }
 
@@ -2346,6 +2401,50 @@ export class JarLoader {
       }
 
       this.classLoaders.set('wexguard-spider', true);
+
+      // Build case-insensitive class name lookup from the JAR file.
+      // Config API names use lowercase (e.g. csp_WexzhizhenGuard →
+      // "Wexzhizhen") but JAR classes use CamelCase ("NewZhiZhen").
+      // We use `jar tf` (bundled JRE) to list class entries and cache
+      // them for case-insensitive fallback matching in initSpider().
+      try {
+        const jreBinDir = this.getBundledJreBinDir();
+        const jarCmd = jreBinDir
+          ? path.join(jreBinDir, process.platform === 'win32' ? 'jar.exe' : 'jar')
+          : 'jar';
+        const { stdout } = await execAsync(
+          `"${jarCmd}" tf "${jarPath}"`,
+          { timeout: 10000 },
+        );
+        const lines = stdout.split(/\r?\n/);
+        let count = 0;
+        for (const line of lines) {
+          const name = line.trim();
+          if (
+            name.startsWith('com/github/catvod/spider/') &&
+            name.endsWith('.class') &&
+            !name.includes('$')
+          ) {
+            const simpleName = name
+              .slice('com/github/catvod/spider/'.length, -'.class'.length);
+            const fullName = name
+              .slice(0, -'.class'.length)
+              .replace(/\//g, '.');
+            // Index by lowercase for case-insensitive lookup
+            this.guardClassNameMap.set(simpleName.toLowerCase(), fullName);
+            count++;
+          }
+        }
+        console.log(
+          `[JarLoader] Guard spider class name cache: ${count} classes`,
+        );
+      } catch (listErr: any) {
+        console.warn(
+          '[JarLoader] Failed to list guard JAR entries (non-critical):',
+          listErr.message,
+        );
+      }
+
       console.log('[JarLoader] WexGuard spider JAR loaded');
 
       // Warm up: force-load the big utility class whose static initializer
@@ -2552,11 +2651,65 @@ export class JarLoader {
       }
 
       if (!SpiderClass) {
-        this.lastError = `Spider class not found. Tried candidates: ${failedCandidates.join(
-          ', ',
-        )}. The JAR may not contain this class or may not have been converted from DEX format.`;
-        console.error('[JarLoader]', this.lastError);
-        return false;
+        // Fallback: case-insensitive class name lookup for Guard spiders.
+        // Config API names use lowercase (e.g. csp_WexzhizhenGuard →
+        // "Wexzhizhen") but JAR classes use CamelCase ("NewZhiZhen").
+        if (isGuard && this.guardClassNameMap.size > 0) {
+          // Try the base name (without "Guard") in lowercase
+          const lowerKey = realClsKey.toLowerCase();
+          // Also try with "new" prefix and without
+          const tryKeys = [lowerKey];
+          if (!lowerKey.startsWith('new')) {
+            tryKeys.push('new' + lowerKey);
+          }
+          // Also try with "wex" prefix stripped for some patterns
+          // e.g. csp_WexzhizhenGuard → realClsKey="Wexzhizhen" → try "zhizhen"
+          if (lowerKey.startsWith('wex')) {
+            tryKeys.push(lowerKey.slice(3)); // without "wex"
+            if (!lowerKey.startsWith('new')) {
+              tryKeys.push('new' + lowerKey.slice(3));
+            }
+          }
+
+          for (const tryKey of tryKeys) {
+            const matchedFullName = this.guardClassNameMap.get(tryKey);
+            if (matchedFullName) {
+              try {
+                console.log(
+                  '[JarLoader] Case-insensitive fallback: trying',
+                  matchedFullName,
+                  `(key="${tryKey}" from "${realClsKey}")`,
+                );
+                const fallbackClass =
+                  this.java.importClass(matchedFullName);
+                if (fallbackClass) {
+                  SpiderClass = fallbackClass;
+                  fullClassName = matchedFullName;
+                  console.log(
+                    '[JarLoader] Successfully loaded spider class via case-insensitive match:',
+                    fullClassName,
+                  );
+                  break;
+                }
+              } catch (fallbackErr: any) {
+                console.log(
+                  '[JarLoader] Case-insensitive fallback failed for',
+                  matchedFullName,
+                  '-',
+                  fallbackErr.message,
+                );
+              }
+            }
+          }
+        }
+
+        if (!SpiderClass) {
+          this.lastError = `Spider class not found. Tried candidates: ${failedCandidates.join(
+            ', ',
+          )}. The JAR may not contain this class or may not have been converted from DEX format.`;
+          console.error('[JarLoader]', this.lastError);
+          return false;
+        }
       }
 
       const spider = new SpiderClass();
@@ -4658,7 +4811,17 @@ export class JarLoader {
           } catch (e: any) {
             // Non-Guard spiders don't have this field — ignore.
           }
-          return;
+          // Guard spiders (NewWogg/NewJuTou) only need init(Context) —
+          // they read siteconfig and don't use the ext string.
+          // Non-Guard SpiderApi subclasses (XBPQ, XYQBiu, etc.) also
+          // override init(Context) to do base setup, but they need the
+          // ext string passed via init(Context, String) to set request
+          // rules, headers, etc. Without this, homeContent returns class
+          // list but no video items, and categoryContent NPEs because
+          // the JSON config fields are never parsed.
+          if (instance.isGuard) {
+            return;
+          }
         } catch (ctxInitErr: any) {
           console.warn(
             '[JarLoader] init(Context) failed, falling back:',
@@ -6019,6 +6182,19 @@ export const jarLoader = new JarLoader();
 
 // IPC Handlers - register in main.ts
 export function registerJarLoaderIPC(): void {
+  // Remove existing handlers to prevent duplicate registration errors
+  // during Electron hot reload in dev mode
+  const handlerNames = [
+    'jar:load', 'jar:getSpider', 'jar:initSpider', 'jar:callMethod',
+    'jar:getLastError', 'jar:listSpiderMethods', 'jar:prefs:getNames',
+    'jar:prefs:getValue', 'jar:prefs:setValue', 'jar:clear',
+    'jar:clearSpiderCache', 'jar:testAllSources', 'jar:testGuardSources',
+    'jar:debugClassLoad',
+  ];
+  for (const name of handlerNames) {
+    try { ipcMain.removeHandler(name); } catch { /* ignore */ }
+  }
+
   // Load JAR - returns {success: boolean, error: string}
   ipcMain.handle(
     'jar:load',
@@ -6229,6 +6405,98 @@ export function registerJarLoaderIPC(): void {
   ipcMain.handle('jar:testGuardSources', async () => {
     return jarLoader.testGuardSources();
   });
+
+  // Debug: test class loading from a specific JAR
+  ipcMain.handle(
+    'jar:debugClassLoad',
+    async (_event, className: string, jarUrl: string) => {
+      try {
+        if (!jarLoader.java) {
+          return { success: false, error: 'java-bridge not available' };
+        }
+        const results: any = { className, jarUrl };
+
+        // Try importClass directly
+        try {
+          const cls = jarLoader.java.importClass(className);
+          results.importClassResult = !!cls;
+          if (cls) {
+            try {
+              const instance = new cls();
+              results.newInstanceResult = !!instance;
+            } catch (instErr: any) {
+              results.newInstanceError = instErr.message;
+            }
+          }
+        } catch (importErr: any) {
+          results.importClassError = importErr.message;
+        }
+
+        // List classpath entries
+        try {
+          const cp = jarLoader.java.classpath.get();
+          results.classpathEntries = cp.length;
+          results.classpathList = cp.slice(-10); // last 10 entries
+        } catch (cpErr: any) {
+          results.classpathError = cpErr.message;
+        }
+
+        // Try listing spider classes from the JAR using JarFile
+        if (jarUrl) {
+          const urls = jarUrl.split(';md5;');
+          const jarKey = crypto
+            .createHash('md5')
+            .update(urls[0])
+            .digest('hex');
+          results.jarKey = jarKey;
+          results.classLoadersHas = jarLoader.classLoaders.has(jarKey);
+
+          // Try to read class names from JAR file on disk
+          const jarCacheDir = jarLoader.jarCacheDir;
+          const convertedPath = path.join(
+            jarCacheDir,
+            `${jarKey}_converted.jar`,
+          );
+          const originalPath = path.join(jarCacheDir, `${jarKey}.jar`);
+          results.convertedJarExists = fs.existsSync(convertedPath);
+          results.originalJarExists = fs.existsSync(originalPath);
+
+          // Use java.util.jar.JarFile to list entries
+          try {
+            const JarFileClass = jarLoader.java.importClass(
+              'java.util.jar.JarFile',
+            );
+            const jarFilePath =
+              fs.existsSync(convertedPath) ? convertedPath : originalPath;
+            const jarFile = new JarFileClass(jarFilePath);
+            const entries = jarFile.entriesSync();
+            const spiderClasses: string[] = [];
+            while (entries.hasMoreElementsSync()) {
+              const entry = entries.nextElementSync();
+              const name = entry.getNameSync();
+              if (
+                name.startsWith('com/github/catvod/spider/') &&
+                name.endsWith('.class') &&
+                !name.includes('$') &&
+                !name.includes('/merge/')
+              ) {
+                spiderClasses.push(name);
+              }
+            }
+            jarFile.closeSync();
+            results.spiderClassesInJar = spiderClasses;
+          } catch (jarErr: any) {
+            results.jarListError = jarErr.message;
+          }
+        }
+
+        results.success = true;
+        return results;
+      } catch (e: any) {
+        return { success: false, error: e.message };
+      }
+    },
+  );
 
   console.log('[JarLoader] IPC handlers registered');
 

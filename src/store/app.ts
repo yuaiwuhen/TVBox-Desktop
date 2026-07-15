@@ -183,6 +183,8 @@ export const useAppStore = defineStore('app', () => {
       if (spiderBase) {
         spiderEngine.setSpiderBaseUrl(spiderBase);
       }
+      // Pass config URL as fallback base URL for resolving relative paths
+      spiderEngine.setConfigUrl(configUrl.value);
 
       if (
         !activeSiteKey.value ||
