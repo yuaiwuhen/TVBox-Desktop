@@ -83,9 +83,8 @@
       <div class="detail-hero relative overflow-hidden">
         <div v-if="store.currentVod.vod_pic" class="absolute inset-0 bg-cover bg-center"
           :style="{ backgroundImage: `url(${processImageUrl(store.currentVod.vod_pic)})` }" />
-        <div class="absolute inset-0"
-          style="background: linear-gradient(to right, var(--color-bg-base) 0%, var(--color-bg-base) 40%, rgba(15,17,23,0.85) 70%, rgba(15,17,23,0.6) 100%)">
-        </div>
+        <div class="absolute inset-0 detail-hero-overlay" />
+        <div class="absolute inset-0 detail-hero-blur" />
         <div class="relative flex flex-col md:flex-row gap-6 p-6">
           <div class="w-44 h-60 flex-shrink-0 rounded-lg overflow-hidden detail-poster-shadow"
             style="background: var(--color-bg-elevated)">
@@ -113,7 +112,7 @@
             <p v-if="store.currentVod.vod_content"
               class="mt-4 text-sm leading-relaxed max-w-4xl rounded-lg p-4 cursor-pointer detail-desc"
               :class="{ 'line-clamp-4': !descExpanded }"
-              style="background: rgba(30, 33, 48, 0.6); color: var(--color-text-secondary)"
+              style="background: var(--color-bg-glass); color: var(--color-text-secondary)"
               @click="descExpanded = !descExpanded">
               {{ store.currentVod.vod_content }}
               <span class="text-xs ml-1" style="color: var(--color-primary)">{{ descExpanded ? '收起' : '展开' }}</span>
@@ -821,12 +820,27 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
   min-height: 200px;
 }
 
+/* Gradient overlay - fades from solid base to transparent */
+.detail-hero-overlay {
+  background: linear-gradient(to right,
+      var(--color-bg-base) 0%,
+      var(--color-bg-base) 40%,
+      var(--color-bg-glass-heavy) 70%,
+      var(--color-bg-glass) 100%);
+}
+
+/* Blur layer over the poster image */
+.detail-hero-blur {
+  backdrop-filter: blur(20px) saturate(120%);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
+}
+
 .detail-poster-shadow {
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--surface-floating-shadow);
 }
 
 .detail-player-shadow {
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--surface-floating-shadow);
 }
 
 /* Description area */

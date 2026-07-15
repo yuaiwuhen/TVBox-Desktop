@@ -10,6 +10,7 @@
   --color-primary-active: #d07a2a;
   --color-primary-soft: rgba(232, 145, 58, 0.15);
   --color-primary-border: rgba(232, 145, 58, 0.5);
+  --color-primary-glow: rgba(232, 145, 58, 0.25);
 
   /* Semantic */
   --color-success: #34d399;
@@ -31,6 +32,8 @@
   --transition-fast: 150ms ease;
   --transition-normal: 250ms ease;
   --transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* ===== LIGHT mode (default, no class) ===== */

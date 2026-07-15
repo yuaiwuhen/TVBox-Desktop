@@ -403,22 +403,24 @@ function refreshConfigCenter() {
   scrollbar-width: none;
 }
 
-/* Category pills */
+/* Category pills - glassmorphic blur */
 .category-pill {
-  background: var(--color-bg-elevated);
+  background: var(--color-bg-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   color: var(--color-text-secondary);
   border: 1px solid transparent;
 }
 
 .category-pill:hover {
-  background: var(--color-bg-overlay);
+  background: var(--color-bg-glass-heavy);
   color: var(--color-text-primary);
 }
 
 .category-pill-active {
   background: var(--color-primary) !important;
   color: #fff !important;
-  box-shadow: 0 2px 8px rgba(232, 145, 58, 0.3);
+  box-shadow: 0 2px 12px var(--color-primary-glow);
 }
 
 /* Filter chips */
@@ -441,12 +443,12 @@ function refreshConfigCenter() {
 
 /* Video card hover effect */
 .vod-card {
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-  transition: transform 300ms ease, box-shadow 300ms ease;
+  box-shadow: var(--surface-static-shadow);
+  transition: transform 300ms var(--ease-out-expo, ease), box-shadow 300ms ease;
 }
 
 .vod-card:hover {
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--surface-floating-shadow);
 }
 
 .vod-card-action {
