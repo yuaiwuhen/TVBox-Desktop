@@ -3861,8 +3861,20 @@ export class JarLoader {
         'tvbox_' + this.sanitizeSpiderKey(key),
       );
       if (fs.existsSync(spiderCacheDir)) {
-        fs.rmSync(spiderCacheDir, { recursive: true, force: true });
-        console.log('[JarLoader] Cleared spider file cache:', spiderCacheDir);
+        // Preserve native libraries (libLoadNiMa.so etc.) across retries.
+        // They are large, static, and do not change between retries.
+        // Only clear siteconfig and other transient cache files.
+        const entries = fs.readdirSync(spiderCacheDir);
+        for (const entry of entries) {
+          if (entry.endsWith('.so')) continue;
+          const entryPath = path.join(spiderCacheDir, entry);
+          try {
+            fs.rmSync(entryPath, { recursive: true, force: true });
+          } catch {
+            // ignore individual file deletion errors
+          }
+        }
+        console.log('[JarLoader] Cleared spider file cache (preserved .so):', spiderCacheDir);
       }
     } catch (e: any) {
       console.error('[JarLoader] clearSpiderFileCache error:', e.message);
