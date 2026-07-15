@@ -262,6 +262,47 @@ function onFilterPopoverHide() {
 }
 
 let timeTimer: ReturnType<typeof setInterval> | null = null
+let msgPollTimer: ReturnType<typeof setInterval> | null = null
+
+function updateCloseAllBar() {
+  const msgs = document.querySelectorAll('.el-message')
+  const CLOSE_ALL_ID = '__msg_close_all__'
+  let bar = document.getElementById(CLOSE_ALL_ID)
+  if (msgs.length > 5) {
+    if (!bar) {
+      console.log(`[App] Messages > 5 (${msgs.length}), creating close-all bar`)
+      bar = document.createElement('div')
+      bar.id = CLOSE_ALL_ID
+      bar.textContent = `关闭全部（${msgs.length} 条）`
+      bar.style.cssText = `
+        position: fixed;
+        z-index: 9999;
+        top: 10px;
+        right: 16px;
+        background: #e8913a;
+        color: #fff;
+        font-size: 12px;
+        padding: 5px 12px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-weight: 500;
+        line-height: 1.4;
+        box-shadow: 0 2px 8px rgba(0,0,0,.25);
+        user-select: none;
+      `
+      bar.addEventListener('click', () => ElMessage.closeAll())
+      document.body.appendChild(bar)
+    } else {
+      bar.textContent = `关闭全部（${msgs.length} 条）`
+    }
+  } else if (bar) {
+    bar.remove()
+  }
+}
+
+// Poll every 500ms to check for message count
+msgPollTimer = setInterval(updateCloseAllBar, 500)
+
 function updateTime() {
   const now = new Date()
   const h = String(now.getHours()).padStart(2, '0')
@@ -273,6 +314,8 @@ timeTimer = setInterval(updateTime, 30000)
 
 onBeforeUnmount(() => {
   if (timeTimer) clearInterval(timeTimer)
+  if (msgPollTimer) clearInterval(msgPollTimer)
+  document.getElementById('__msg_close_all__')?.remove()
 
   // Flush any pending config saves before the app closes
   try {
@@ -459,6 +502,7 @@ onMounted(async () => {
   } catch (e) {
     console.warn('[App] Failed to register IPC listeners:', e)
   }
+
 })
 
 const onSiteChange = (val: string) => {

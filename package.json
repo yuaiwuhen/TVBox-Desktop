@@ -9,7 +9,7 @@
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/run-dev.mjs",
     "build": "vite build && electron-builder --publish never",
     "build:dir": "vite build && electron-builder --dir --publish never",
     "build:jre": "node scripts/download-jre.mjs",
