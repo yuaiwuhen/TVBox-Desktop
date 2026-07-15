@@ -43,6 +43,20 @@ html {
   --color-bg-elevated: #ffffff;
   --color-bg-overlay: #f0f0f3;
 
+  /* Glass morphism surfaces (light) */
+  --color-bg-glass: rgba(255, 255, 255, 0.7);
+  --color-bg-glass-heavy: rgba(255, 255, 255, 0.88);
+  --color-bg-glass-light: rgba(255, 255, 255, 0.5);
+  --glass-blur: blur(24px) saturate(180%);
+  --glass-blur-heavy: blur(40px) saturate(200%);
+  --glass-border: 1px solid rgba(0, 0, 0, 0.06);
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+
+  /* Surface shadows */
+  --surface-static-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --surface-floating-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+  --surface-modal-shadow: 0 24px 80px rgba(0, 0, 0, 0.12);
+
   /* Text */
   --color-text-primary: #1d1d1f;
   --color-text-secondary: #6e6e73;
@@ -130,10 +144,24 @@ html.dark {
   color-scheme: dark;
 
   /* Surface */
-  --color-bg-base: #0f1117;
-  --color-bg-surface: #161923;
-  --color-bg-elevated: #1e2130;
-  --color-bg-overlay: #252838;
+  --color-bg-base: #0a0b10;
+  --color-bg-surface: #14151e;
+  --color-bg-elevated: #1a1c26;
+  --color-bg-overlay: #222430;
+
+  /* Glass morphism surfaces */
+  --color-bg-glass: rgba(20, 21, 30, 0.6);
+  --color-bg-glass-heavy: rgba(10, 11, 16, 0.82);
+  --color-bg-glass-light: rgba(26, 28, 38, 0.45);
+  --glass-blur: blur(24px) saturate(180%);
+  --glass-blur-heavy: blur(40px) saturate(200%);
+  --glass-border: 1px solid rgba(255, 255, 255, 0.06);
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  /* Surface shadows */
+  --surface-static-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --surface-floating-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  --surface-modal-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
 
   /* Text */
   --color-text-primary: #f1f2f6;

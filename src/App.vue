@@ -1,14 +1,16 @@
 <template>
   <div class="h-screen w-full flex" style="background: var(--color-bg-base)">
     <!-- Sidebar -->
-    <aside class="flex flex-col flex-shrink-0 overflow-hidden border-r" :style="{
+    <aside class="flex flex-col flex-shrink-0 overflow-hidden" :style="{
       width: sidebarExpanded ? 'var(--spacing-sidebar-expanded)' : 'var(--spacing-sidebar-collapsed)',
-      background: 'var(--color-bg-surface)',
-      borderColor: 'var(--color-border)',
+      background: 'var(--color-bg-glass)',
+      backdropFilter: 'var(--glass-blur)',
+      WebkitBackdropFilter: 'var(--glass-blur)',
+      borderRight: 'var(--glass-border)',
       transition: 'width var(--transition-slow)',
     }">
       <!-- Logo -->
-      <div class="flex items-center h-14 px-4 flex-shrink-0 border-b" style="border-color: var(--color-border)">
+      <div class="flex items-center h-14 px-4 flex-shrink-0" style="border-bottom: var(--glass-border)">
         <el-icon :size="24" style="color: var(--color-primary)">
           <VideoPlay />
         </el-icon>
@@ -41,8 +43,8 @@
       </nav>
 
       <!-- Collapse toggle -->
-      <div class="flex items-center justify-center h-12 border-t flex-shrink-0"
-        style="border-color: var(--color-border)">
+      <div class="flex items-center justify-center h-12 flex-shrink-0"
+        style="border-top: var(--glass-border)">
         <el-button text circle @click="sidebarExpanded = !sidebarExpanded">
           <el-icon :size="18" style="color: var(--color-text-tertiary)">
             <component :is="sidebarExpanded ? 'Fold' : 'Expand'" />
@@ -54,8 +56,13 @@
     <!-- Main Area -->
     <div class="flex-1 flex flex-col h-full overflow-hidden">
       <!-- Topbar -->
-      <header class="flex items-center h-14 px-4 flex-shrink-0 border-b z-10"
-        style="background: var(--color-bg-surface); border-color: var(--color-border)">
+      <header class="flex items-center h-14 px-4 flex-shrink-0 z-10"
+        :style="{
+          background: 'var(--color-bg-glass)',
+          backdropFilter: 'var(--glass-blur)',
+          WebkitBackdropFilter: 'var(--glass-blur)',
+          borderBottom: 'var(--glass-border)',
+        }">
         <div class="flex items-center gap-2">
           <span class="text-xs font-medium" style="color: var(--color-text-tertiary)">当前源</span>
           <el-select :model-value="store.activeSiteKey" placeholder="选择视频源" class="!w-52" size="small"
