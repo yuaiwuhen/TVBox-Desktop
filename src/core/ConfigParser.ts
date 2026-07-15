@@ -675,6 +675,28 @@ export class ConfigParser {
       // Fix relative ./ paths
       json = fixContentPath(url, json);
 
+      // Detect multi-config wrapper format {"urls":[{name,url},...]}.
+      // This format (used by 及时雨 and similar aggregator configs) lists
+      // multiple sub-config URLs that must each be fetched and merged.
+      // Mirrors Android TVBox's MultiConfigLoader behavior.
+      const wrapper = lenientJsonParse(json);
+      if (
+        wrapper &&
+        Array.isArray(wrapper.urls) &&
+        wrapper.urls.length > 0 &&
+        !wrapper.sites &&
+        !wrapper.video?.sites
+      ) {
+        console.log(
+          `[ConfigParser] detected multi-config wrapper with ${wrapper.urls.length} sub-URLs`,
+        );
+        const mergedJson = await this.loadMultiConfig(wrapper.urls);
+        json = JSON.stringify(mergedJson);
+        console.log(
+          `[ConfigParser] merged multi-config: ${mergedJson.sites?.length || 0} sites total`,
+        );
+      }
+
       // Parse the JSON into internal state
       this.parseJson(url, json);
 
@@ -701,6 +723,138 @@ export class ConfigParser {
       }
       throw error;
     }
+  }
+
+  /**
+   * Fetch each sub-URL in a multi-config wrapper ({urls:[{name,url},...]})
+   * and merge their sites/parses/flags into a single combined config JSON.
+   * Failed sub-URLs are skipped (logged as warnings) so one bad URL doesn't
+   * break the whole aggregator config.
+   */
+  private async loadMultiConfig(
+    urls: Array<{ name?: string; url: string }>,
+  ): Promise<any> {
+    const ipc = getIPC();
+    if (!ipc) {
+      throw new Error('Electron IPC not available for multi-config fetch');
+    }
+
+    // Fetch all sub-URLs in parallel for speed (typical aggregator has 20+ URLs)
+    const results = await Promise.all(
+      urls.map(async (u) => {
+        const subUrl = String(u.url || '').trim();
+        const subName = String(u.name || '').trim();
+        if (!subUrl) return null;
+        try {
+          const result = await ipc.invoke('config:fetchRemote', subUrl);
+          if (!result || !result.ok) {
+            console.warn(
+              `[ConfigParser] multi-config sub-URL failed: ${subName} ${subUrl} (${result?.error || `HTTP ${result?.status}`})`,
+            );
+            return null;
+          }
+          const binaryString = atob(result.bodyBase64);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          let subJson = tryExtractConfig(bytes);
+          if (!subJson) {
+            subJson = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+          }
+          subJson = ConfigParser.findResult(subJson, null);
+          subJson = fixContentPath(subUrl, subJson);
+          const parsed = lenientJsonParse(subJson);
+          if (!parsed) {
+            console.warn(
+              `[ConfigParser] multi-config sub-URL not JSON: ${subName} ${subUrl}`,
+            );
+            return null;
+          }
+          return { url: subUrl, name: subName, parsed };
+        } catch (e: any) {
+          console.warn(
+            `[ConfigParser] multi-config sub-URL error: ${subName} ${subUrl}:`,
+            e?.message || e,
+          );
+          return null;
+        }
+      }),
+    );
+
+    // Merge all successfully-parsed sub-configs
+    const merged: any = {
+      sites: [],
+      parses: [],
+      flags: [],
+      live: [],
+      ijkCodes: [],
+    };
+    let mergedSpider = '';
+    let mergedWallpaper = '';
+
+    for (const r of results) {
+      if (!r) continue;
+      const p = r.parsed;
+      // Sites: append each sub-config's sites with a name prefix to avoid
+      // key collisions across sub-configs (different configs may share keys
+      // like "csp_AppYsV2").
+      const subSites: any[] = p.video?.sites ?? p.sites ?? [];
+      for (const s of subSites) {
+        if (!s || !s.key) continue;
+        // Prefix the key with the sub-config index/name to make it unique
+        // across all sub-configs. Original key is preserved as the display
+        // key (used by spiders as the lookup key in their internal maps).
+        const uniqueKey = `${r.name || r.url}::${s.key}`;
+        merged.sites.push({
+          ...s,
+          key: uniqueKey,
+          // Preserve original key as a separate field so we can fall back to
+          // it for spider init (some spiders look up their config by key).
+          originalKey: s.key,
+          name: s.name || s.key,
+        });
+      }
+      // spider (global JAR URL): take the first non-empty
+      if (!mergedSpider && p.spider) mergedSpider = String(p.spider);
+      if (!mergedWallpaper && p.wallpaper)
+        mergedWallpaper = String(p.wallpaper);
+      // parses: concat (deduplicate by URL)
+      if (Array.isArray(p.parses)) {
+        for (const ps of p.parses) {
+          if (
+            ps &&
+            !merged.parses.some(
+              (m: any) => m.url === ps.url && m.name === ps.name,
+            )
+          ) {
+            merged.parses.push(ps);
+          }
+        }
+      }
+      // flags: concat (deduplicate)
+      if (Array.isArray(p.flags)) {
+        for (const f of p.flags) {
+          if (!merged.flags.includes(f)) merged.flags.push(f);
+        }
+      }
+      // live: concat
+      if (Array.isArray(p.live)) {
+        merged.live.push(...p.live);
+      }
+      // ijkCodes: concat
+      if (Array.isArray(p.ijkCodes)) {
+        merged.ijkCodes.push(...p.ijkCodes);
+      }
+    }
+
+    if (mergedSpider) merged.spider = mergedSpider;
+    if (mergedWallpaper) merged.wallpaper = mergedWallpaper;
+
+    console.log(
+      `[ConfigParser] multi-config merged: ${merged.sites.length} sites, ${merged.parses.length} parses, ${merged.flags.length} flags`,
+    );
+    return merged;
   }
 
   // ========== Config Decryption (FindResult) ==========

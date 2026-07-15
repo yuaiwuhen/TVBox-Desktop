@@ -70,8 +70,11 @@ class Reporter {
    * 生成 JSON 报告
    * @param {string} outputPath
    */
+  /** UTF-8 BOM for Windows file associations */
+  static get BOM() { return '\uFEFF'; }
+
   saveJson(outputPath) {
-    fs.writeFileSync(outputPath, JSON.stringify(this.results, null, 2));
+    fs.writeFileSync(outputPath, Reporter.BOM + JSON.stringify(this.results, null, 2));
     console.log(`JSON report saved: ${outputPath}`);
   }
 
@@ -81,7 +84,7 @@ class Reporter {
    */
   saveHtml(outputPath) {
     const html = this.generateHtml();
-    fs.writeFileSync(outputPath, html);
+    fs.writeFileSync(outputPath, Reporter.BOM + html);
     console.log(`HTML report saved: ${outputPath}`);
   }
 

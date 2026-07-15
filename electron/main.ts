@@ -52,6 +52,66 @@ let win: BrowserWindow;
 
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'];
 
+// Diagnostic: ring buffer for main-process console output so the renderer
+// (and E2E tests) can inspect what JarLoader logs during spider calls.
+// Used to diagnose why detailContent returns empty {} for some spiders.
+const LOG_BUFFER_SIZE = 2000;
+const logBuffer: string[] = [];
+let logCaptureEnabled = false;
+const origConsoleLog = console.log;
+const origConsoleError = console.error;
+function pushLog(level: string, args: any[]) {
+  if (!logCaptureEnabled) return;
+  const ts = new Date().toISOString().substr(11, 12);
+  // Be defensive: Java objects returned by java-bridge can throw on
+  // JSON.stringify (cyclic refs, missing toJSON). Don't let a single bad
+  // arg silence the rest of the log line — fall back to String().
+  const parts = args.map((a) => {
+    if (typeof a === 'string') return a;
+    if (a === null) return 'null';
+    if (a === undefined) return 'undefined';
+    try {
+      return JSON.stringify(a);
+    } catch {
+      try {
+        return String(a);
+      } catch {
+        return '<unprintable>';
+      }
+    }
+  });
+  logBuffer.push(`[${ts}] [${level}] ${parts.join(' ')}`);
+  while (logBuffer.length > LOG_BUFFER_SIZE) logBuffer.shift();
+}
+console.log = (...args: any[]) => {
+  origConsoleLog(...args);
+  pushLog('log', args);
+};
+console.warn = (...args: any[]) => {
+  (console as any).origConsoleWarn
+    ? (console as any).origConsoleWarn(...args)
+    : origConsoleLog(...args);
+  pushLog('warn', args);
+};
+console.error = (...args: any[]) => {
+  origConsoleError(...args);
+  pushLog('error', args);
+};
+ipcMain.handle('debug:startLogCapture', () => {
+  logBuffer.length = 0;
+  logCaptureEnabled = true;
+  return true;
+});
+ipcMain.handle('debug:getLogs', () => {
+  return logBuffer.join('\n');
+});
+ipcMain.handle('debug:stopLogCapture', () => {
+  logCaptureEnabled = false;
+  const logs = logBuffer.join('\n');
+  logBuffer.length = 0;
+  return logs;
+});
+
 // Check whether the Visual C++ Redistributable 2015+ runtime is installed.
 // java-bridge's native nodejar.node links against vcruntime140.dll. Without
 // it, requiring java-bridge throws "The specified module could not be found"
@@ -242,18 +302,39 @@ ipcMain.handle('config:save', (_event, data: Record<string, string>) => {
 // process. Returns { ok, status, contentType, bodyBase64, error? }.
 ipcMain.handle(
   'config:fetchRemote',
-  async (_event, url: string): Promise<{ ok: boolean; status: number; contentType: string; bodyBase64: string; error?: string }> => {
+  async (
+    _event,
+    url: string,
+  ): Promise<{
+    ok: boolean;
+    status: number;
+    contentType: string;
+    bodyBase64: string;
+    error?: string;
+  }> => {
     return new Promise((resolve) => {
       const fetchWithRedirect = (u: string, depth = 0) => {
         if (depth > 5) {
-          resolve({ ok: false, status: 0, contentType: '', bodyBase64: '', error: 'too many redirects' });
+          resolve({
+            ok: false,
+            status: 0,
+            contentType: '',
+            bodyBase64: '',
+            error: 'too many redirects',
+          });
           return;
         }
         let urlObj: URL;
         try {
           urlObj = new URL(u);
         } catch (e: any) {
-          resolve({ ok: false, status: 0, contentType: '', bodyBase64: '', error: `invalid URL: ${e.message}` });
+          resolve({
+            ok: false,
+            status: 0,
+            contentType: '',
+            bodyBase64: '',
+            error: `invalid URL: ${e.message}`,
+          });
           return;
         }
         const lib = urlObj.protocol === 'https:' ? https : http;
@@ -290,16 +371,34 @@ ipcMain.handle(
               });
             });
             res.on('error', (e: Error) => {
-              resolve({ ok: false, status: 0, contentType: '', bodyBase64: '', error: e.message });
+              resolve({
+                ok: false,
+                status: 0,
+                contentType: '',
+                bodyBase64: '',
+                error: e.message,
+              });
             });
           },
         );
         req.on('error', (e: Error) => {
-          resolve({ ok: false, status: 0, contentType: '', bodyBase64: '', error: e.message });
+          resolve({
+            ok: false,
+            status: 0,
+            contentType: '',
+            bodyBase64: '',
+            error: e.message,
+          });
         });
         req.setTimeout(30000, () => {
           req.destroy();
-          resolve({ ok: false, status: 0, contentType: '', bodyBase64: '', error: 'timeout' });
+          resolve({
+            ok: false,
+            status: 0,
+            contentType: '',
+            bodyBase64: '',
+            error: 'timeout',
+          });
         });
         req.end();
       };

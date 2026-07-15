@@ -7,6 +7,7 @@ import 'element-plus/theme-chalk/dark/css-vars.css'
 import { router } from './router'
 import { createPinia } from 'pinia'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
+import { useThemeStore } from './stores/theme'
 
 const app = createApp(App)
 app.use(ElementPlus)
@@ -18,3 +19,7 @@ for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
 }
 
 app.mount('#app')
+
+// Initialize theme after mount so DOM is ready
+const theme = useThemeStore()
+theme.init()

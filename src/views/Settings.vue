@@ -73,14 +73,6 @@
           <el-switch v-model="screenDisplayValue" @change="onScreenDisplayChange" />
         </el-form-item>
 
-        <el-form-item label="播放器类型">
-          <el-radio-group v-model="playTypeValue" @change="onPlayTypeChange">
-            <el-radio-button :value="0">系统</el-radio-button>
-            <el-radio-button :value="1">IJK</el-radio-button>
-            <el-radio-button :value="2">Exo</el-radio-button>
-          </el-radio-group>
-        </el-form-item>
-
         <el-form-item label="外部播放器路径">
           <div class="flex gap-2 items-center">
             <el-input
@@ -169,6 +161,74 @@
 
         <el-divider />
 
+        <!-- Section: 主题设置 -->
+        <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">主题设置</h3>
+        <el-form-item label="主题模式">
+          <div class="flex gap-3">
+            <el-button
+              :type="theme.mode === 'dark' ? 'primary' : 'default'"
+              @click="theme.setMode('dark')"
+              plain
+            >
+              <el-icon class="mr-1"><Moon /></el-icon>深色
+            </el-button>
+            <el-button
+              :type="theme.mode === 'light' ? 'primary' : 'default'"
+              @click="theme.setMode('light')"
+              plain
+            >
+              <el-icon class="mr-1"><Sunny /></el-icon>浅色
+            </el-button>
+          </div>
+        </el-form-item>
+
+        <el-form-item label="主题色">
+          <div class="flex gap-3 items-center">
+            <el-color-picker v-model="localPrimaryColor" @change="onPrimaryColorChange" />
+            <div class="flex gap-1">
+              <button
+                v-for="c in presetColors"
+                :key="c"
+                class="w-6 h-6 rounded-full border-2 transition-all duration-200 hover:scale-110 cursor-pointer"
+                :style="{ background: c, borderColor: localPrimaryColor === c ? 'var(--color-primary)' : 'transparent' }"
+                @click="onPrimaryColorChange(c)"
+              />
+            </div>
+          </div>
+        </el-form-item>
+
+        <el-form-item label="背景图片">
+          <div class="flex w-full gap-2">
+            <el-input
+              v-model="localBgImage"
+              placeholder="输入图片URL或上传本地图片"
+              clearable
+              @change="onBgImageChange"
+            >
+              <template #prefix>
+                <el-icon><Picture /></el-icon>
+              </template>
+            </el-input>
+            <el-button @click="selectBgImage" size="small">浏览</el-button>
+            <el-button v-if="localBgImage" @click="clearBgImage" size="small" type="danger" plain>
+              清除
+            </el-button>
+          </div>
+        </el-form-item>
+
+        <el-form-item v-if="localBgImage" label="背景透明度">
+          <el-slider
+            v-model="localBgOpacity"
+            :min="0.02"
+            :max="0.5"
+            :step="0.01"
+            show-input
+            @change="onBgOpacityChange"
+          />
+        </el-form-item>
+
+        <el-divider />
+
         <!-- Section: WebDAV 备份 -->
         <h3 class="text-lg font-semibold mb-2" style="color:var(--color-text-primary)">WebDAV 备份</h3>
         <el-form-item label="WebDAV 地址">
@@ -206,18 +266,19 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore } from '../store/app'
+import { useThemeStore } from '../stores/theme'
 import { WebDAV } from '../core/WebDAV'
 import { remoteServer } from '../core/RemoteServer'
 import { localProxy } from '../core/LocalProxyServer'
 import { saveToFile } from '../core/ConfigSync'
 
 const store = useAppStore()
+const theme = useThemeStore()
 
 const inputUrl = ref('')
 const configLoading = ref(false)
 const parseName = ref('')
 const autoPlayNext = ref(true)
-const playTypeValue = ref(0)
 const vlcPathValue = ref(localStorage.getItem('tvbox_vlc_path') || '')
 const screenDisplayValue = ref(true)
 const liveUrlInput = ref('')
@@ -231,6 +292,66 @@ const danmuEnabledValue = ref(false)
 const danmuMaxValue = ref(30)
 
 const configUrlHistory = ref<string[]>([])
+
+// Theme settings
+const localPrimaryColor = ref(theme.primaryColor)
+const localBgImage = ref(theme.bgImage || '')
+const localBgOpacity = ref(theme.bgOpacity)
+
+function onPrimaryColorChange(color: string) {
+  localPrimaryColor.value = color
+  theme.setPrimaryColor(color)
+}
+
+function onBgImageChange(url: string) {
+  localBgImage.value = url
+  theme.setBgImage(url || null)
+}
+
+async function selectBgImage() {
+  try {
+    const { ipcRenderer } = window.require('electron')
+    const result = await ipcRenderer.invoke('dialog:openFile', {
+      title: '选择背景图片',
+      filters: [
+        { name: '图片文件', extensions: ['jpg', 'jpeg', 'png', 'webp', 'bmp'] },
+        { name: '所有文件', extensions: ['*'] },
+      ],
+    })
+    if (result && !result.canceled && result.filePaths.length > 0) {
+      localBgImage.value = result.filePaths[0]
+      theme.setBgImage(result.filePaths[0])
+    }
+  } catch {
+    const path = prompt('请输入图片路径:', localBgImage.value)
+    if (path) {
+      localBgImage.value = path
+      theme.setBgImage(path)
+    }
+  }
+}
+
+function clearBgImage() {
+  localBgImage.value = ''
+  theme.setBgImage(null)
+}
+
+function onBgOpacityChange(val: number) {
+  theme.setBgOpacity(val)
+}
+
+const presetColors = [
+  '#e8913a', // Amber (default)
+  '#409eff', // Blue
+  '#67c23a', // Green
+  '#e74c3c', // Red
+  '#9b59b6', // Purple
+  '#1abc9c', // Teal
+  '#f39c12', // Orange
+  '#2c3e50', // Dark Blue
+  '#e84393', // Pink
+  '#00b894', // Mint
+]
 
 const dohOptions = [
   { label: '关闭', value: 0 },
@@ -246,7 +367,6 @@ onMounted(() => {
   inputUrl.value = store.configUrl
   parseName.value = store.defaultParseName
   autoPlayNext.value = store.autoPlayNext
-  playTypeValue.value = store.playType
   screenDisplayValue.value = localStorage.getItem('tvbox_screen_display') !== 'false'
   liveUrlInput.value = store.liveUrl
   epgUrlInput.value = store.epgUrl
@@ -307,10 +427,6 @@ function onAutoPlayNextChange(val: boolean) {
 
 function onScreenDisplayChange(val: boolean) {
   localStorage.setItem('tvbox_screen_display', String(val))
-}
-
-function onPlayTypeChange(val: number) {
-  store.setPlayType(val)
 }
 
 function onVlcPathChange(val: string) {

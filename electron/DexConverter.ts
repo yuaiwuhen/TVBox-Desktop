@@ -128,10 +128,31 @@ export class DexConverter {
       }
     }
 
-    // Check if already converted
+    // Check if already converted - validate it's a real JAR (not an empty
+    // 22-byte stub from a previously failed conversion). An empty ZIP file
+    // is exactly 22 bytes (End of Central Directory record only).
+    const MIN_VALID_JAR_SIZE = 1024; // 1KB threshold
     if (fs.existsSync(jarPath)) {
-      console.log('[DexConverter] JAR already exists:', jarPath);
-      return jarPath;
+      const stats = fs.statSync(jarPath);
+      if (stats.size >= MIN_VALID_JAR_SIZE) {
+        console.log(
+          '[DexConverter] JAR already exists:',
+          jarPath,
+          `(${stats.size} bytes)`,
+        );
+        return jarPath;
+      }
+      console.warn(
+        `[DexConverter] Existing converted JAR is too small (${stats.size} bytes), likely a failed conversion. Re-converting...`,
+      );
+      try {
+        fs.unlinkSync(jarPath);
+      } catch (unlinkErr: any) {
+        console.warn(
+          '[DexConverter] Failed to delete stale JAR:',
+          unlinkErr.message,
+        );
+      }
     }
 
     console.log('[DexConverter] Converting DEX to JAR...');
@@ -149,10 +170,17 @@ export class DexConverter {
       const output = await this.execCommand(cmd);
       console.log('[DexConverter] Conversion output:', output);
 
-      // Verify output exists
+      // Verify output exists and is non-trivial in size
       if (fs.existsSync(jarPath)) {
         const stats = fs.statSync(jarPath);
         console.log('[DexConverter] Converted JAR size:', stats.size, 'bytes');
+        // An empty ZIP is 22 bytes (just End of Central Directory record).
+        // If the output is too small, the conversion silently failed.
+        if (stats.size < MIN_VALID_JAR_SIZE) {
+          throw new Error(
+            `Conversion produced an empty or too-small JAR (${stats.size} bytes). The DEX file may be corrupted or in an unsupported format.`,
+          );
+        }
         return jarPath;
       } else {
         throw new Error('JAR file not created after conversion');

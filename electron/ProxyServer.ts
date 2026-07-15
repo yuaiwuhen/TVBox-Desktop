@@ -925,6 +925,24 @@ export class ProxyServer {
         void this.streamVideoDirect(imageUrl, req, res, headers, true);
         return;
       }
+      // /action handler for WexGoDanmu redirects.
+      // Android's GoProxy serves this; on PC we just decode the path param
+      // and redirect to the inner proxy URL for the JAR to handle.
+      if (pathname === '/action') {
+        const actionDo = params['do'];
+        const actionType = params['type'];
+        const actionPath = params['path'];
+        if (actionDo === 'refresh' && actionType === 'danmaku' && actionPath) {
+          const decodedPath = decodeURIComponent(actionPath);
+          // decodedPath looks like: /proxy?do=wexdanmu&danmuurl=...
+          const actionUrl = `http://127.0.0.1:${this.port}${decodedPath.startsWith('/') ? '' : '/'}${decodedPath}`;
+          console.log('[ProxyServer] /action: redirecting to danmu proxy URL:', actionUrl.substring(0, 120));
+          res.writeHead(302, { Location: actionUrl });
+          res.end();
+          return;
+        }
+      }
+
       res.writeHead(404, { 'Content-Type': 'text/plain' });
       res.end('Not Found');
       return;
@@ -1240,40 +1258,56 @@ export class ProxyServer {
       headers?: Record<string, string>;
     } | null = null;
 
+    // Handle danmu search (wexautodanmu) in Node.js to bypass GoProxy dependency.
+    // Android uses GoProxy (libwexproxy.so, ARM-only) at 127.0.0.1:8096/danmuku
+    // for danmu search. On PC, we search public danmu API directly instead.
+    if (params['do'] === 'wexautodanmu') {
+      const danmuXml = await ProxyServer.searchDanmuFromBilibili(params['vod_name'], params['ep_name']);
+      if (danmuXml) {
+        console.log('[ProxyServer] wexautodanmu: found danmu, returning XML');
+        res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8' });
+        res.end(danmuXml);
+        return;
+      }
+      console.log('[ProxyServer] wexautodanmu: no danmu found, falling back to JAR');
+    }
+
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     let clientDisconnected = false;
 
-    req.on('close', () => {
-      clientDisconnected = true;
-      if (timeoutTimer) {
-        clearTimeout(timeoutTimer);
-        timeoutTimer = null;
-      }
-    });
-
-    req.on('error', () => {
-      clientDisconnected = true;
-    });
-
-    timeoutTimer = setTimeout(() => {
-      if (!res.headersSent) {
+    if (!result) {
+      req.on('close', () => {
         clientDisconnected = true;
-        try {
-          res.writeHead(504, { 'Content-Type': 'text/plain' });
-          res.end('Gateway Timeout');
-        } catch {}
-      }
-      timeoutTimer = null;
-    }, 30000);
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+      });
 
-    try {
-      result = await jarLoader.proxyInvokeAsync(params);
-    } catch {
-      if (!res.headersSent && !clientDisconnected) {
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
-        res.end('Proxy invoke failed');
+      req.on('error', () => {
+        clientDisconnected = true;
+      });
+
+      timeoutTimer = setTimeout(() => {
+        if (!res.headersSent) {
+          clientDisconnected = true;
+          try {
+            res.writeHead(504, { 'Content-Type': 'text/plain' });
+            res.end('Gateway Timeout');
+          } catch {}
+        }
+        timeoutTimer = null;
+      }, 30000);
+
+      try {
+        result = await jarLoader.proxyInvokeAsync(params);
+      } catch {
+        if (!res.headersSent && !clientDisconnected) {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('Proxy invoke failed');
+        }
+        return;
       }
-      return;
     }
 
     if (clientDisconnected) {
@@ -3471,6 +3505,73 @@ export class ProxyServer {
    * can't handle. Streams the URL content with custom headers (if provided).
    * Used when Init.proxyInvoke is missing from the JAR.
    */
+  /**
+   * Search danmu from Bilibili public API (replaces Android's GoProxy /danmuku).
+   * Flow: search video by name → get aid → get cid → fetch danmu XML.
+   * Returns danmu XML string or null if not found/error.
+   */
+  private static async searchDanmuFromBilibili(
+    vodName?: string,
+    _epName?: string,
+  ): Promise<string | null> {
+    if (!vodName) return null;
+    try {
+      // Step 1: Search for video
+      const searchUrl = `https://api.bilibili.com/x/web-interface/search/type/v2?search_type=video&keyword=${encodeURIComponent(vodName)}`;
+      const searchData = await ProxyServer.httpsGet(searchUrl, {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://www.bilibili.com/',
+      });
+      if (!searchData) return null;
+      const searchJson = JSON.parse(searchData);
+      const result = searchJson?.data?.result?.find((r: any) => r?.aid);
+      if (!result?.aid) return null;
+
+      // Step 2: Get video info for CID
+      const viewUrl = `https://api.bilibili.com/x/web-interface/view?aid=${result.aid}`;
+      const viewData = await ProxyServer.httpsGet(viewUrl, {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://www.bilibili.com/',
+      });
+      if (!viewData) return null;
+      const viewJson = JSON.parse(viewData);
+      const cid = viewJson?.data?.cid;
+      if (!cid) return null;
+
+      // Step 3: Fetch danmu XML
+      const danmuUrl = `https://api.bilibili.com/x/v1/dm/list.so?oid=${cid}`;
+      const danmuXml = await ProxyServer.httpsGet(danmuUrl, {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://www.bilibili.com/',
+      });
+      if (!danmuXml || !danmuXml.includes('<d p=')) return null;
+
+      console.log(`[ProxyServer] searchDanmuFromBilibili: found ${(danmuXml.match(/<d p=/g) || []).length} danmu items for "${vodName}"`);
+      return danmuXml;
+    } catch (e: any) {
+      console.warn('[ProxyServer] searchDanmuFromBilibili error:', e.message);
+      return null;
+    }
+  }
+
+  /** Simple HTTPS GET helper returning body as string. */
+  private static httpsGet(
+    url: string,
+    headers: Record<string, string>,
+  ): Promise<string | null> {
+    return new Promise((resolve) => {
+      const req = https.get(url, { headers, timeout: 8000 }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          resolve(Buffer.concat(chunks).toString('utf-8'));
+        });
+      });
+      req.on('error', (_e: Error) => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
+  }
+
   private async streamUnknownProxy(
     upstreamUrl: string,
     req: http.IncomingMessage,

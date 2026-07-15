@@ -3,7 +3,7 @@
     <!-- Top bar -->
     <div class="h-12 flex items-center px-4 justify-between flex-shrink-0" style="background:var(--color-bg-elevated);border-bottom:1px solid var(--color-border)">
       <div class="flex items-center gap-3">
-        <el-button :icon="'Back'" size="small" @click="$router.push('/')">返回首页</el-button>
+        <el-button :icon="'Back'" size="small" @click="resetToSourceLoading">返回首页</el-button>
         <span class="font-semibold" style="color: var(--color-text-primary)">直播电视</span>
       </div>
       <div class="flex items-center gap-2">
@@ -552,6 +552,17 @@ function onAspectRatioChange(mode: string) {
     case 'crop': video.style.objectFit = 'cover'; video.style.aspectRatio = ''; break
     default: video.style.objectFit = 'contain'; video.style.aspectRatio = ''
   }
+}
+
+function resetToSourceLoading() {
+  currentChannel.value = null
+  currentLiveUrl.value = ''
+  groups.value = []
+  activeGroupName.value = ''
+  loadError.value = ''
+  showUrlInput.value = true
+  localStorage.removeItem('tvbox_live_last_channel')
+  localStorage.removeItem('tvbox_live_last_group')
 }
 
 function onChannelReverse() {

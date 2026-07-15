@@ -4,6 +4,10 @@
  * Implements PNG steganography extraction and JAR loading using java-bridge.
  * Supports DEX to JAR conversion for Android DEX files.
  * Based on Box Android's ApiConfig.java and JarLoader.java implementation.
+ *
+ * NOTE: stub Init.class now includes lj(), show(), getActivity(), get(),
+ *       init(Context), N0(), classLoader() — see tools/stubs/.../Init.java.
+ *       Updated in both tools/ and tools/runtime/ stub JARs.
  */
 
 import { ipcMain, BrowserWindow, app } from 'electron';
@@ -1977,6 +1981,65 @@ export class JarLoader {
   }
 
   /**
+   * Generate candidate spider class names to try when loading.
+   *
+   * Different Guard JARs use different naming conventions for the wrapper
+   * class vs the actual spider class in wexguard-spider-enjarify.jar:
+   *   - fty0528.jar: "DouDouGuard" → wexguard JAR: "NewDuoDuo"
+   *     (different Chinese characters 都都 vs 多多, plus "New" prefix)
+   *   - wexguard spider JAR: "NewDouBanGuard" → wexguard JAR: "NewDouBan"
+   *     (just strip Guard)
+   *
+   * We generate multiple candidates and try each one until we find a class
+   * that loads. Candidates in priority order:
+   *   1. Stripped name (current logic, works for NewDouBanGuard → NewDouBan)
+   *   2. With "New" prefix (handles DouDouGuard → NewDouDou attempt)
+   *   3. Spelling variants: "Dou" ↔ "Duo" (handles DouDou ↔ DuoDuo)
+   */
+  private generateSpiderClassCandidates(
+    realClsKey: string,
+    isGuard: boolean,
+  ): string[] {
+    const candidates: string[] = [];
+    const baseName = realClsKey;
+
+    // 1. Stripped name (current logic) - e.g., DouDou, NewDouBan
+    candidates.push(baseName);
+
+    // 2. With "New" prefix (if not already starting with New)
+    if (!baseName.startsWith('New')) {
+      candidates.push('New' + baseName);
+    }
+
+    // 3. Spelling variants: Dou ↔ Duo
+    // Many Guard wrapper classes use "DouDou" (都都) but the actual class
+    // in wexguard JAR is "DuoDuo" (多多) - different Chinese characters
+    // with similar English romanization
+    if (baseName.includes('Dou')) {
+      const duoVariant = baseName.replace(/Dou/g, 'Duo');
+      if (!candidates.includes(duoVariant)) candidates.push(duoVariant);
+      if (!duoVariant.startsWith('New')) {
+        const newDuoVariant = 'New' + duoVariant;
+        if (!candidates.includes(newDuoVariant)) {
+          candidates.push(newDuoVariant);
+        }
+      }
+    }
+    if (baseName.includes('Duo')) {
+      const douVariant = baseName.replace(/Duo/g, 'Dou');
+      if (!candidates.includes(douVariant)) candidates.push(douVariant);
+      if (!douVariant.startsWith('New')) {
+        const newDouVariant = 'New' + douVariant;
+        if (!candidates.includes(newDouVariant)) {
+          candidates.push(newDouVariant);
+        }
+      }
+    }
+
+    return candidates;
+  }
+
+  /**
    * Check if the spider's actual class (not inherited) declares an override
    * of the single-param init(Context) method. True Guard spiders (NewWogg,
    * NewJuTou, etc.) override init(Context) to read siteconfig. Other classes
@@ -2341,7 +2404,15 @@ export class JarLoader {
     // (e.g. NewDouBanGuard -> NewDouBan). The real class lives in the
     // pre-decrypted wexguard-spider-enjarify.jar, not the outer JAR.
     const realClsKey = isGuard ? clsKey.slice(0, -'Guard'.length) : clsKey;
-    const fullClassName = `com.github.catvod.spider.${realClsKey}`;
+    // Generate candidate class names. Different Guard JARs use different
+    // naming conventions for the wrapper class (e.g. fty0528.jar uses
+    // "DouDouGuard" but the actual class in wexguard-spider-enjarify.jar
+    // is "NewDuoDuo" - different spelling and "New" prefix). We try
+    // multiple candidates and use the first one that loads.
+    const candidateClsKeys = this.generateSpiderClassCandidates(
+      realClsKey,
+      isGuard,
+    );
 
     // Determine JAR key
     let jarKey = 'main';
@@ -2391,7 +2462,12 @@ export class JarLoader {
     await this.setupSourceSpecificHandling(clsKey, jarUrl);
 
     try {
-      console.log('[JarLoader] Loading spider class:', fullClassName);
+      console.log(
+        '[JarLoader] Loading spider class. Base name:',
+        realClsKey,
+        'Candidates:',
+        candidateClsKeys.join(', '),
+      );
 
       console.log(
         '[JarLoader] Current classpath entries:',
@@ -2441,9 +2517,44 @@ export class JarLoader {
         }
       }
 
-      const SpiderClass = this.java.importClass(fullClassName);
+      // Try each candidate class name until one loads successfully.
+      // Different JARs use different naming conventions (e.g. "DouDou" vs
+      // "NewDuoDuo"), so we try multiple variants.
+      let SpiderClass: any = null;
+      let fullClassName = '';
+      const failedCandidates: string[] = [];
+
+      for (const candidate of candidateClsKeys) {
+        const candidateFullName = `com.github.catvod.spider.${candidate}`;
+        try {
+          console.log('[JarLoader] Trying spider class:', candidateFullName);
+          const candidateClass = this.java.importClass(candidateFullName);
+          if (candidateClass) {
+            SpiderClass = candidateClass;
+            fullClassName = candidateFullName;
+            console.log(
+              '[JarLoader] Successfully loaded spider class:',
+              fullClassName,
+            );
+            break;
+          } else {
+            failedCandidates.push(candidate);
+          }
+        } catch (candidateErr: any) {
+          console.log(
+            '[JarLoader] Candidate not found:',
+            candidateFullName,
+            '-',
+            candidateErr.message,
+          );
+          failedCandidates.push(candidate);
+        }
+      }
+
       if (!SpiderClass) {
-        this.lastError = `Spider class not found: ${fullClassName}. The JAR may not contain this class or may not have been converted from DEX format.`;
+        this.lastError = `Spider class not found. Tried candidates: ${failedCandidates.join(
+          ', ',
+        )}. The JAR may not contain this class or may not have been converted from DEX format.`;
         console.error('[JarLoader]', this.lastError);
         return false;
       }
@@ -2797,6 +2908,12 @@ export class JarLoader {
         }
       }
 
+      // Extract danmu URL from any remaining field
+      const danmuUrl = this.extractDanmuUrl(parsed);
+      if (danmuUrl) {
+        parsed.danmuUrl = danmuUrl;
+      }
+
       return JSON.stringify(parsed);
     }
 
@@ -2937,11 +3054,63 @@ export class JarLoader {
       out[k] = v;
     }
 
+    // Extract danmu URL from fields that were skipped (obfuscated or not).
+    // Some spiders return danmaku URL as a separate field alongside the video URL.
+    const danmuUrl = this.extractDanmuUrl(parsed);
+    if (danmuUrl) {
+      out.danmuUrl = danmuUrl;
+    }
+
     console.log(
       `[JarLoader] translatePlayerContent: urlField=${urlField}, headerField=${headerField || 'none'}, headerValue=${headerValue ? JSON.stringify(headerValue) : 'none'}, originalUrl=${urlValue.substring(0, 80)}..., rewrittenUrl=${out.url.substring(0, 80)}...`,
     );
 
     return JSON.stringify(out);
+  }
+
+  /**
+   * Extract danmaku URL from a parsed spider response.
+   * Scans all fields for URL-like values that reference danmu proxy
+   * endpoints (autodanmu, wexdanmu, wexautodanmu, WexGoDanmu, etc.).
+   * Rewrites 127.0.0.1:8096 (Android proxy port) to the PC proxy port.
+   */
+  private extractDanmuUrl(parsed: Record<string, any>): string | null {
+    const proxyPort = proxyServer.getPort();
+    const targetPort = proxyPort > 0 ? proxyPort : 9978;
+    for (const v of Object.values(parsed)) {
+      if (typeof v !== 'string' || v.length < 20) continue;
+      // Match danmu proxy URLs (127.0.0.1-based, containing danmu in do= or path)
+      if (
+        v.startsWith('http://127.0.0.1') &&
+        (v.includes('/proxy?do=autodanmu') ||
+          v.includes('/proxy?do=wex') ||
+          v.includes('/danmu?do=') ||
+          v.includes('danmu') ||
+          v.includes('danmaku'))
+      ) {
+        // Rewrite Android proxy port (8096) to PC proxy port
+        const rewritten = v.replace(/http:\/\/127\.0\.0\.1:\d+/, `http://127.0.0.1:${targetPort}`);
+        console.log(
+          '[JarLoader] extractDanmuUrl: found danmu URL',
+          rewritten.substring(0, 120),
+        );
+        return rewritten;
+      }
+      // Also match direct danmu service URLs (non-proxy)
+      if (
+        v.startsWith('http://') &&
+        !v.startsWith('http://127.0.0.1') &&
+        !v.startsWith('https://') &&
+        (v.includes('danmu') || v.includes('danmaku'))
+      ) {
+        console.log(
+          '[JarLoader] extractDanmuUrl: found direct danmu URL',
+          v.substring(0, 120),
+        );
+        return v;
+      }
+    }
+    return null;
   }
 
   /**
@@ -3144,6 +3313,94 @@ export class JarLoader {
   }
 
   /**
+   * Cached SafeSpiderCaller class proxy.
+   * Lazy-imported on first use to avoid slowing down startup.
+   */
+  private safeCallerClass: any = null;
+
+  /**
+   * Fallback for when java-bridge's String → JS conversion fails with
+   * "invalid utf-8 sequence" (caused by unpaired surrogates in the Java
+   * String returned by spider methods like NewDuoDuo.detailContent).
+   *
+   * Calls the spider method reflectively via SafeSpiderCaller, which
+   * returns byte[] (Java byte[] → Node Buffer, no UTF-8 conversion).
+   * The bytes are decoded in Node.js with replacement for any
+   * remaining invalid sequences.
+   *
+   * Returns null if the method is not supported by SafeSpiderCaller or
+   * the call failed.
+   */
+  private async callViaSafeBytes(
+    spider: any,
+    method: string,
+    javaArgs: any[],
+  ): Promise<string | null> {
+    if (!this.java) return null;
+    try {
+      if (!this.safeCallerClass) {
+        this.safeCallerClass = this.java.importClass(
+          'com.github.catvod.utils.SafeSpiderCaller',
+        );
+      }
+      const Caller = this.safeCallerClass;
+      let bytesPromise: Promise<any> | null = null;
+
+      if (method === 'detailContent' && javaArgs.length >= 1) {
+        bytesPromise = Caller.detailContentBytes(spider, javaArgs[0]);
+      } else if (method === 'homeContent' && javaArgs.length >= 1) {
+        bytesPromise = Caller.homeContentBytes(spider, javaArgs[0]);
+      } else if (method === 'categoryContent' && javaArgs.length >= 3) {
+        bytesPromise = Caller.categoryContentBytes(
+          spider,
+          javaArgs[0],
+          javaArgs[1],
+          javaArgs[2],
+        );
+      } else if (method === 'searchContent' && javaArgs.length >= 2) {
+        bytesPromise = Caller.searchContentBytes(
+          spider,
+          javaArgs[0],
+          javaArgs[1],
+        );
+      } else if (method === 'playerContent' && javaArgs.length >= 2) {
+        bytesPromise = Caller.playerContentBytes(
+          spider,
+          javaArgs[0],
+          javaArgs[1],
+        );
+      } else {
+        console.warn(
+          `[JarLoader] SafeSpiderCaller: method ${method} not supported`,
+        );
+        return null;
+      }
+
+      const bytes = await Promise.race([
+        bytesPromise,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`SafeSpiderCaller ${method} timed out`)),
+            60000,
+          ),
+        ),
+      ]);
+      if (!bytes || !bytes.length) return '';
+      // bytes is a Java byte[] → Node Buffer (or Int8Array-like).
+      // Buffer.from with no copy if it's already a Buffer.
+      const buf = Buffer.from(bytes);
+      // Buffer.toString('utf-8') replaces invalid sequences with U+FFFD.
+      return buf.toString('utf-8');
+    } catch (e: any) {
+      console.warn(
+        `[JarLoader] SafeSpiderCaller ${method} failed:`,
+        e?.message || e,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Call Spider method
    * All methods return JSON string
    *
@@ -3197,29 +3454,104 @@ export class JarLoader {
                 reject(new Error(`${method} timed out after ${timeoutMs}ms`));
               }, timeoutMs);
             });
-            const asyncResult = await Promise.race([result, timeoutPromise]);
-            // Print full response for diagnostic methods (homeContent,
-            // categoryContent, detailContent) so we can see all obfuscated
-            // fields, category IDs, and whether vod_play_url is present.
-            // Other methods keep the 100-char preview.
-            const isDiagnostic =
-              method === 'homeContent' ||
-              method === 'categoryContent' ||
-              method === 'detailContent' ||
-              method === 'playerContent';
+            let asyncResult: any;
+            try {
+              asyncResult = await Promise.race([result, timeoutPromise]);
+            } catch (raceErr: any) {
+              console.warn(
+                `[JarLoader] async ${method} race rejected:`,
+                raceErr?.message || raceErr,
+              );
+              // Fallback: if the Java String returned by the spider contains
+              // unpaired surrogates, java-bridge's JNI GetStringUTFChars
+              // produces invalid UTF-8 that the native Rust layer rejects
+              // with "invalid utf-8 sequence of N bytes from index M". Retry
+              // via SafeSpiderCaller which calls the method reflectively and
+              // returns bytes via String.getBytes(UTF_8) (replaces invalid
+              // surrogates with U+FFFD). Node.js then decodes the bytes.
+              if (/invalid utf-8/i.test(raceErr?.message || '')) {
+                const safeResult = await this.callViaSafeBytes(
+                  spider,
+                  method,
+                  javaArgs,
+                );
+                if (safeResult !== null) {
+                  console.log(
+                    `[JarLoader] SafeSpiderCaller fallback ${method}: len=${safeResult.length}`,
+                  );
+                  console.log(
+                    `[JarLoader] SafeSpiderCaller ${method} preview:`,
+                    safeResult.substring(0, 300),
+                  );
+                  return safeResult;
+                }
+              }
+              if (isSlowMethod) throw raceErr;
+              return '{}';
+            }
+            // Detailed diagnostics: distinguish string / null / Java object
+            if (typeof asyncResult === 'string') {
+              console.log(
+                `[JarLoader] async ${method} resolved string len=${asyncResult.length}`,
+              );
+              console.log(
+                `[JarLoader] async ${method} preview:`,
+                asyncResult.substring(0, 300),
+              );
+              return asyncResult;
+            }
+            if (asyncResult === null || asyncResult === undefined) {
+              console.warn(
+                `[JarLoader] async ${method} resolved ${String(asyncResult)}`,
+              );
+              return '{}';
+            }
+            // Non-string (likely Java object). Try JSON.stringify, then
+            // .toStringSync()/toString(), so we don't silently return '{}'.
+            let str: string;
+            try {
+              str = JSON.stringify(asyncResult);
+            } catch {
+              try {
+                const ts =
+                  typeof asyncResult.toStringSync === 'function'
+                    ? asyncResult.toStringSync()
+                    : typeof asyncResult.toString === 'function'
+                      ? asyncResult.toString()
+                      : '';
+                str = typeof ts === 'string' ? ts : '{}';
+              } catch {
+                str = '{}';
+              }
+            }
             console.log(
-              `[JarLoader] async ${method} resolved:`,
-              typeof asyncResult === 'string'
-                ? isDiagnostic
-                  ? asyncResult
-                  : asyncResult.substring(0, 100)
-                : typeof asyncResult,
+              `[JarLoader] async ${method} stringified len=${str.length}`,
             );
-            if (typeof asyncResult === 'string') return asyncResult;
-            return JSON.stringify(asyncResult);
+            console.log(
+              `[JarLoader] async ${method} preview:`,
+              str.substring(0, 300),
+            );
+            return str;
           }
           if (typeof result === 'string') return result;
-          return JSON.stringify(result);
+          // Non-Promise Java object — same handling
+          let syncStr: string;
+          try {
+            syncStr = JSON.stringify(result);
+          } catch {
+            try {
+              const ts =
+                typeof result.toStringSync === 'function'
+                  ? result.toStringSync()
+                  : typeof result.toString === 'function'
+                    ? result.toString()
+                    : '{}';
+              syncStr = typeof ts === 'string' ? ts : '{}';
+            } catch {
+              syncStr = '{}';
+            }
+          }
+          return syncStr;
         } else {
           console.warn(
             `[JarLoader] async ${method} not found on spider, falling through`,
@@ -3931,6 +4263,37 @@ export class JarLoader {
         console.error(
           `[JarLoader] ${key} ${method} exhausted all retries and failed`,
         );
+
+        // For playerContent, return the error message so the renderer can
+        // show a meaningful message instead of generic "资源已失效".
+        // The spider exception often contains the actual root cause, e.g.
+        // "未登录百度" or "非会员，请到配置中心用UC浏览器扫描TvToken".
+        if (method === 'playerContent') {
+          const errMsg = err?.message || String(err);
+          // Common Java exception prefixes to strip for cleaner display
+          let cleanMsg = errMsg;
+          const npeMatch = cleanMsg.match(
+            /java\.lang\.(NullPointerException|IllegalStateException|RuntimeException):\s*(.+)/,
+          );
+          if (npeMatch) {
+            cleanMsg = npeMatch[2];
+          }
+          // If the message is too technical (e.g. "Cannot invoke..."), show
+          // a generic message but log the technical details.
+          if (
+            cleanMsg.startsWith('Cannot invoke') ||
+            cleanMsg.startsWith('Cannot cast')
+          ) {
+            console.error(
+              `[JarLoader] ${key} playerContent technical error:`,
+              errMsg,
+            );
+            return JSON.stringify({
+              msg: '播放源解析失败，请稍后重试或更换播放源',
+            });
+          }
+          return JSON.stringify({ msg: cleanMsg });
+        }
 
         return '{}';
       }

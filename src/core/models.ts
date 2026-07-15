@@ -64,6 +64,7 @@ export interface PlayResult {
   msg?: string;
   playUrl?: string;
   jxFrom?: string;
+  danmuUrl?: string; // URL to fetch danmaku/barrage data (Bilibili XML or JSON format)
 }
 
 // ===== Filter / Sort =====
