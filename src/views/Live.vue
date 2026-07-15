@@ -81,6 +81,7 @@
             :class="currentChannel?.channelIndex === channel.channelIndex ? 'live-channel-active' : ''"
             @click="playChannel(channel)"
           >
+            <span v-if="currentChannel?.channelIndex === channel.channelIndex" class="live-dot flex-shrink-0" />
             <span class="text-xs w-6 text-right flex-shrink-0 live-channel-num">{{ channel.channelNum }}</span>
             <span class="truncate flex-1">{{ channel.channelName }}</span>
             <span v-if="channel.channelUrls.length > 1" class="text-xs flex-shrink-0 live-channel-source">
@@ -709,6 +710,28 @@ function onKeyDown(e: KeyboardEvent) {
   background: var(--color-primary-soft) !important;
   color: var(--color-primary) !important;
   font-weight: 600;
+}
+
+/* Live indicator dot with pulse animation */
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-danger);
+  box-shadow: 0 0 0 0 var(--color-danger);
+  animation: live-pulse 2s ease-out infinite;
+}
+
+@keyframes live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.6);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(248, 113, 113, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(248, 113, 113, 0);
+  }
 }
 
 .live-channel-num {

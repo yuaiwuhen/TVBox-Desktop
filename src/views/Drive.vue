@@ -299,6 +299,8 @@ function formatSize(bytes?: number): string {
 }
 
 .drive-file-item:hover {
-  background: var(--color-bg-surface);
+  background: var(--color-bg-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
 }
 </style>
