@@ -28,14 +28,14 @@
             <div v-else class="w-full h-full flex items-center justify-center" style="background: var(--color-bg-elevated)">
               <el-icon :size="32" style="color: var(--color-text-tertiary)"><Film /></el-icon>
             </div>
-            <!-- Progress bar at bottom of cover -->
+            <!-- Progress bar at bottom of cover (warm gradient fill) -->
             <div
               v-if="item.duration > 0"
               class="absolute bottom-0 left-0 right-0"
-              style="background: rgba(0,0,0,0.5); height: 2px"
+              style="background: rgba(0,0,0,0.5); height: 3px"
             >
               <div
-                style="height: 2px; background: var(--color-primary)"
+                style="height: 3px; background: linear-gradient(90deg, var(--color-primary-active), var(--color-primary), var(--color-primary-hover)); box-shadow: 0 0 6px var(--color-primary-glow);"
                 :style="{ width: Math.min(Math.round((item.progress / item.duration) * 100), 100) + '%' }"
               />
             </div>
