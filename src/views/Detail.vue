@@ -46,8 +46,9 @@
           <VideoPlayer :key="store.currentPlayUrl" ref="videoPlayerRef" :url="store.currentPlayUrl"
             :headers="store.currentPlayHeader" :title="playerTitle" :has-prev="store.currentPlayIndex > 0"
             :has-next="store.currentPlayIndex < store.currentEpisodes.length - 1"
-            :resume-progress="store.resumeProgress" :show-subtitle-search="true" @prev="onPrevEpisode"
-            @next="onNextEpisode" @ended="onPlayEnded" @progress="onProgress" @search-subtitle="onSearchSubtitle" />
+            :resume-progress="store.resumeProgress" :show-subtitle-search="true" :danmu-url="store.currentDanmuUrl"
+            @prev="onPrevEpisode" @next="onNextEpisode" @ended="onPlayEnded" @progress="onProgress"
+            @search-subtitle="onSearchSubtitle" />
         </div>
       </div>
 
@@ -330,14 +331,9 @@ const panLoginTitle = computed(() => {
 })
 
 function isPanSource(flag: string): boolean {
-  // First try name-based detection
-  const typeByName = PanResolver.detectPanType(flag, '')
-  if (typeByName !== 'unknown') {
-    console.log('[Detail] isPanSource: name match:', { flag, type: typeByName })
-    return true
-  }
-
-  // Then try URL-based detection from the source's episodes
+  // Prioritize URL/domain-based detection (more accurate than name matching,
+  // which fails on obfuscated names like "B度" or renamed sources).
+  // Check the source's episode URLs first.
   const source = playSources.value.find(s => s.name === flag)
   if (source?.episodes?.length) {
     const firstUrl = source.episodes[0].url || ''
@@ -346,6 +342,14 @@ function isPanSource(flag: string): boolean {
       console.log('[Detail] isPanSource: URL match:', { flag, type: typeByUrl, url: firstUrl.substring(0, 80) })
       return true
     }
+  }
+
+  // Fallback to name-based detection (handles obfuscated names like "B度"
+  // that the spider's vod_play_from uses despite the URL being a pan URL).
+  const typeByName = PanResolver.detectPanType(flag, '')
+  if (typeByName !== 'unknown') {
+    console.log('[Detail] isPanSource: name match:', { flag, type: typeByName })
+    return true
   }
 
   console.log('[Detail] isPanSource: no match:', { flag })

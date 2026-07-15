@@ -94,10 +94,15 @@ export const useAppStore = defineStore('app', () => {
   const currentPlayHeader = ref<Record<string, string>>({});
   const currentPlayFlag = ref('');
   const currentPlayIndex = ref(0);
+  const currentDanmuUrl = ref('');
   const playLoading = ref(false);
   const currentEpisodes = ref<{ name: string; url: string }[]>([]);
   const resumeProgress = ref(0);
   const playError = ref('');
+  // True when loadPlay launched an external player (VLC) for unsupported
+  // formats. The test suite uses this to count as "play success" since
+  // currentPlayUrl/playError are intentionally left empty in this path.
+  const externalPlayerLaunched = ref(false);
 
   // ===== Request cancellation =====
   let detailAbortController: AbortController | null = null;
@@ -584,11 +589,25 @@ export const useAppStore = defineStore('app', () => {
       };
       // 若返回了 vod 但没有播放源，给出更具体的提示
       if (!vod.vod_play_from || !vod.vod_play_url) {
+        // Prioritize URL/domain detection from the site's api URL.
+        // Falls back to key/name matching for sites without a URL-style api.
+        const apiLower = (activeSite.value.api || '').toLowerCase();
+        const keyLower = (activeSite.value.key || '').toLowerCase();
+        const nameLower = (activeSite.value.name || '').toLowerCase();
         const isPan =
-          activeSite.value.key.toLowerCase().includes('quark') ||
-          activeSite.value.key.toLowerCase().includes('uc') ||
-          activeSite.value.key.toLowerCase().includes('baidu') ||
-          activeSite.value.key.toLowerCase().includes('ali') ||
+          apiLower.includes('quark.cn') ||
+          apiLower.includes('drive.uc.cn') ||
+          apiLower.includes('pan.baidu.com') ||
+          apiLower.includes('alipan.com') ||
+          apiLower.includes('aliyundrive.com') ||
+          apiLower.includes('bilibili.com') ||
+          keyLower.includes('quark') ||
+          keyLower.includes('uc') ||
+          keyLower.includes('baidu') ||
+          keyLower.includes('ali') ||
+          nameLower.includes('夸克') ||
+          nameLower.includes('百度') ||
+          nameLower.includes('阿里') ||
           (vod as any).needPanLogin;
         if (isPan) {
           // 触发 needPanLogin UI 分支
@@ -631,10 +650,14 @@ export const useAppStore = defineStore('app', () => {
 
     playLoading.value = true;
     playError.value = '';
+    // Reset external player flag at the start of every loadPlay call so
+    // previous VLC launches don't leak into this one.
+    externalPlayerLaunched.value = false;
     // Clear current URL immediately so old player stops before new
     // one starts loading. Without this, switching sources leaves the
     // old video playing until loadPlay completes (seconds later).
     currentPlayUrl.value = '';
+    currentDanmuUrl.value = '';
     currentPlayIndex.value = episodeIndex;
     if (episodes) currentEpisodes.value = episodes;
     try {
@@ -711,6 +734,10 @@ export const useAppStore = defineStore('app', () => {
             });
           }
 
+          // Mark that we handed playback off to VLC so callers (e.g. the
+          // E2E test suite) can treat this as a successful play path even
+          // though currentPlayUrl/playError are intentionally left empty.
+          externalPlayerLaunched.value = true;
           playLoading.value = false;
           return;
         } else {
@@ -837,6 +864,10 @@ export const useAppStore = defineStore('app', () => {
               });
             }
 
+            // Mark that we handed playback off to VLC so callers (e.g. the
+            // E2E test suite) can treat this as a successful play path even
+            // though currentPlayUrl/playError are intentionally left empty.
+            externalPlayerLaunched.value = true;
             playLoading.value = false;
             return;
           } else {
@@ -873,6 +904,7 @@ export const useAppStore = defineStore('app', () => {
       } else {
         currentPlayHeader.value = {};
       }
+      currentDanmuUrl.value = (result as any).danmuUrl || '';
 
       if (currentVod.value) {
         await Database.saveHistory({
@@ -1064,6 +1096,7 @@ export const useAppStore = defineStore('app', () => {
     currentPlayHeader,
     currentPlayFlag,
     currentPlayIndex,
+    currentDanmuUrl,
     currentEpisodes,
     resumeProgress,
     playLoading,
