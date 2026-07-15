@@ -4535,6 +4535,25 @@ export class JarLoader {
     } catch {
       // keep original if parsing fails
     }
+    // If ext is a URL with non-ASCII characters, URL-encode the path.
+    // java-bridge corrupts Unicode strings, so Chinese characters in URLs
+    // cause fetch failures (e.g. XYQHiker siteconfig returns null → NPE).
+    if (/^https?:\/\//.test(ext) && /[^\x00-\x7F]/.test(ext)) {
+      try {
+        const encoded = encodeURI(ext);
+        if (encoded !== ext) {
+          console.log(
+            '[JarLoader] cleanExtForSpider: URL-encoded non-ASCII:',
+            ext.substring(0, 80),
+            '->',
+            encoded.substring(0, 80),
+          );
+        }
+        return encoded;
+      } catch {
+        // keep original if encoding fails
+      }
+    }
     return ext;
   }
 
