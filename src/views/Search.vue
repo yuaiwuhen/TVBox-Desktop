@@ -284,6 +284,11 @@ function goToDetail(siteKey: string, vod: Movie) {
   color: var(--color-text-primary);
 }
 
+/* Search bar glow focus */
+:deep(.el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px var(--color-primary) inset, 0 0 12px var(--color-primary-glow) !important;
+}
+
 /* History chips */
 .history-chip {
   background: var(--color-bg-elevated);

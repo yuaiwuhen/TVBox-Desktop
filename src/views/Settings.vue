@@ -597,3 +597,16 @@ function onHistoryUrlSelect(url: string) {
   inputUrl.value = url
 }
 </script>
+
+<style scoped>
+/* Section headings with left border accent on hover */
+:deep(h3) {
+  padding-left: 10px;
+  border-left: 3px solid transparent;
+  transition: border-color 200ms ease, padding-left 200ms ease;
+}
+
+:deep(h3:hover) {
+  border-left-color: var(--color-primary);
+}
+</style>
