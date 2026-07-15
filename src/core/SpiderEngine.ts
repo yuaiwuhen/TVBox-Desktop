@@ -3,6 +3,7 @@ import { JsSpider } from './JsSpider';
 import { PySpider } from './PySpider';
 import { JsonRuleParser } from './JsonRuleParser';
 import { JarSpider } from './JarSpider';
+import { XbpqSpider } from './XbpqSpider';
 
 export class SpiderEngine {
   private spiderCache: Map<string, ISpider> = new Map();
@@ -159,8 +160,15 @@ export class SpiderEngine {
 
     let spider: ISpider | null = null;
 
+    // Check for XBPQ spider (rule-based web scraper)
+    if ((source.api || '').startsWith('csp_XBPQ')) {
+      console.log(
+        `[SpiderEngine] Creating XbpqSpider: key=${uniqueKey}, api=${source.api}`,
+      );
+      spider = new XbpqSpider(source);
+    }
     // Check for JAR spider (csp_ prefix)
-    if ((source.api || '').startsWith('csp_')) {
+    else if ((source.api || '').startsWith('csp_')) {
       const jarUrl = api; // api is now the spiderUrl from resolveApiUrl
       if (!jarUrl) {
         console.warn(
