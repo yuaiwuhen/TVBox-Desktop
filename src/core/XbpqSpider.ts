@@ -148,6 +148,7 @@ function extractArray(
 /**
  * Parse HTTP headers from rule string
  * Format: "Header1$Value1#Header2$Value2"
+ * Special placeholders: MOBILE_UA, PC_UA
  */
 function parseHeaders(headerRule: string): Record<string, string> {
   const headers: Record<string, string> = {};
@@ -157,7 +158,16 @@ function parseHeaders(headerRule: string): Record<string, string> {
   for (const part of parts) {
     const [name, value] = part.split('$');
     if (name && value) {
-      headers[name.trim()] = value.trim();
+      let headerValue = value.trim();
+      // Replace placeholders
+      if (headerValue === 'MOBILE_UA') {
+        headerValue =
+          'Mozilla/5.0 (Linux; Android 10; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+      } else if (headerValue === 'PC_UA') {
+        headerValue =
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      }
+      headers[name.trim()] = headerValue;
     }
   }
 
@@ -223,7 +233,7 @@ export class XbpqSpider implements ISpider {
   }
 
   /**
-   * Fetch HTML content from URL
+   * Fetch HTML content from URL via main process IPC
    */
   private async fetchHtml(url: string): Promise<string> {
     const headers = parseHeaders(this.rules.请求头 || '');
@@ -235,19 +245,23 @@ export class XbpqSpider implements ISpider {
     console.log(`[XbpqSpider] Fetching: ${url}`, { headers });
 
     try {
-      // Use Electron's net module to bypass SSL issues
-      const response = await fetch(url, {
-        headers,
-        redirect: 'follow',
-        // @ts-ignore - Electron's fetch supports these options
-        useElectronNet: true,
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      // Call main process to fetch HTML (avoids CORS and SSL issues)
+      const ipc = (window as any).electronIPC;
+      if (!ipc) {
+        throw new Error('electronIPC not available');
       }
 
-      const html = await response.text();
+      const result = await ipc.invoke('http:fetchHtml', {
+        url,
+        headers,
+        timeout: 30000,
+      });
+
+      if (!result.success) {
+        throw new Error(result.error || 'Unknown error');
+      }
+
+      const html = result.data;
       console.log(`[XbpqSpider] Fetched ${html.length} bytes from ${url}`);
       if (html.length < 500) {
         console.log(`[XbpqSpider] Content preview: ${html}`);

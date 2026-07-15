@@ -602,6 +602,37 @@ ipcMain.handle('dialog:openFile', async (_event, options: any) => {
   });
 });
 
+// Fetch HTML content for XBPQ spiders
+ipcMain.handle(
+  'http:fetchHtml',
+  async (
+    _event,
+    { url, headers, timeout }: { url: string; headers: Record<string, string>; timeout?: number },
+  ) => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeout || 30000);
+
+      const response = await fetch(url, {
+        headers,
+        signal: controller.signal,
+        redirect: 'follow',
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        return { success: false, error: `HTTP ${response.status}` };
+      }
+
+      const html = await response.text();
+      return { success: true, data: html };
+    } catch (e: any) {
+      return { success: false, error: e.message || 'Unknown error' };
+    }
+  },
+);
+
 app.on('window-all-closed', () => {
   globalShortcut.unregisterAll();
   if (process.platform !== 'darwin') {
