@@ -4,6 +4,8 @@ import { PySpider } from './PySpider';
 import { JsonRuleParser } from './JsonRuleParser';
 import { JarSpider } from './JarSpider';
 import { XbpqSpider } from './XbpqSpider';
+import { XyqhikerSpider } from './XyqhikerSpider';
+import { DrpySpider } from './DrpySpider';
 
 export class SpiderEngine {
   private spiderCache: Map<string, ISpider> = new Map();
@@ -160,8 +162,26 @@ export class SpiderEngine {
 
     let spider: ISpider | null = null;
 
+    // Check for Drpy spider (api contains drpy library URL)
+    if (
+      api.includes('drpy') ||
+      api.includes('drpy2') ||
+      key.startsWith('drpy_js_')
+    ) {
+      console.log(
+        `[SpiderEngine] Creating DrpySpider: key=${uniqueKey}, api=${api}`,
+      );
+      spider = new DrpySpider(source);
+    }
+    // Check for XYQHiker spider (rule-based with XPath-like syntax)
+    else if ((source.api || '').startsWith('csp_XYQHiker')) {
+      console.log(
+        `[SpiderEngine] Creating XyqhikerSpider: key=${uniqueKey}, api=${source.api}`,
+      );
+      spider = new XyqhikerSpider(source);
+    }
     // Check for XBPQ spider (rule-based web scraper)
-    if ((source.api || '').startsWith('csp_XBPQ')) {
+    else if ((source.api || '').startsWith('csp_XBPQ')) {
       console.log(
         `[SpiderEngine] Creating XbpqSpider: key=${uniqueKey}, api=${source.api}`,
       );
