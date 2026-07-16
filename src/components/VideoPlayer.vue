@@ -1471,8 +1471,7 @@ defineExpose({
       <div v-if="showControls && !screenLocked && !hasError"
         class="absolute inset-0 flex flex-col justify-between pointer-events-none z-30">
         <!-- Top bar -->
-        <div class="flex items-center justify-between px-4 py-2 pointer-events-auto" @click.stop
-          style="background: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent)">
+        <div class="flex items-center justify-between px-4 py-2 pointer-events-auto vp-top-bar" @click.stop>
           <span class="text-white text-sm truncate max-w-[60%]">{{ title }}</span>
           <div class="flex gap-1">
             <button class="ctrl-btn" :class="{ active: danmuEnabled }" @click="toggleDanmu" title="弹幕">
@@ -1519,8 +1518,7 @@ defineExpose({
         </div>
 
         <!-- Bottom bar -->
-        <div class="px-4 py-3 pointer-events-auto" @click.stop
-          style="background: linear-gradient(to top, rgba(0,0,0,0.8), transparent)">
+        <div class="px-4 py-3 pointer-events-auto vp-bottom-bar" @click.stop>
           <!-- Progress bar -->
           <div class="flex items-center gap-3 mb-2">
             <span class="text-white/80 text-xs w-14 text-right">{{ formattedCurrentTime }}</span>
@@ -1702,25 +1700,50 @@ defineExpose({
   border-radius: 0;
 }
 
+/* Glass morphism control bars per design */
+.vp-top-bar {
+  background: linear-gradient(
+    to bottom,
+    var(--color-bg-glass-heavy),
+    transparent
+  );
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
+.vp-bottom-bar {
+  background: linear-gradient(
+    to top,
+    var(--color-bg-glass-heavy),
+    transparent
+  );
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+
 .ctrl-btn {
   background: transparent;
   border: none;
   color: white;
   padding: 6px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background var(--transition-fast) var(--ease-out-expo),
+    color var(--transition-fast) var(--ease-out-expo);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .ctrl-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--color-bg-glass);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .ctrl-btn.active {
   background: var(--color-primary);
+  color: var(--color-bg-base);
 }
 
 .play-btn {

@@ -286,7 +286,7 @@ function updateCloseAllBar() {
         z-index: 9999;
         top: 10px;
         right: 16px;
-        background: #e8913a;
+        background: var(--color-primary, #e8913a);
         color: #fff;
         font-size: 12px;
         padding: 5px 12px;

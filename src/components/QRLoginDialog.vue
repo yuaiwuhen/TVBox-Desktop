@@ -289,51 +289,75 @@ async function poll() {
   justify-content: center;
   z-index: 9999;
   backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 .qr-dialog {
-  width: 360px;
-  background: linear-gradient(145deg, #1e1e2e, #1a1a28);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 16px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  position: relative;
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  background: var(--color-bg-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--surface-modal-shadow);
   overflow: hidden;
 }
 
+/* Subtle amber glow behind dialog */
+.qr-dialog::before {
+  content: '';
+  position: absolute;
+  top: -100px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 300px;
+  height: 300px;
+  background: radial-gradient(circle, var(--color-primary-glow) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
 .qr-header {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--color-border-light);
 }
 
 .qr-title {
   font-size: 16px;
   font-weight: 600;
-  color: #fff;
+  color: var(--color-text-primary);
+  letter-spacing: -0.01em;
 }
 
 .qr-close {
   background: transparent;
   border: none;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--color-text-tertiary);
   cursor: pointer;
   padding: 4px;
-  border-radius: 6px;
-  transition: all 0.2s;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast) var(--ease-out-expo);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .qr-close:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
 }
 
 .qr-body {
-  padding: 24px 20px 28px;
+  position: relative;
+  z-index: 1;
+  padding: 28px 24px 32px;
 }
 
 .qr-loading,
@@ -344,12 +368,12 @@ async function poll() {
   justify-content: center;
   gap: 12px;
   min-height: 280px;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--color-text-secondary);
   font-size: 14px;
 }
 
 .qr-error .error-text {
-  color: #f56c6c;
+  color: var(--color-danger);
   text-align: center;
   line-height: 1.5;
 }
@@ -357,22 +381,23 @@ async function poll() {
 .retry-btn {
   margin-top: 8px;
   padding: 8px 24px;
-  background: #409eff;
+  background: var(--color-primary);
   border: none;
-  border-radius: 6px;
-  color: #fff;
+  border-radius: var(--radius-md);
+  color: var(--color-bg-base);
   font-size: 14px;
+  font-weight: 500;
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background var(--transition-fast) var(--ease-out-expo);
 }
 
 .retry-btn:hover {
-  background: #66b1ff;
+  background: var(--color-primary-hover);
 }
 
 .rotating {
   animation: spin 1.2s linear infinite;
-  color: #409eff;
+  color: var(--color-primary);
 }
 
 @keyframes spin {
@@ -385,17 +410,17 @@ async function poll() {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
+  gap: 18px;
 }
 
 .qr-image-wrapper {
   position: relative;
-  width: 220px;
-  height: 220px;
-  background: #fff;
-  border-radius: 12px;
+  width: 200px;
+  height: 200px;
+  background: #ffffff;
+  border-radius: var(--radius-md);
   padding: 10px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--surface-floating-shadow);
 }
 
 .qr-image {
@@ -411,13 +436,13 @@ async function poll() {
   right: 0;
   bottom: 0;
   background: rgba(255, 255, 255, 0.95);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  color: #67c23a;
+  color: var(--color-success);
   font-size: 16px;
   font-weight: 600;
 }
@@ -427,6 +452,6 @@ async function poll() {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--color-text-secondary);
 }
 </style>

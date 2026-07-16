@@ -7,31 +7,53 @@
         class="loading-toast"
         :class="{ 'is-error': task.stage === 'error' }"
       >
+        <!-- Spinner / status icon -->
         <div class="loading-icon">
-          <el-icon v-if="task.stage === 'error'" :size="20" color="#f56c6c">
+          <el-icon v-if="task.stage === 'error'" :size="20" color="var(--color-danger)">
             <CircleClose />
           </el-icon>
-          <el-icon v-else-if="task.percent >= 100" :size="20" color="#67c23a">
+          <el-icon v-else-if="task.percent >= 100" :size="20" color="var(--color-success)">
             <CircleCheck />
           </el-icon>
-          <el-icon v-else :size="20" class="rotating">
-            <Loading />
-          </el-icon>
+          <svg
+            v-else
+            class="loading-spinner"
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+          >
+            <circle
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="var(--color-primary)"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              stroke-dasharray="31.4 31.4"
+              stroke-dashoffset="10"
+            />
+          </svg>
         </div>
         <div class="loading-content">
-          <div class="loading-title">{{ task.title }}</div>
-          <div class="loading-message">{{ task.message }}</div>
-          <el-progress
+          <div class="loading-header">
+            <span class="loading-title">{{ task.title }}</span>
+            <button class="loading-close" @click="dismiss(task.id)" aria-label="关闭">
+              <el-icon :size="14"><Close /></el-icon>
+            </button>
+          </div>
+          <div v-if="task.message" class="loading-message">{{ task.message }}</div>
+          <!-- Progress bar (thin, primary-colored, only when not error and < 100%) -->
+          <div
             v-if="task.stage !== 'error' && task.percent < 100"
-            :percentage="task.percent"
-            :stroke-width="3"
-            :show-text="false"
-            class="loading-progress"
-          />
+            class="loading-progress-track"
+          >
+            <div
+              class="loading-progress-fill"
+              :style="{ width: task.percent + '%' }"
+            />
+          </div>
         </div>
-        <button class="loading-close" @click="dismiss(task.id)">
-          <el-icon :size="14"><Close /></el-icon>
-        </button>
       </div>
     </TransitionGroup>
   </Teleport>
@@ -40,9 +62,9 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useLoading } from '../composables/useLoading';
-import { Loading, CircleCheck, CircleClose, Close } from '@element-plus/icons-vue';
+import { CircleCheck, CircleClose, Close } from '@element-plus/icons-vue';
 
-const { tasks, currentTask, finish } = useLoading();
+const { tasks, finish } = useLoading();
 
 const taskList = computed(() => Array.from(tasks.values()));
 
@@ -54,8 +76,8 @@ function dismiss(id: string) {
 <style scoped>
 .loading-stack {
   position: fixed;
-  top: 80px;
-  right: 20px;
+  top: 24px;
+  right: 24px;
   z-index: 9999;
   display: flex;
   flex-direction: column;
@@ -69,35 +91,37 @@ function dismiss(id: string) {
   align-items: flex-start;
   gap: 12px;
   padding: 12px 16px;
-  background: rgba(30, 30, 40, 0.95);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  min-width: 300px;
-  max-width: 400px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
-  color: #fff;
+  width: 300px;
+  background: var(--color-bg-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: var(--glass-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--surface-floating-shadow);
+  color: var(--color-text-primary);
 }
 
 .loading-toast.is-error {
-  border-color: rgba(245, 108, 108, 0.4);
-  background: rgba(60, 30, 30, 0.95);
+  border-color: rgba(248, 113, 113, 0.3);
 }
 
 .loading-icon {
   flex-shrink: 0;
-  padding-top: 2px;
+  padding-top: 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
 }
 
-.rotating {
-  animation: spin 1.2s linear infinite;
-  color: #409eff;
+.loading-spinner {
+  animation: loading-spin 1s linear infinite;
 }
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+@keyframes loading-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .loading-content {
@@ -105,46 +129,71 @@ function dismiss(id: string) {
   min-width: 0;
 }
 
-.loading-title {
-  font-size: 14px;
-  font-weight: 600;
+.loading-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-bottom: 4px;
+}
+
+.loading-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
 }
 
 .loading-message {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--color-text-secondary);
   margin-bottom: 6px;
   line-height: 1.4;
   word-break: break-all;
 }
 
-.loading-progress {
+.loading-progress-track {
+  width: 100%;
+  height: 3px;
+  background: var(--color-bg-elevated);
+  border-radius: 2px;
+  overflow: hidden;
   margin-top: 4px;
+}
+
+.loading-progress-fill {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: 2px;
+  transition: width 0.4s var(--ease-out-expo);
 }
 
 .loading-close {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   background: transparent;
   border: none;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--color-text-disabled);
   cursor: pointer;
-  padding: 2px;
   border-radius: 4px;
-  transition: all 0.2s;
+  transition: color var(--transition-fast) var(--ease-out-expo);
 }
 
 .loading-close:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
+  color: var(--color-text-secondary);
 }
 
 .loading-enter-active,
 .loading-leave-active {
-  transition: all 0.3s ease;
+  transition: all 0.3s var(--ease-out-expo);
 }
 
 .loading-enter-from {
@@ -155,5 +204,11 @@ function dismiss(id: string) {
 .loading-leave-to {
   opacity: 0;
   transform: translateX(30px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner {
+    animation-duration: 0.01ms !important;
+  }
 }
 </style>

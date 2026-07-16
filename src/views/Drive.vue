@@ -6,32 +6,102 @@
     </div>
 
     <!-- Add drive dialog -->
-    <el-dialog v-model="showAddDrive" title="添加网盘" width="480px">
-      <el-form label-position="top">
-        <el-form-item label="类型">
-          <el-select v-model="newDrive.type">
-            <el-option label="WebDAV" value="webdav" />
-            <el-option label="本地文件夹" value="local" />
-          </el-select>
-        </el-form-item>
-        <el-form-item v-if="newDrive.type === 'webdav'" label="WebDAV 地址">
-          <el-input v-model="newDrive.url" placeholder="https://dav.example.com/path" />
-        </el-form-item>
-        <el-form-item v-if="newDrive.type === 'webdav'" label="用户名">
-          <el-input v-model="newDrive.username" />
-        </el-form-item>
-        <el-form-item v-if="newDrive.type === 'webdav'" label="密码">
-          <el-input v-model="newDrive.password" type="password" show-password />
-        </el-form-item>
-        <el-form-item v-if="newDrive.type === 'local'" label="本地路径">
-          <el-input v-model="newDrive.path" placeholder="D:\Videos 或 /home/user/videos" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="showAddDrive = false">取消</el-button>
-        <el-button type="primary" @click="addDrive">添加</el-button>
-      </template>
-    </el-dialog>
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="showAddDrive" class="add-drive-overlay" @click.self="showAddDrive = false">
+          <div class="add-drive-card">
+            <!-- Header -->
+            <div class="add-drive-header">
+              <h2 class="add-drive-title">添加网盘</h2>
+              <button class="add-drive-close" @click="showAddDrive = false" aria-label="关闭">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+
+            <!-- Type selector: visual radio cards -->
+            <div class="add-drive-type-row">
+              <button
+                class="add-drive-type-card"
+                :class="{ 'is-selected': newDrive.type === 'webdav' }"
+                @click="newDrive.type = 'webdav'"
+              >
+                <div class="add-drive-type-icon">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M17.5 19a4.5 4.5 0 1 0 0-9h-1.8A7 7 0 1 0 4 14.9" />
+                  </svg>
+                </div>
+                <span class="add-drive-type-label">WebDAV</span>
+              </button>
+              <button
+                class="add-drive-type-card"
+                :class="{ 'is-selected': newDrive.type === 'local' }"
+                @click="newDrive.type = 'local'"
+              >
+                <div class="add-drive-type-icon add-drive-type-icon-local">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                </div>
+                <span class="add-drive-type-label">本地文件夹</span>
+              </button>
+            </div>
+
+            <!-- Divider -->
+            <div class="add-drive-divider"></div>
+
+            <!-- Form fields -->
+            <div class="add-drive-form">
+              <template v-if="newDrive.type === 'webdav'">
+                <div class="add-drive-field">
+                  <label class="add-drive-label">服务器地址</label>
+                  <input
+                    v-model="newDrive.url"
+                    type="text"
+                    class="add-drive-input"
+                    placeholder="https://dav.example.com/path"
+                  />
+                </div>
+                <div class="add-drive-field">
+                  <label class="add-drive-label">用户名</label>
+                  <input
+                    v-model="newDrive.username"
+                    type="text"
+                    class="add-drive-input"
+                    placeholder="请输入用户名"
+                  />
+                </div>
+                <div class="add-drive-field">
+                  <label class="add-drive-label">密码</label>
+                  <input
+                    v-model="newDrive.password"
+                    type="password"
+                    class="add-drive-input"
+                    placeholder="请输入密码"
+                  />
+                </div>
+              </template>
+              <div v-else class="add-drive-field">
+                <label class="add-drive-label">本地路径</label>
+                <input
+                  v-model="newDrive.path"
+                  type="text"
+                  class="add-drive-input"
+                  placeholder="D:\Videos 或 /home/user/videos"
+                />
+              </div>
+            </div>
+
+            <!-- Action buttons -->
+            <div class="add-drive-actions">
+              <button class="add-drive-btn add-drive-btn-ghost" @click="showAddDrive = false">取消</button>
+              <button class="add-drive-btn add-drive-btn-primary" @click="addDrive">确认添加</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
 
     <!-- Drive list sidebar + file browser -->
     <div class="flex-1 flex overflow-hidden">
@@ -273,6 +343,227 @@ function formatSize(bytes?: number): string {
 </script>
 
 <style scoped>
+/* Add Drive Dialog */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 250ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.add-drive-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.add-drive-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-width: 440px;
+  width: calc(100vw - 32px);
+  background: var(--color-bg-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: var(--glass-border);
+  border-radius: var(--radius-lg, 14px);
+  box-shadow: var(--surface-modal-shadow);
+  overflow: hidden;
+}
+
+.add-drive-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px 24px 20px;
+}
+
+.add-drive-title {
+  font-size: var(--text-lg, 17px);
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.2;
+  margin: 0;
+}
+
+.add-drive-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--color-text-tertiary);
+  border-radius: var(--radius-sm, 6px);
+  transition: color 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1)),
+              background 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+.add-drive-close:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+}
+
+.add-drive-type-row {
+  display: flex;
+  gap: 12px;
+  padding: 0 24px 20px;
+}
+
+.add-drive-type-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  padding: 16px 0;
+  cursor: pointer;
+  background: var(--color-bg-elevated);
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-md, 10px);
+  transition: border-color 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+.add-drive-type-card.is-selected {
+  border-color: var(--color-primary-border);
+}
+.add-drive-type-card:hover:not(.is-selected) {
+  border-color: var(--color-border-active);
+}
+
+.add-drive-type-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md, 10px);
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+.add-drive-type-card:hover:not(.is-selected) .add-drive-type-icon {
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+.add-drive-type-icon-local {
+  background: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+  color: var(--color-text-tertiary);
+}
+.add-drive-type-card.is-selected .add-drive-type-icon-local {
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+
+.add-drive-type-label {
+  font-size: var(--text-sm, 13px);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+.add-drive-type-card.is-selected .add-drive-type-label {
+  color: var(--color-text-primary);
+}
+
+.add-drive-divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: 0 24px;
+}
+
+.add-drive-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 24px;
+}
+
+.add-drive-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.add-drive-label {
+  font-size: var(--text-xs, 11px);
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+}
+
+.add-drive-input {
+  height: 36px;
+  padding: 0 10px;
+  font-size: var(--text-sm, 13px);
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 6px);
+  caret-color: var(--color-primary);
+  outline: none;
+  transition: border-color 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+.add-drive-input::placeholder {
+  color: var(--color-text-disabled);
+}
+.add-drive-input:focus {
+  border-color: var(--color-border-active);
+}
+
+.add-drive-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 24px 24px;
+}
+
+.add-drive-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  flex: 1;
+  height: 38px;
+  font-size: var(--text-sm, 13px);
+  font-weight: 500;
+  border-radius: var(--radius-md, 10px);
+  cursor: pointer;
+  transition: background 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1)),
+              border-color 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1)),
+              color 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1)),
+              transform 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+.add-drive-btn:active {
+  transform: scale(0.97);
+}
+
+.add-drive-btn-ghost {
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+}
+.add-drive-btn-ghost:hover {
+  border-color: var(--color-border-active);
+  color: var(--color-text-primary);
+}
+
+.add-drive-btn-primary {
+  font-weight: 600;
+  color: var(--color-text-inverse);
+  background: var(--color-primary);
+  border: none;
+}
+.add-drive-btn-primary:hover {
+  background: var(--color-primary-hover);
+}
+
 /* Sidebar */
 .drive-sidebar {
   background: var(--color-bg-surface);

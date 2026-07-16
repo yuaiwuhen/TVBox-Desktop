@@ -204,28 +204,65 @@
     </div>
 
     <!-- Subtitle Search Dialog -->
-    <el-dialog v-model="subtitleSearchVisible" title="搜索字幕" width="500px" :append-to-body="true">
-      <div v-if="subtitleSearchLoading" class="text-center py-8">
-        <el-icon class="is-loading text-3xl" style="color: var(--color-text-tertiary)">
-          <Loading />
-        </el-icon>
-        <p class="mt-2" style="color: var(--color-text-tertiary)">搜索中...</p>
-      </div>
-      <div v-else-if="subtitleSearchResults.length === 0" class="text-center py-8"
-        style="color: var(--color-text-tertiary)">未找到字幕</div>
-      <div v-else class="max-h-96 overflow-auto space-y-2">
-        <div v-for="(item, idx) in subtitleSearchResults" :key="idx"
-          class="flex items-center justify-between p-3 rounded-lg cursor-pointer border transition-colors hover:border-[var(--color-primary)]"
-          style="border-color: var(--color-border); background: var(--color-bg-elevated)"
-          @click="onSelectSubtitle(item)">
-          <div class="flex-1 min-w-0">
-            <p class="text-sm font-medium truncate" style="color: var(--color-text-primary)">{{ item.name }}</p>
-            <p class="text-xs mt-1" style="color: var(--color-text-tertiary)">{{ item.isZip ? '压缩包格式' : '字幕文件' }}</p>
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="subtitleSearchVisible" class="subsearch-overlay" @click.self="subtitleSearchVisible = false">
+          <div class="subsearch-card">
+            <!-- Header -->
+            <div class="subsearch-header">
+              <h2 class="subsearch-title">搜索字幕</h2>
+              <button class="subsearch-close" @click="subtitleSearchVisible = false" aria-label="关闭">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+
+            <!-- Search input -->
+            <div class="subsearch-input-row">
+              <svg class="subsearch-input-icon" viewBox="0 0 24 24" width="16" height="16" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              <input v-model="subtitleSearchQuery" type="text" class="subsearch-input" placeholder="输入影片名称搜索字幕"
+                @keydown.enter="retrySubtitleSearch" />
+            </div>
+
+            <!-- Divider -->
+            <div class="subsearch-divider"></div>
+
+            <!-- Result list -->
+            <div class="subsearch-list">
+              <div v-if="subtitleSearchLoading" class="subsearch-empty">
+                <el-icon class="is-loading" :size="28" style="color: var(--color-text-tertiary)">
+                  <Loading />
+                </el-icon>
+                <p class="subsearch-empty-text">搜索中...</p>
+              </div>
+              <div v-else-if="subtitleSearchResults.length === 0" class="subsearch-empty">
+                <p class="subsearch-empty-text">未找到字幕</p>
+              </div>
+              <div v-else v-for="(item, idx) in subtitleSearchResults" :key="idx" class="subsearch-item"
+                @click="onSelectSubtitle(item)">
+                <div class="subsearch-item-info">
+                  <div class="subsearch-item-name-row">
+                    <span class="subsearch-item-name">{{ item.name }}</span>
+                    <span class="subsearch-badge" :class="item.isZip ? 'subsearch-badge-zip' : 'subsearch-badge-sub'">
+                      {{ item.isZip ? 'ZIP' : 'SUB' }}
+                    </span>
+                  </div>
+                  <span class="subsearch-item-meta">{{ item.isZip ? '压缩包格式' : '字幕文件' }}</span>
+                </div>
+                <button class="subsearch-load-btn" @click.stop="onSelectSubtitle(item)">加载</button>
+              </div>
+            </div>
           </div>
-          <el-button size="small" type="primary" text>加载</el-button>
         </div>
-      </div>
-    </el-dialog>
+      </Transition>
+    </Teleport>
 
     <!-- QR Login Dialog -->
     <QRLoginDialog v-if="currentPanType" v-model:visible="showPanLogin" :title="panLoginTitle"
@@ -263,6 +300,7 @@ const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
 const subtitleSearchVisible = ref(false)
 const subtitleSearchResults = ref<SubtitleSearchResult[]>([])
 const subtitleSearchLoading = ref(false)
+const subtitleSearchQuery = ref('')
 const descExpanded = ref(false)
 const showPanLogin = ref(false)
 const pendingPlayAfterLogin = ref<{ flag: string; url: string } | null>(null)
@@ -796,8 +834,18 @@ async function handleToggleFavorite() {
 async function onSearchSubtitle() {
   if (!store.currentVod?.vod_name) return
   subtitleSearchVisible.value = true
+  subtitleSearchQuery.value = store.currentVod.vod_name
   subtitleSearchLoading.value = true
   try { subtitleSearchResults.value = await SubtitleSearch.search(store.currentVod.vod_name) }
+  catch { subtitleSearchResults.value = [] }
+  finally { subtitleSearchLoading.value = false }
+}
+
+async function retrySubtitleSearch() {
+  const query = subtitleSearchQuery.value.trim()
+  if (!query) return
+  subtitleSearchLoading.value = true
+  try { subtitleSearchResults.value = await SubtitleSearch.search(query) }
   catch { subtitleSearchResults.value = [] }
   finally { subtitleSearchLoading.value = false }
 }
@@ -945,28 +993,14 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
   position: relative;
   width: 400px;
   max-width: calc(100vw - 32px);
-  background: linear-gradient(160deg, rgba(26, 31, 46, 0.96), rgba(15, 18, 28, 0.94));
-  border-radius: 20px;
+  background: var(--color-bg-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: var(--glass-border);
+  border-radius: var(--radius-lg);
   padding: 32px 28px 24px;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.06) inset,
-    0 24px 48px rgba(0, 0, 0, 0.5),
-    0 0 0 1px rgba(255, 255, 255, 0.04);
+  box-shadow: var(--surface-modal-shadow);
   text-align: center;
-}
-
-.play-error-card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 20px;
-  padding: 1px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02) 50%, rgba(255, 255, 255, 0.04));
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
 }
 
 .play-error-glow {
@@ -1064,13 +1098,14 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
 }
 
 .play-error-btn-primary {
-  background: linear-gradient(135deg, #ef4444, #dc2626);
-  color: white;
-  box-shadow: 0 4px 16px rgba(239, 68, 68, 0.3);
+  background: var(--color-primary);
+  color: var(--color-bg-base);
+  box-shadow: 0 4px 16px var(--color-primary-glow);
 }
 
 .play-error-btn-primary:hover {
-  box-shadow: 0 6px 20px rgba(239, 68, 68, 0.4);
+  background: var(--color-primary-hover);
+  box-shadow: 0 6px 20px var(--color-primary-glow);
   transform: translateY(-1px);
 }
 
@@ -1108,5 +1143,238 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
 .play-error-dialog-leave-to .play-error-card {
   opacity: 0;
   transform: translateY(-8px) scale(0.97);
+}
+
+/* Subtitle Search Dialog */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 250ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.subsearch-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.subsearch-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-width: 500px;
+  width: calc(100vw - 32px);
+  max-height: 80vh;
+  background: var(--color-bg-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: var(--glass-border);
+  border-radius: var(--radius-lg, 14px);
+  box-shadow: var(--surface-modal-shadow);
+  overflow: hidden;
+}
+
+.subsearch-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px 24px 16px;
+}
+
+.subsearch-title {
+  font-size: var(--text-lg, 17px);
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.2;
+  margin: 0;
+}
+
+.subsearch-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--color-text-tertiary);
+  border-radius: var(--radius-sm, 6px);
+  transition: color 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1)),
+    background 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.subsearch-close:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+}
+
+.subsearch-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 38px;
+  margin: 0 24px 16px;
+  width: calc(100% - 48px);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 6px);
+  padding: 0 12px;
+  transition: border-color 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.subsearch-input-row:focus-within {
+  border-color: var(--color-border-active);
+}
+
+.subsearch-input-icon {
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
+}
+
+.subsearch-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  flex: 1;
+  font-size: var(--text-sm, 13px);
+  color: var(--color-text-primary);
+  caret-color: var(--color-primary);
+}
+
+.subsearch-input::placeholder {
+  color: var(--color-text-disabled);
+}
+
+.subsearch-divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: 0 24px;
+}
+
+.subsearch-list {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0;
+  overflow-y: auto;
+  max-height: 400px;
+}
+
+.subsearch-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px 0;
+}
+
+.subsearch-empty-text {
+  font-size: var(--text-sm, 13px);
+  color: var(--color-text-tertiary);
+  margin: 0;
+}
+
+.subsearch-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 24px;
+  cursor: pointer;
+  transition: background 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.subsearch-item:hover {
+  background: var(--color-bg-glass-light);
+}
+
+.subsearch-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.subsearch-item-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.subsearch-item-name {
+  font-size: var(--text-sm, 13px);
+  font-weight: 500;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.subsearch-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  flex-shrink: 0;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  border-radius: var(--radius-sm, 6px);
+}
+
+.subsearch-badge-zip {
+  color: var(--state-warning, #fbbf24);
+  background: rgba(251, 191, 36, 0.15);
+}
+
+.subsearch-badge-sub {
+  color: var(--state-info, #60a5fa);
+  background: rgba(96, 165, 250, 0.15);
+}
+
+.subsearch-item-meta {
+  font-size: var(--text-xs, 11px);
+  color: var(--color-text-tertiary);
+}
+
+.subsearch-load-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 14px;
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-soft);
+  border: none;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  transition: background 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.subsearch-load-btn:hover {
+  background: color-mix(in srgb, var(--color-primary) 22%, transparent);
+}
+
+.subsearch-load-btn:active {
+  transform: scale(0.96);
 }
 </style>

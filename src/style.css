@@ -276,17 +276,73 @@ body {
 
 /* ===== Background Image ===== */
 html.has-bg-image {
-  background-color: var(--color-bg-base);
+  /* Keep a solid fallback color on <html> behind the image layer */
+  background-color: #0a0b10;
+}
+
+html.dark.has-bg-image {
+  background-color: #0a0b10;
+}
+
+html:not(.dark).has-bg-image {
+  background-color: #f5f5f7;
+}
+
+/* Background image layer: blurred, dimmed, saturated — sits behind all content */
+html.has-bg-image::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
   background-image: var(--theme-bg-image);
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  background-attachment: fixed;
-  background-blend-mode: soft-light;
+  opacity: var(--theme-bg-opacity, 0.15);
+  filter: blur(2px) brightness(0.7) saturate(1.3);
 }
 
 html.has-bg-image body {
   background: transparent !important;
+}
+
+/* When a background image is active, make the base surface token transparent
+   so page roots (which use `background: var(--color-bg-base)`) let the image
+   show through. The <html> element provides the solid fallback behind the image. */
+html.has-bg-image {
+  --color-bg-base: transparent;
+}
+
+/* Semi-transparent surfaces for the "custom" theme variant — lets the
+   background image show through sidebars, topbars, cards, and dialogs. */
+
+/* Light mode + background image */
+html:not(.dark).has-bg-image {
+  --color-bg-surface: rgba(255, 255, 255, 0.72);
+  --color-bg-elevated: rgba(255, 255, 255, 0.6);
+  --color-bg-overlay: rgba(232, 232, 237, 0.55);
+  --color-bg-glass: rgba(255, 255, 255, 0.55);
+  --color-bg-glass-heavy: rgba(245, 245, 247, 0.82);
+  --color-bg-glass-light: rgba(255, 255, 255, 0.4);
+}
+
+/* Dark mode + background image */
+html.dark.has-bg-image {
+  --color-bg-surface: rgba(18, 19, 26, 0.75);
+  --color-bg-elevated: rgba(26, 28, 38, 0.65);
+  --color-bg-overlay: rgba(34, 36, 47, 0.55);
+  --color-bg-glass: rgba(20, 21, 30, 0.6);
+  --color-bg-glass-heavy: rgba(10, 11, 16, 0.82);
+  --color-bg-glass-light: rgba(26, 28, 38, 0.45);
+}
+
+/* Ensure #app doesn't paint an opaque layer over the background image,
+   and stack it above the ::before image layer */
+html.has-bg-image #app {
+  background: transparent;
+  position: relative;
+  z-index: 1;
 }
 
 /* ===== Scrollbar ===== */
