@@ -1,17 +1,6 @@
 <template>
   <div class="h-full flex flex-col" style="background: var(--color-bg-base)">
-    <!-- Header -->
-    <div class="flex items-center gap-2 px-4 py-3 border-b flex-shrink-0"
-      style="border-color: var(--color-border); background: var(--color-bg-surface)">
-      <el-button :icon="ArrowLeft" text @click="router.back()" style="color: var(--color-text-secondary)">返回</el-button>
-      <div class="flex-1" />
-      <el-button :type="isFavorited ? 'danger' : 'default'" :icon="isFavorited ? StarFilled : Star" size="small"
-        @click="handleToggleFavorite">
-        {{ isFavorited ? '已收藏' : '收藏' }}
-      </el-button>
-      <el-button size="small" @click="handleQuickSearch" :loading="quickSearchLoading">快速搜索</el-button>
-      <el-button v-if="store.currentPlayUrl" size="small" @click="copyPlayUrl">复制地址</el-button>
-    </div>
+    <!-- Header removed – sticky glass bar is inside scroll container -->
 
     <!-- Loading -->
     <div v-if="loading" class="flex-1 p-6">
@@ -39,6 +28,37 @@
 
     <!-- Detail Content -->
     <div v-else-if="store.currentVod" class="flex-1 overflow-auto">
+      <!-- Sticky floating glassmorphic action bar -->
+      <div class="sticky top-0 z-20 px-6 pt-4">
+        <div class="flex items-center gap-3 px-4 py-2.5"
+          style="background: var(--color-bg-glass); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border: var(--glass-border); border-radius: var(--radius-lg, 14px)">
+          <button class="flex items-center justify-center w-8 h-8 rounded-full transition-colors"
+            style="background: var(--color-bg-elevated); color: var(--color-text-secondary)" @click="router.back()">
+            <el-icon :size="16">
+              <ArrowLeft />
+            </el-icon>
+          </button>
+          <span class="flex-1 text-sm font-medium truncate" style="color: var(--color-text-primary)">{{
+            store.currentVod?.vod_name }}</span>
+          <button class="flex items-center justify-center w-8 h-8 rounded-full transition-colors"
+            :style="{ background: isFavorited ? 'var(--color-primary-soft)' : 'var(--color-bg-elevated)', color: isFavorited ? 'var(--color-primary)' : 'var(--color-text-tertiary)' }"
+            @click="handleToggleFavorite">
+            <el-icon :size="16">
+              <component :is="isFavorited ? StarFilled : Star" />
+            </el-icon>
+          </button>
+          <button v-if="store.currentPlayUrl"
+            class="flex items-center justify-center w-8 h-8 rounded-full transition-colors"
+            style="background: var(--color-bg-elevated); color: var(--color-text-tertiary)" @click="copyPlayUrl">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
       <!-- Video Player at top (shown when playing) -->
       <div v-if="store.currentPlayUrl" class="w-full px-6 pt-4 player-enter-container">
         <div class="rounded-xl overflow-hidden detail-player-shadow player-enter-animation"
@@ -81,13 +101,16 @@
 
       <!-- Info Section with blurred poster background -->
       <div class="detail-hero relative overflow-hidden">
+        <!-- Top gradient fade -->
+        <div class="absolute top-0 left-0 right-0 h-24"
+          style="background: linear-gradient(to bottom, var(--color-bg-base), transparent); z-index: 1"></div>
         <div v-if="store.currentVod.vod_pic" class="absolute inset-0 bg-cover bg-center"
           :style="{ backgroundImage: `url(${processImageUrl(store.currentVod.vod_pic)})` }" />
         <div class="absolute inset-0 detail-hero-overlay" />
         <div class="absolute inset-0 detail-hero-blur" />
-        <div class="relative flex flex-col md:flex-row gap-6 p-6">
-          <div class="w-44 h-60 flex-shrink-0 rounded-lg overflow-hidden detail-poster-shadow"
-            style="background: var(--color-bg-elevated)">
+        <div class="relative flex flex-col md:flex-row gap-6 p-6" style="z-index: 2">
+          <div class="w-[200px] md:w-[240px] flex-shrink-0 overflow-hidden detail-poster-shadow"
+            style="aspect-ratio: 2/3; border-radius: var(--radius-lg, 14px); border: var(--color-border); background: var(--color-bg-elevated)">
             <img v-if="store.currentVod.vod_pic" :src="processImageUrl(store.currentVod.vod_pic)"
               class="w-full h-full object-cover" />
             <div v-else class="w-full h-full flex items-center justify-center">
@@ -97,33 +120,98 @@
             </div>
           </div>
           <div class="flex flex-col gap-2 flex-1 min-w-0">
-            <h1 class="text-2xl font-bold" style="color: var(--color-text-primary)">{{ pageTitle }}</h1>
-            <div class="flex flex-wrap gap-2 mt-1">
-              <el-tag v-if="store.currentVod.type_name" size="small">{{ store.currentVod.type_name }}</el-tag>
-              <el-tag v-if="store.currentVod.vod_year" size="small" type="info">{{ store.currentVod.vod_year }}</el-tag>
-              <el-tag v-if="store.currentVod.vod_area" size="small" type="info">{{ store.currentVod.vod_area }}</el-tag>
+            <h1 class="text-3xl md:text-4xl font-bold" style="color: var(--color-text-primary)">{{
+              store.currentVod.vod_name }}</h1>
+            <!-- Rating badge -->
+            <div v-if="store.currentVod.vod_score || store.currentVod.vod_douban_score"
+              class="flex items-center gap-2 mt-1">
+              <span class="inline-flex items-center gap-1 px-2.5 py-1 text-sm font-bold"
+                style="background: var(--color-primary); color: white; border-radius: var(--radius-sm, 6px);">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                  <path
+                    d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                </svg>
+                {{ store.currentVod.vod_score || store.currentVod.vod_douban_score }}
+              </span>
             </div>
-            <p v-if="store.currentVod.vod_director" class="text-sm mt-2" style="color: var(--color-text-secondary)">
-              <span style="color: var(--color-text-primary)">导演:</span> {{ store.currentVod.vod_director }}
-            </p>
-            <p v-if="store.currentVod.vod_actor" class="text-sm" style="color: var(--color-text-secondary)">
-              <span style="color: var(--color-text-primary)">演员:</span> {{ store.currentVod.vod_actor }}
-            </p>
-            <p v-if="store.currentVod.vod_content"
-              class="mt-4 text-sm leading-relaxed max-w-4xl rounded-lg p-4 cursor-pointer detail-desc"
-              :class="{ 'line-clamp-4': !descExpanded }"
-              style="background: var(--color-bg-glass); color: var(--color-text-secondary)"
-              @click="descExpanded = !descExpanded">
-              {{ store.currentVod.vod_content }}
-              <span class="text-xs ml-1" style="color: var(--color-primary)">{{ descExpanded ? '收起' : '展开' }}</span>
-            </p>
+            <!-- Tag badges: year, area, type -->
+            <div class="flex flex-wrap gap-2 mt-2">
+              <span v-if="store.currentVod.vod_year"
+                class="inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full"
+                style="background: var(--color-primary-soft); color: var(--color-primary)">{{ store.currentVod.vod_year
+                }}</span>
+              <span v-if="store.currentVod.vod_area"
+                class="inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full"
+                style="background: var(--color-primary-soft); color: var(--color-primary)">{{ store.currentVod.vod_area
+                }}</span>
+              <span v-if="store.currentVod.type_name"
+                class="inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full"
+                style="background: var(--color-bg-glass); color: var(--color-text-secondary); border: var(--color-border)">{{
+                  store.currentVod.type_name }}</span>
+            </div>
+            <!-- Meta info rows -->
+            <div class="mt-3 flex flex-col gap-1.5">
+              <div v-if="store.currentVod.vod_director" class="flex items-center gap-2 text-sm">
+                <span class="shrink-0" style="color: var(--color-text-tertiary)">导演</span>
+                <span style="color: var(--color-text-secondary)">{{ store.currentVod.vod_director }}</span>
+              </div>
+              <div v-if="store.currentVod.vod_actor" class="flex items-center gap-2 text-sm">
+                <span class="shrink-0" style="color: var(--color-text-tertiary)">主演</span>
+                <span style="color: var(--color-text-secondary)">{{ store.currentVod.vod_actor }}</span>
+              </div>
+              <div v-if="store.currentVod.type_name" class="flex items-center gap-2 text-sm">
+                <span class="shrink-0" style="color: var(--color-text-tertiary)">类型</span>
+                <span style="color: var(--color-text-secondary)">{{ store.currentVod.type_name }}</span>
+              </div>
+              <div v-if="store.currentVod.vod_area" class="flex items-center gap-2 text-sm">
+                <span class="shrink-0" style="color: var(--color-text-tertiary)">地区</span>
+                <span style="color: var(--color-text-secondary)">{{ store.currentVod.vod_area }}</span>
+              </div>
+              <div v-if="store.currentVod.vod_year" class="flex items-center gap-2 text-sm">
+                <span class="shrink-0" style="color: var(--color-text-tertiary)">上映</span>
+                <span style="color: var(--color-text-secondary)">{{ store.currentVod.vod_year }}</span>
+              </div>
+            </div>
+            <!-- Action buttons: Play + Cache -->
+            <div class="mt-4 flex items-center gap-3">
+              <button v-if="playSources.length > 0"
+                class="inline-flex items-center justify-center gap-2 px-8 py-3 text-sm font-semibold transition-all active:scale-95"
+                style="background: var(--color-primary); color: white; border-radius: var(--radius-lg, 14px); box-shadow: 0 0 20px var(--color-primary-glow, rgba(232,145,58,0.3))"
+                @click="playEpisode(activePlaySource, getVisibleEpisodes(playSources.find(s => s.name === activePlaySource)?.episodes || [])[0]?.url)">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+                立即播放
+              </button>
+              <button
+                class="inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-medium transition-all border active:scale-95"
+                style="background: transparent; color: var(--color-text-secondary); border-color: var(--color-border); border-radius: var(--radius-lg, 14px)"
+                @click="cacheVideo">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                缓存
+              </button>
+            </div>
+            <div v-if="store.currentVod.vod_content" class="mt-3 text-sm rounded-lg p-4 detail-desc relative"
+              style="background: var(--color-bg-glass); color: var(--color-text-secondary)">
+              <div v-if="descExpanded" class="detail-desc-content" v-html="sanitizedVodContent"></div>
+              <div v-else class="detail-desc-content">{{ truncatedVodContent }}</div>
+              <div class="text-right mt-2">
+                <span class="text-xs cursor-pointer" style="color: var(--color-primary)"
+                  @click="descExpanded = !descExpanded">{{ descExpanded ? '收起' : '展开' }}</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
       <div class="px-6 pb-6">
         <!-- Play Sources -->
-        <div v-if="playSources.length > 0" class="mb-4 rounded-lg p-4" style="background: var(--color-bg-surface)">
+        <div v-if="playSources.length > 0" class="mb-4">
           <div class="flex items-center justify-between mb-3">
             <span class="text-sm font-medium" style="color: var(--color-text-primary)">选集</span>
             <div class="flex items-center gap-2">
@@ -141,8 +229,20 @@
               </el-button>
             </div>
           </div>
-          <el-tabs v-model="activePlaySource">
-            <el-tab-pane v-for="source in playSources" :key="source.name" :label="source.name" :name="source.name">
+          <!-- Source pill bar -->
+          <div v-if="playSources.length > 1" class="flex items-center gap-1 p-1 mb-3"
+            style="background: var(--color-bg-glass); border: var(--glass-border); border-radius: var(--radius-lg, 14px)">
+            <button v-for="source in playSources" :key="source.name"
+              class="px-3 py-1.5 text-sm font-medium transition-all cursor-pointer" :style="activePlaySource === source.name
+                ? 'background: var(--color-primary); color: white; border-radius: var(--radius-md); box-shadow: 0 2px 8px var(--color-primary-glow)'
+                : 'color: var(--color-text-tertiary); border-radius: var(--radius-md)'"
+              @click="activePlaySource = source.name">
+              {{ source.name }}
+            </button>
+          </div>
+          <!-- Episode group + grid for active source -->
+          <template v-for="source in playSources" :key="source.name">
+            <template v-if="source.name === activePlaySource">
               <div v-if="getEpisodeGroups(source.episodes).length > 1" class="mb-2">
                 <el-radio-group v-model="activeEpisodeGroup" size="small">
                   <el-radio-button v-for="(group, gi) in getEpisodeGroups(source.episodes)" :key="gi" :value="gi">{{
@@ -150,12 +250,10 @@
                   }}</el-radio-button>
                 </el-radio-group>
               </div>
-              <!-- Episode grid: fixed column width ensures vertical alignment -->
               <div class="ep-grid mt-2">
                 <el-tooltip v-for="(ep, idx) in getVisibleEpisodes(source.episodes)" :key="ep.url" :content="ep.name"
                   :disabled="ep.name.length <= 8" placement="top" :show-after="300">
-                  <button
-                    class="ep-btn px-3 py-2 rounded text-sm transition-all duration-150 cursor-pointer text-center"
+                  <button class="ep-btn px-3 text-sm transition-all duration-150 cursor-pointer text-center"
                     :class="isEpisodeActive(source.episodes, idx) ? 'ep-btn-active' : ''"
                     :disabled="store.playLoading && pendingPlayUrl === ep.url"
                     @click="playEpisode(source.name, ep.url)">
@@ -166,8 +264,8 @@
                   </button>
                 </el-tooltip>
               </div>
-            </el-tab-pane>
-          </el-tabs>
+            </template>
+          </template>
         </div>
 
         <!-- Pan Login Required Prompt -->
@@ -302,6 +400,53 @@ const subtitleSearchResults = ref<SubtitleSearchResult[]>([])
 const subtitleSearchLoading = ref(false)
 const subtitleSearchQuery = ref('')
 const descExpanded = ref(false)
+
+function sanitizeHtml(html: string): string {
+  if (!html) return ''
+  let clean = html
+  clean = clean.replace(/<script[\s\S]*?<\/script>/gi, '')
+  clean = clean.replace(/<style[\s\S]*?<\/style>/gi, '')
+  clean = clean.replace(/\son\w+="[^"]*"/gi, '')
+  clean = clean.replace(/\son\w+='[^']*'/gi, '')
+  clean = clean.replace(/\son\w+=\w+/gi, '')
+  clean = clean.replace(/href\s*=\s*["']javascript:[^"']*["']/gi, 'href="#"')
+  const allowedTags = ['p', 'br', 'span', 'div', 'strong', 'b', 'em', 'i', 'u', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'a']
+  clean = clean.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g, (match, tagName) => {
+    const tag = tagName.toLowerCase()
+    if (allowedTags.includes(tag)) {
+      if (tag === 'a') {
+        const hrefMatch = match.match(/href\s*=\s*["']([^"']+)["']/i)
+        if (hrefMatch) {
+          const href = hrefMatch[1]
+          if (/^https?:\/\//i.test(href) || /^\/\//.test(href) || href.startsWith('#') || href.startsWith('/')) {
+            return `<a href="${href}" target="_blank" rel="noopener noreferrer">`
+          }
+        }
+        return match.replace(/<a\b[^>]*>/i, '<a>')
+      }
+      return match
+    }
+    return ''
+  })
+  return clean
+}
+
+function stripHtml(html: string): string {
+  if (!html) return ''
+  const tmp = document.createElement('div')
+  tmp.innerHTML = html
+  return tmp.textContent || tmp.innerText || ''
+}
+
+const sanitizedVodContent = computed(() => {
+  return sanitizeHtml(store.currentVod?.vod_content || '')
+})
+
+const truncatedVodContent = computed(() => {
+  const text = stripHtml(store.currentVod?.vod_content || '')
+  if (text.length <= 200) return text
+  return text.slice(0, 200) + '...'
+})
 const showPanLogin = ref(false)
 const pendingPlayAfterLogin = ref<{ flag: string; url: string } | null>(null)
 // Tracks the most recent playEpisode attempt so pan:loginExpired (fired by
@@ -831,6 +976,11 @@ async function handleToggleFavorite() {
   } catch { ElMessage.error('操作失败') }
 }
 
+function cacheVideo() {
+  // TODO: Implement video caching functionality
+  ElMessage.info('缓存功能开发中...')
+}
+
 async function onSearchSubtitle() {
   if (!store.currentVod?.vod_name) return
   subtitleSearchVisible.value = true
@@ -865,7 +1015,7 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
 <style scoped>
 /* Hero section with blurred poster */
 .detail-hero {
-  min-height: 200px;
+  min-height: 420px;
 }
 
 /* Gradient overlay - fades from solid base to transparent */
@@ -896,34 +1046,145 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
   backdrop-filter: blur(4px);
 }
 
-/* Episode grid: fixed column width for vertical alignment */
+.detail-desc-content {
+  line-height: 1.7;
+}
+
+.detail-desc-content :deep(p) {
+  margin: 0 0 12px 0;
+}
+
+.detail-desc-content :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.detail-desc-content :deep(ul),
+.detail-desc-content :deep(ol) {
+  margin: 12px 0;
+  padding-left: 24px;
+}
+
+.detail-desc-content :deep(ul) {
+  list-style-type: disc;
+}
+
+.detail-desc-content :deep(ol) {
+  list-style-type: decimal;
+}
+
+.detail-desc-content :deep(li) {
+  margin: 4px 0;
+}
+
+.detail-desc-content :deep(a) {
+  color: var(--color-primary);
+  text-decoration: none;
+  transition: opacity 0.2s;
+}
+
+.detail-desc-content :deep(a:hover) {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+
+.detail-desc-content :deep(strong),
+.detail-desc-content :deep(b) {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.detail-desc-content :deep(em),
+.detail-desc-content :deep(i) {
+  font-style: italic;
+}
+
+.detail-desc-content :deep(u) {
+  text-decoration: underline;
+}
+
+.detail-desc-content :deep(h1),
+.detail-desc-content :deep(h2),
+.detail-desc-content :deep(h3),
+.detail-desc-content :deep(h4),
+.detail-desc-content :deep(h5),
+.detail-desc-content :deep(h6) {
+  margin: 16px 0 8px 0;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.detail-desc-content :deep(h1) {
+  font-size: 1.5rem;
+}
+
+.detail-desc-content :deep(h2) {
+  font-size: 1.25rem;
+}
+
+.detail-desc-content :deep(h3) {
+  font-size: 1.125rem;
+}
+
+.detail-desc-content :deep(blockquote) {
+  margin: 12px 0;
+  padding: 8px 16px;
+  border-left: 3px solid var(--color-primary);
+  background: var(--color-bg-elevated);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.detail-desc-content :deep(br) {
+  content: '';
+  display: block;
+  margin: 4px 0;
+}
+
+/* Episode grid: responsive multi-column layout */
 .ep-grid {
   display: grid;
-  /* Fixed 200px columns for alignment */
-  grid-template-columns: repeat(auto-fill, 200px);
-  gap: 6px;
-  /* Distribute columns evenly when there's empty space on the right */
-  justify-content: space-evenly;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+}
+
+@media (min-width: 640px) {
+  .ep-grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
+}
+
+@media (min-width: 768px) {
+  .ep-grid {
+    grid-template-columns: repeat(8, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .ep-grid {
+    grid-template-columns: repeat(10, 1fr);
+  }
+}
+
+@media (min-width: 1280px) {
+  .ep-grid {
+    grid-template-columns: repeat(12, 1fr);
+  }
 }
 
 /* Episode buttons */
 .ep-btn {
-  background: var(--color-bg-elevated);
+  background: var(--color-bg-glass);
   color: var(--color-text-secondary);
-  border: 1px solid transparent;
-  /* Fixed dimensions for alignment */
-  width: 200px;
-  height: 36px;
-  /* Prevent text overflow */
+  border: var(--color-border);
+  height: 44px;
   overflow: hidden;
   display: flex;
   align-items: center;
-  /* justify-content: center; */
+  justify-content: center;
+  border-radius: var(--radius-md);
 }
 
 /* Episode name: truncate long names */
 .ep-name {
-  max-width: 190px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -931,15 +1192,16 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
 }
 
 .ep-btn:hover:not(:disabled) {
-  background: var(--color-bg-overlay);
+  background: var(--color-bg-glass-heavy);
   color: var(--color-text-primary);
-  border-color: var(--color-border);
+  border-color: var(--color-primary-border);
 }
 
 .ep-btn-active {
   background: var(--color-primary) !important;
   color: #fff !important;
   border-color: var(--color-primary) !important;
+  box-shadow: 0 0 16px var(--color-primary-glow);
 }
 
 .ep-btn:disabled {

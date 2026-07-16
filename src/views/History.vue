@@ -51,9 +51,20 @@
           </div>
           <div class="p-3">
             <span class="text-sm font-medium truncate block" style="color: var(--color-text-primary)" :title="item.vod_name">{{ item.vod_name }}</span>
-            <span class="text-xs truncate block mt-1" style="color: var(--color-text-tertiary)">
-              {{ formatTimestamp(item.timestamp) }}
-              <span v-if="item.duration > 0"> · {{ formatProgress(item.progress, item.duration) }}</span>
+            <div class="flex items-center justify-between mt-1 gap-2">
+              <span
+                class="text-xs px-2 py-0.5 rounded-full truncate flex-shrink-0"
+                style="color: var(--color-text-secondary); background: var(--color-bg-elevated)"
+                :title="getSourceName(item.sourceKey)"
+              >
+                {{ getSourceName(item.sourceKey) }}
+              </span>
+              <span class="text-xs truncate" style="color: var(--color-text-tertiary)">
+                {{ formatTimestamp(item.timestamp) }}
+              </span>
+            </div>
+            <span v-if="item.duration > 0" class="text-xs truncate block mt-1" style="color: var(--color-text-tertiary)">
+              {{ formatProgress(item.progress, item.duration) }}
             </span>
           </div>
         </div>
@@ -91,6 +102,11 @@ function formatTimestamp(ts: number): string {
   if (diffHour < 24) return `${diffHour}小时前`
   if (diffDay < 7) return `${diffDay}天前`
   return d.toLocaleDateString()
+}
+
+function getSourceName(sourceKey: string): string {
+  const site = store.sites.find(s => s.key === sourceKey)
+  return site?.name || sourceKey
 }
 
 function formatProgress(progress: number, duration: number): string {

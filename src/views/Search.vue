@@ -1,80 +1,177 @@
 <template>
   <div class="h-full flex flex-col" style="background: var(--color-bg-base)">
-    <!-- Search bar -->
-    <div class="max-w-3xl mx-auto w-full mt-6 flex gap-2">
-      <el-input
-        v-model="keyword"
-        size="large"
-        placeholder="搜索电影、电视剧、综艺、动漫..."
-        @keyup.enter="doSearch"
-        clearable
-      >
-        <template #prefix>
-          <el-icon><Search /></el-icon>
-        </template>
-      </el-input>
-      <el-button type="primary" size="large" :loading="store.searchLoading" @click="doSearch">
-        搜索
-      </el-button>
-      <el-button size="large" @click="fastSearchMode = !fastSearchMode">
-        {{ fastSearchMode ? '普通搜索' : '快速搜索' }}
-      </el-button>
-    </div>
+    <!-- Main content area -->
+    <div class="px-6 py-8" style="max-width: var(--content-max-width, 960px); margin: 0 auto; width: 100%">
 
-    <!-- Hot words / Search history -->
-    <div v-if="!hasSearched" class="max-w-3xl mx-auto w-full mt-4">
-      <!-- Search history -->
-      <div v-if="searchHistory.length > 0" class="mb-5">
-        <div class="flex items-center justify-between mb-2">
-          <span class="text-sm font-medium" style="color: var(--color-text-secondary)">搜索历史</span>
-          <el-button text size="small" @click="clearSearchHistory" style="color: var(--color-text-tertiary)">清除</el-button>
-        </div>
-        <div class="flex flex-wrap gap-1.5">
-          <button
-            v-for="word in searchHistory"
-            :key="word"
-            class="history-chip group relative px-3 py-1 rounded-full text-xs transition-all duration-200 cursor-pointer"
-            @click="keyword = word; doSearch()"
-          >
-            {{ word }}
-            <span class="history-chip-close opacity-0 group-hover:opacity-100" @click.stop="removeSearchHistory(word)">x</span>
-          </button>
-        </div>
-      </div>
-      <!-- Hot words -->
-      <div>
-        <div class="flex items-center mb-2">
-          <span class="text-sm font-medium" style="color: var(--color-text-secondary)">热门搜索</span>
-        </div>
-        <div class="flex flex-wrap gap-1.5">
-          <button
-            v-for="(word, idx) in hotWords"
-            :key="word"
-            class="hot-chip px-3 py-1 rounded-full text-xs transition-all duration-200 cursor-pointer"
-            @click="keyword = word; doSearch()"
-          >
-            <span class="hot-chip-rank" :class="idx < 3 ? 'hot-chip-rank-top' : ''">{{ idx + 1 }}</span>
-            {{ word }}
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Source selector -->
-    <div v-if="searchableSites.length > 0" class="max-w-3xl mx-auto w-full mt-4">
-      <div class="flex items-center gap-2 flex-wrap">
-        <el-checkbox v-model="allChecked" :indeterminate="indeterminate" @change="toggleAll">
-          全部源
-        </el-checkbox>
-        <el-checkbox
-          v-for="site in searchableSites"
-          :key="getSiteUniqueKey(site)"
-          v-model="checkedMap[getSiteUniqueKey(site)]"
-          @change="onCheckChange"
+      <!-- Search bar -->
+      <div class="flex items-center gap-3">
+        <div
+          class="flex-1 flex items-center gap-3 px-4 h-12"
+          style="background: var(--color-bg-glass); backdrop-filter: var(--glass-blur); border: var(--glass-border); border-radius: var(--radius-lg, 14px)"
         >
-          {{ site.name }}
-        </el-checkbox>
+          <!-- Search icon -->
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--color-text-tertiary); flex-shrink: 0">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <!-- Input -->
+          <input
+            v-model="keyword"
+            class="flex-1 bg-transparent border-none outline-none text-sm"
+            style="color: var(--color-text-primary)"
+            placeholder="搜索电影、电视剧、综艺、动漫..."
+            @keyup.enter="doSearch"
+          />
+          <!-- Search button inside bar -->
+          <button
+            class="px-4 h-8 text-sm font-medium cursor-pointer border-none"
+            style="background: var(--color-primary); color: white; border-radius: var(--radius-md, 10px)"
+            :disabled="store.searchLoading"
+            @click="doSearch"
+          >
+            搜索
+          </button>
+        </div>
+        <!-- Search mode toggle pill -->
+        <div
+          class="flex items-center gap-0 p-1"
+          style="background: var(--color-bg-glass); border: var(--glass-border); border-radius: 9999px"
+        >
+          <button
+            class="px-3 py-1.5 text-xs font-medium cursor-pointer border-none transition-all duration-200"
+            :style="{
+              background: fastSearchMode ? 'transparent' : 'var(--color-primary)',
+              color: fastSearchMode ? 'var(--color-text-secondary)' : 'white',
+              borderRadius: '9999px'
+            }"
+            @click="fastSearchMode = false"
+          >普通</button>
+          <button
+            class="px-3 py-1.5 text-xs font-medium cursor-pointer border-none transition-all duration-200"
+            :style="{
+              background: fastSearchMode ? 'var(--color-primary)' : 'transparent',
+              color: fastSearchMode ? 'white' : 'var(--color-text-secondary)',
+              borderRadius: '9999px'
+            }"
+            @click="fastSearchMode = true"
+          >快速</button>
+        </div>
       </div>
+
+      <!-- Hot words / Search history -->
+      <div v-if="!hasSearched" class="mt-6">
+        <!-- Search history -->
+        <div v-if="searchHistory.length > 0" class="mb-6">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-sm font-medium" style="color: var(--color-text-secondary)">搜索历史</span>
+            <button class="text-xs cursor-pointer bg-transparent border-none" style="color: var(--color-text-tertiary)" @click="clearSearchHistory">清除</button>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <span
+              v-for="word in searchHistory"
+              :key="word"
+              class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm cursor-pointer transition-colors"
+              style="background: var(--color-bg-elevated); color: var(--color-text-secondary); border-radius: var(--radius-md, 10px); border: 1px solid var(--color-border)"
+              @click="keyword = word; doSearch()"
+            >
+              {{ word }}
+              <span
+                class="history-tag-close"
+                @click.stop="removeSearchHistory(word)"
+              >✕</span>
+            </span>
+          </div>
+        </div>
+        <!-- Hot words: 2-column ranked list -->
+        <div>
+          <div class="flex items-center mb-3">
+            <span class="text-sm font-medium" style="color: var(--color-text-secondary)">热门搜索</span>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0">
+            <div
+              v-for="(word, idx) in hotWords"
+              :key="word"
+              class="flex items-center gap-3 py-3 cursor-pointer transition-colors"
+              style="border-bottom: 1px solid var(--color-border-light, rgba(255,255,255,0.04))"
+              @click="keyword = word; doSearch()"
+            >
+              <span
+                class="text-sm font-bold w-5 text-center"
+                :style="{ color: idx < 3 ? 'var(--color-primary)' : 'var(--color-text-tertiary)' }"
+              >{{ idx + 1 }}</span>
+              <span class="text-sm" style="color: var(--color-text-primary)">{{ word }}</span>
+              <span
+                v-if="idx < 3"
+                class="text-xs px-1.5 py-0.5 font-medium"
+                style="background: var(--color-primary-soft); color: var(--color-primary); border-radius: 9999px"
+              >热</span>
+              <span
+                v-else-if="idx < 6"
+                class="text-xs px-1.5 py-0.5 font-medium"
+                style="background: var(--color-primary-soft); color: var(--color-primary); border-radius: 9999px"
+              >新</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Source selector: collapsible -->
+      <div v-if="searchableSites.length > 0" class="mt-4">
+        <button
+          class="flex items-center justify-between w-full py-2 bg-transparent border-none cursor-pointer"
+          @click="sourceFilterExpanded = !sourceFilterExpanded"
+        >
+          <div class="flex items-center gap-2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--color-text-secondary)">
+              <line x1="4" y1="21" x2="4" y2="14" /><line x1="4" y1="10" x2="4" y2="3" /><line x1="12" y1="21" x2="12" y2="12" /><line x1="12" y1="8" x2="12" y2="3" /><line x1="20" y1="21" x2="20" y2="16" /><line x1="20" y1="12" x2="20" y2="3" /><line x1="1" y1="14" x2="7" y2="14" /><line x1="9" y1="8" x2="15" y2="8" /><line x1="17" y1="16" x2="23" y2="16" />
+            </svg>
+            <span class="text-sm font-medium" style="color: var(--color-text-secondary)">筛选来源</span>
+            <span class="text-xs" style="color: var(--color-text-tertiary)">{{ selectedSiteKeys.length }}/{{ searchableSites.length }}</span>
+          </div>
+          <svg
+            width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            class="transition-transform duration-200"
+            :style="{ transform: sourceFilterExpanded ? 'rotate(180deg)' : 'rotate(0)' }"
+            style="color: var(--color-text-tertiary)"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+        <div
+          v-if="sourceFilterExpanded"
+          class="p-3 mt-1"
+          style="background: var(--color-bg-elevated); border-radius: var(--radius-md, 10px); border: 1px solid var(--color-border)"
+        >
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+            <label
+              class="flex items-center gap-2 text-sm cursor-pointer"
+              style="color: var(--color-text-primary)"
+            >
+              <input
+                ref="allCheckedInput"
+                type="checkbox"
+                :checked="allChecked"
+                @change="toggleAll(($event.target as HTMLInputElement).checked)"
+              />
+              全部源
+            </label>
+            <label
+              v-for="site in searchableSites"
+              :key="getSiteUniqueKey(site)"
+              class="flex items-center gap-2 text-sm cursor-pointer"
+              style="color: var(--color-text-primary)"
+            >
+              <input
+                type="checkbox"
+                v-model="checkedMap[getSiteUniqueKey(site)]"
+                @change="onCheckChange"
+              />
+              {{ site.name }}
+            </label>
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <!-- Loading state -->
@@ -90,48 +187,93 @@
     </div>
 
     <!-- Results -->
-    <div v-else class="flex-1 overflow-auto mt-6">
-      <!-- Fast search mode with sidebar filter -->
-      <div v-if="fastSearchMode && store.searchResults.length > 1" class="flex h-full">
-        <div class="w-40 border-r overflow-y-auto flex-shrink-0" style="background: var(--color-bg-surface); border-color: var(--color-border)">
-          <div
-            class="px-3 py-2 cursor-pointer text-sm transition-colors"
-            :class="!filteredSiteKey ? 'search-sidebar-active' : 'search-sidebar-item'"
-            @click="filteredSiteKey = ''"
-          >
-            全部 ({{ totalCount }})
-          </div>
-          <div
-            v-for="group in store.searchResults"
-            :key="group.siteKey"
-            class="px-3 py-2 cursor-pointer text-sm transition-colors"
-            :class="filteredSiteKey === group.siteKey ? 'search-sidebar-active' : 'search-sidebar-item'"
-            @click="filteredSiteKey = group.siteKey"
-          >
-            {{ group.siteName }} ({{ group.list.length }})
-          </div>
-        </div>
-        <div class="flex-1 overflow-auto px-4">
-          <template v-for="group in filteredResults" :key="group.siteKey">
-            <SearchResultGroup :group="group" :list-mode="isListMode" @go-to-detail="goToDetail" />
-          </template>
-        </div>
-      </div>
+    <div v-else class="flex-1 overflow-auto px-6 pb-8">
+      <div style="max-width: var(--content-max-width, 960px); margin: 0 auto">
 
-      <!-- Normal grouped results -->
-      <div v-else class="px-2">
-        <template v-for="group in store.searchResults" :key="group.siteKey">
-          <SearchResultGroup :group="group" :list-mode="isListMode" @go-to-detail="goToDetail" />
-        </template>
+        <!-- Fast search mode with sidebar filter -->
+        <div v-if="fastSearchMode && store.searchResults.length > 1" class="flex h-full">
+          <div class="w-40 border-r overflow-y-auto flex-shrink-0" style="background: var(--color-bg-surface); border-color: var(--color-border)">
+            <div
+              class="px-3 py-2 cursor-pointer text-sm transition-colors"
+              :class="!filteredSiteKey ? 'search-sidebar-active' : 'search-sidebar-item'"
+              @click="filteredSiteKey = ''"
+            >
+              全部 ({{ totalCount }})
+            </div>
+            <div
+              v-for="group in store.searchResults"
+              :key="group.siteKey"
+              class="px-3 py-2 cursor-pointer text-sm transition-colors"
+              :class="filteredSiteKey === group.siteKey ? 'search-sidebar-active' : 'search-sidebar-item'"
+              @click="filteredSiteKey = group.siteKey"
+            >
+              {{ group.siteName }} ({{ group.list.length }})
+            </div>
+          </div>
+          <div class="flex-1 overflow-auto px-4">
+            <template v-for="group in filteredResults" :key="group.siteKey">
+              <SearchResultGroup :group="group" :list-mode="isListMode" @go-to-detail="goToDetail" />
+            </template>
+          </div>
+        </div>
+
+        <!-- Normal grouped results: horizontal scroll cards per source -->
+        <div v-else>
+          <div v-for="group in store.searchResults" :key="group.siteKey" class="mb-8">
+            <!-- Source header -->
+            <div class="flex items-center gap-2 mb-3">
+              <div class="w-1 h-4" style="background: var(--color-primary); border-radius: 2px"></div>
+              <h3 class="text-sm font-bold" style="color: var(--color-text-primary)">{{ group.siteName }}</h3>
+              <span
+                class="px-2 py-0.5 text-xs font-medium"
+                style="background: var(--color-primary-soft); color: var(--color-primary); border-radius: 9999px"
+              >{{ group.list.length }}</span>
+            </div>
+            <!-- Horizontal scroll cards -->
+            <div class="flex gap-3 overflow-x-auto pb-2">
+              <div
+                v-for="vod in group.list"
+                :key="vod.vod_id"
+                class="flex-shrink-0 cursor-pointer transition-all duration-300 hover:-translate-y-1 group"
+                style="width: 130px"
+                @click="goToDetail(group.siteKey, vod)"
+              >
+                <div class="relative overflow-hidden" style="width: 130px; height: 180px; border-radius: var(--radius-md, 10px)">
+                  <img
+                    v-if="vod.vod_pic"
+                    :src="vod.vod_pic"
+                    class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                    loading="lazy"
+                  />
+                  <div v-else class="w-full h-full flex items-center justify-center" style="background: var(--color-bg-elevated)">
+                    <el-icon :size="32" style="color: var(--color-text-tertiary)"><Film /></el-icon>
+                  </div>
+                  <div
+                    v-if="vod.vod_remarks"
+                    class="absolute bottom-0 left-0 right-0 p-2 pt-6"
+                    style="background: linear-gradient(to top, rgba(0,0,0,0.8), transparent)"
+                  >
+                    <span class="text-white text-xs font-medium">{{ vod.vod_remarks }}</span>
+                  </div>
+                </div>
+                <div class="mt-1.5">
+                  <span class="text-xs font-medium truncate block" style="color: var(--color-text-primary)">{{ vod.vod_name }}</span>
+                  <span v-if="vod.vod_year" class="text-xs truncate block" style="color: var(--color-text-tertiary)">{{ vod.vod_year }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted } from 'vue'
+import { ref, computed, reactive, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Search, Loading } from '@element-plus/icons-vue'
+import { Search, Loading, Film } from '@element-plus/icons-vue'
 import axios from 'axios'
 import { useAppStore } from '../store/app'
 import type { Movie } from '../core/models'
@@ -144,6 +286,8 @@ const keyword = ref('')
 const hasSearched = ref(false)
 const fastSearchMode = ref(false)
 const filteredSiteKey = ref('')
+const sourceFilterExpanded = ref(false)
+const allCheckedInput = ref<HTMLInputElement | null>(null)
 
 const isListMode = computed(() => store.searchViewMode === 0)
 
@@ -226,6 +370,10 @@ const indeterminate = computed(() =>
   selectedSiteKeys.value.length > 0 && selectedSiteKeys.value.length < searchableSites.value.length
 )
 
+watch(indeterminate, (val) => {
+  if (allCheckedInput.value) allCheckedInput.value.indeterminate = val
+})
+
 const totalCount = computed(() =>
   store.searchResults.reduce((sum, g) => sum + g.list.length, 0)
 )
@@ -284,59 +432,22 @@ function goToDetail(siteKey: string, vod: Movie) {
   color: var(--color-text-primary);
 }
 
-/* Search bar glow focus */
-:deep(.el-input__wrapper.is-focus) {
-  box-shadow: 0 0 0 1px var(--color-primary) inset, 0 0 12px var(--color-primary-glow) !important;
-}
-
-/* History chips */
-.history-chip {
-  background: var(--color-bg-elevated);
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
-}
-.history-chip:hover {
-  border-color: var(--color-primary-border);
-  color: var(--color-primary);
-}
-
-.history-chip-close {
-  margin-left: 4px;
+/* History tag close button */
+.history-tag-close {
   font-size: 10px;
   color: var(--color-text-tertiary);
-  transition: opacity 150ms;
+  transition: color 150ms;
 }
-.history-chip-close:hover {
+.history-tag-close:hover {
   color: var(--color-danger);
 }
 
-/* Hot word chips */
-.hot-chip {
-  background: var(--color-bg-elevated);
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
+/* Horizontal scroll scrollbar */
+.overflow-x-auto::-webkit-scrollbar {
+  height: 4px;
 }
-.hot-chip:hover {
-  border-color: var(--color-primary-border);
-  color: var(--color-text-primary);
-}
-
-.hot-chip-rank {
-  display: inline-block;
-  width: 16px;
-  height: 16px;
-  line-height: 16px;
-  text-align: center;
-  border-radius: 3px;
-  margin-right: 4px;
-  font-size: 10px;
-  font-weight: 600;
+.overflow-x-auto::-webkit-scrollbar-thumb {
   background: var(--color-bg-overlay);
-  color: var(--color-text-tertiary);
-}
-
-.hot-chip-rank-top {
-  background: var(--color-primary);
-  color: #fff;
+  border-radius: 2px;
 }
 </style>

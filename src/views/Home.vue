@@ -47,18 +47,19 @@
             'grid gap-4',
             isConfigCenter
               ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 max-w-3xl mx-auto'
-              : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-7',
+              : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6',
           ]">
             <div v-for="vod in displayVodList" :key="vod.vod_id"
-              class="vod-card cursor-pointer rounded-lg overflow-hidden transition-all duration-300 hover:-translate-y-1 group"
+              class="vod-card cursor-pointer group"
               :class="{
                 'vod-card-action': vod.action,
                 'vod-card-config': isConfigCenter,
-              }" style="background: var(--color-bg-surface)" @click="handleVodClick(vod)">
+              }" @click="handleVodClick(vod)">
+              <!-- Poster -->
               <div :class="[
                 'relative overflow-hidden',
-                isConfigCenter ? 'aspect-square' : 'aspect-[3/4]',
-              ]">
+                isConfigCenter ? 'aspect-square' : 'aspect-[2/3]',
+              ]" style="border-radius: var(--radius-md, 10px)">
                 <img v-if="vod.vod_pic" :src="processImageUrl(vod.vod_pic)" :class="[
                   'group-hover:scale-105 transition-transform duration-500',
                   isConfigCenter
@@ -71,27 +72,23 @@
                     <Film />
                   </el-icon>
                 </div>
-                <div v-if="vod.vod_remarks && !isConfigCenter" class="absolute bottom-0 left-0 right-0 p-2 pt-6"
-                  style="background: linear-gradient(to top, rgba(0,0,0,0.85), transparent)">
-                  <span class="text-white text-xs font-medium">{{ vod.vod_remarks }}</span>
+                <!-- Bottom gradient -->
+                <div v-if="!isConfigCenter" class="absolute inset-0"
+                  style="background: linear-gradient(to top, rgba(10,11,16,0.85) 0%, rgba(10,11,16,0.1) 50%, transparent 100%)"></div>
+                <!-- Remark badge -->
+                <div v-if="vod.vod_remarks && !isConfigCenter" class="absolute bottom-0 left-0 right-0 p-2.5">
+                  <span class="text-[11px] font-medium px-1.5 py-0.5 inline-block"
+                    style="background: var(--color-primary); color: white; border-radius: 3px;">{{ vod.vod_remarks }}</span>
                 </div>
-                <!-- Hover overlay with year/area -->
-                <div v-if="!isConfigCenter"
-                  class="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-end p-2"
-                  style="background: linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 60%)">
-                  <div class="text-xs text-white/80 space-y-0.5">
-                    <p v-if="vod.vod_year">{{ vod.vod_year }}</p>
-                    <p v-if="vod.vod_area">{{ vod.vod_area }}</p>
-                  </div>
-                </div>
+                <!-- Shimmer effect on hover -->
+                <div class="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-400 pointer-events-none"
+                  style="background: linear-gradient(105deg, transparent 40%, rgba(255,255,255,0.06) 45%, rgba(255,255,255,0.1) 50%, rgba(255,255,255,0.06) 55%, transparent 60%); background-size: 200% 100%;"></div>
               </div>
-              <div :class="['p-3', isConfigCenter ? 'text-center' : '']">
-                <span
-                  class="text-sm font-medium truncate block transition-colors group-hover:text-[var(--color-primary)]"
-                  style="color: var(--color-text-primary)" :title="vod.vod_name">{{ vod.vod_name }}</span>
-                <span v-if="isConfigCenter && vod.vod_remarks" class="text-xs mt-1 truncate block"
-                  style="color: var(--color-text-tertiary)">{{ vod.vod_remarks }}</span>
-              </div>
+              <!-- Title below poster -->
+              <p class="mt-2 text-[13px] font-medium truncate"
+                style="color: var(--color-text-primary)" :title="vod.vod_name">{{ vod.vod_name }}</p>
+              <p v-if="isConfigCenter && vod.vod_remarks" class="text-xs mt-0.5 truncate"
+                style="color: var(--color-text-tertiary)">{{ vod.vod_remarks }}</p>
             </div>
           </div>
 
@@ -106,13 +103,9 @@
           </div>
 
           <!-- Scroll-to-bottom loading indicator -->
-          <div v-if="isCategoryActive && store.categoryLoading" class="flex justify-center py-6">
-            <div class="flex items-center gap-2 text-sm" style="color: var(--color-text-tertiary)">
-              <el-icon class="is-loading">
-                <Loading />
-              </el-icon>
-              <span>加载中...</span>
-            </div>
+          <div v-if="isCategoryActive && store.categoryLoading" class="flex flex-col items-center justify-center py-8">
+            <div class="w-5 h-5 border-2 border-t-transparent rounded-full animate-spin" style="border-color: var(--color-primary); border-top-color: transparent;"></div>
+            <span class="text-xs mt-2" style="color: var(--color-text-tertiary)">加载中...</span>
           </div>
 
           <!-- End of list indicator -->

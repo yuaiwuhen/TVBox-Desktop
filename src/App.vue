@@ -1,88 +1,109 @@
 <template>
   <div class="h-screen w-full flex" style="background: var(--color-bg-base)">
     <!-- Sidebar -->
-    <aside class="flex flex-col flex-shrink-0 overflow-hidden" :style="{
-      width: sidebarExpanded ? 'var(--spacing-sidebar-expanded)' : 'var(--spacing-sidebar-collapsed)',
+    <aside class="shrink-0 flex flex-col h-full transition-all duration-300" :style="{
+      width: sidebarExpanded ? '220px' : '64px',
       background: 'var(--color-bg-glass)',
       backdropFilter: 'var(--glass-blur)',
       WebkitBackdropFilter: 'var(--glass-blur)',
       borderRight: 'var(--glass-border)',
-      transition: 'width var(--transition-slow)',
     }">
       <!-- Logo -->
-      <div class="flex items-center h-14 px-4 flex-shrink-0" style="border-bottom: var(--glass-border)">
-        <el-icon :size="24" style="color: var(--color-primary)">
-          <VideoPlay />
-        </el-icon>
+      <div class="h-[52px] shrink-0 flex items-center px-5" style="border-bottom: var(--glass-border);">
+        <div class="w-7 h-7 flex items-center justify-center shrink-0" style="background: var(--color-primary); border-radius: var(--radius-sm, 6px);">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="M10 9l5 3-5 3V9z"/></svg>
+        </div>
         <transition name="fade-text">
-          <span v-if="sidebarExpanded" class="ml-3 text-lg font-bold tracking-wide whitespace-nowrap"
-            style="color: var(--color-text-primary)">TVBox</span>
+          <span v-if="sidebarExpanded" class="font-semibold text-sm tracking-wide whitespace-nowrap ml-2.5" style="color: var(--color-text-primary)">TVBox</span>
         </transition>
       </div>
 
       <!-- Navigation -->
-      <nav class="flex-1 py-2 overflow-y-auto overflow-x-hidden">
+      <nav class="flex-1 py-3 px-2.5 flex flex-col gap-0.5 overflow-y-auto overflow-x-hidden">
         <el-tooltip v-for="item in navItems" :key="item.path" :content="item.label" placement="right"
           :disabled="sidebarExpanded" :show-after="300">
           <router-link :to="item.path"
-            class="nav-item flex items-center h-10 mx-2 rounded-lg cursor-pointer transition-all duration-200 relative"
-            :class="{ 'nav-item-active': route.path === item.path || (item.path === '/' && route.name === 'detail') }">
-            <div v-if="route.path === item.path || (item.path === '/' && route.name === 'detail')"
-              class="absolute left-0 top-1/2 -translate-y-1/2 w-[3px] h-5 rounded-r"
+            class="nav-item flex items-center gap-3 px-3 py-2.5 relative transition-colors duration-150 ease-out"
+            :class="{ 'nav-item-active': isNavActive(item) }">
+            <div v-if="isNavActive(item)" class="absolute left-0 top-0 bottom-0 w-[3px] rounded-r"
               style="background: var(--color-primary)" />
-            <div class="flex items-center w-full px-4">
-              <el-icon :size="20">
-                <component :is="item.icon" />
-              </el-icon>
-              <transition name="fade-text">
-                <span v-if="sidebarExpanded" class="ml-3 text-sm whitespace-nowrap">{{ item.label }}</span>
-              </transition>
-            </div>
+            <el-icon :size="18" class="shrink-0">
+              <component :is="item.icon" />
+            </el-icon>
+            <transition name="fade-text">
+              <span v-if="sidebarExpanded" class="text-[13px] whitespace-nowrap">{{ item.label }}</span>
+            </transition>
           </router-link>
         </el-tooltip>
       </nav>
 
-      <!-- Collapse toggle -->
-      <div class="flex items-center justify-center h-12 flex-shrink-0"
-        style="border-top: var(--glass-border)">
-        <el-button text circle @click="sidebarExpanded = !sidebarExpanded">
-          <el-icon :size="18" style="color: var(--color-text-tertiary)">
-            <component :is="sidebarExpanded ? 'Fold' : 'Expand'" />
-          </el-icon>
-        </el-button>
+      <!-- Bottom: Settings + Collapse -->
+      <div class="py-3 px-2.5 flex flex-col gap-0.5" style="border-top: var(--glass-border);">
+        <el-tooltip :content="'设置'" placement="right" :disabled="sidebarExpanded" :show-after="300">
+          <router-link to="/settings"
+            class="nav-item flex items-center gap-3 px-3 py-2.5 relative transition-colors duration-150 ease-out"
+            :class="{ 'nav-item-active': route.path === '/settings' }">
+            <div v-if="route.path === '/settings'" class="absolute left-0 top-0 bottom-0 w-[3px] rounded-r"
+              style="background: var(--color-primary)" />
+            <el-icon :size="18" class="shrink-0">
+              <Setting />
+            </el-icon>
+            <transition name="fade-text">
+              <span v-if="sidebarExpanded" class="text-[13px] whitespace-nowrap">设置</span>
+            </transition>
+          </router-link>
+        </el-tooltip>
+        <el-tooltip :content="sidebarExpanded ? '收起' : '展开'" placement="right" :show-after="300">
+          <button class="nav-item flex items-center gap-3 px-3 py-2.5 w-full transition-colors duration-150 ease-out"
+            @click="sidebarExpanded = !sidebarExpanded">
+            <el-icon :size="18" class="shrink-0">
+              <component :is="sidebarExpanded ? 'Fold' : 'Expand'" />
+            </el-icon>
+            <transition name="fade-text">
+              <span v-if="sidebarExpanded" class="text-[13px] whitespace-nowrap">{{ sidebarExpanded ? '收起' : '展开' }}</span>
+            </transition>
+          </button>
+        </el-tooltip>
       </div>
     </aside>
 
     <!-- Main Area -->
-    <div class="flex-1 flex flex-col h-full overflow-hidden">
+    <div class="flex-1 min-w-0 h-full flex flex-col" style="background: var(--color-bg-base);">
       <!-- Topbar -->
-      <header class="flex items-center h-14 px-4 flex-shrink-0 z-10"
-        :style="{
-          background: 'var(--color-bg-glass)',
-          backdropFilter: 'var(--glass-blur)',
-          WebkitBackdropFilter: 'var(--glass-blur)',
-          borderBottom: 'var(--glass-border)',
-        }">
-        <div class="flex items-center gap-2">
-          <span class="text-xs font-medium" style="color: var(--color-text-tertiary)">当前源</span>
-          <el-select :model-value="store.activeSiteKey" placeholder="选择视频源" class="!w-52" size="small"
-            @change="onSiteChange">
-            <el-option v-for="site in store.sites" :key="site.key" :label="site.name" :value="site.key" />
-          </el-select>
-        </div>
-        <div class="flex-1" />
+      <header class="h-[52px] shrink-0 flex items-center justify-between px-5"
+        style="background: var(--color-bg-glass); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border-bottom: var(--color-border);">
         <div class="flex items-center gap-3">
-          <el-tag v-if="store.sites.length > 0" size="small" type="info">{{ store.sites.length }} 个源</el-tag>
-          <div class="text-xs tabular-nums" style="color: var(--color-text-tertiary)">{{ currentTime }}</div>
-          <!-- 筛选按钮（只在首页显示且有筛选选项时显示） -->
+          <!-- Source Selector -->
+          <el-popover placement="bottom-start" trigger="click" :width="240">
+            <template #reference>
+              <button class="flex items-center gap-2 px-3 py-1.5 transition-colors duration-150 hover:bg-[var(--color-bg-elevated)]"
+                style="color: var(--color-primary); border-radius: var(--radius-sm, 6px);">
+                <span class="text-[13px] font-medium whitespace-nowrap">{{ activeSiteName || '选择源' }}</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--color-primary)"><path d="M6 9l6 6 6-6"/></svg>
+              </button>
+            </template>
+            <div class="max-h-64 overflow-auto">
+              <div v-for="site in store.sites" :key="site.key"
+                class="flex items-center gap-2 px-3 py-2 cursor-pointer text-[13px] rounded transition-colors duration-150"
+                :style="{ color: site.key === store.activeSiteKey ? 'var(--color-primary)' : 'var(--color-text-secondary)', background: site.key === store.activeSiteKey ? 'var(--color-primary-soft)' : 'transparent' }"
+                @click="onSiteChange(site.key)">
+                {{ site.name }}
+              </div>
+            </div>
+          </el-popover>
+          <!-- Source Count Badge -->
+          <span v-if="store.sites.length > 0"
+            class="inline-flex items-center justify-center px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap"
+            style="background: var(--color-primary-soft); color: var(--color-primary); border-radius: 9999px; min-width: 18px; height: 18px;">{{ store.sites.length }}</span>
+          <!-- Filter Button -->
           <el-popover v-if="showFilterButton && activeFilters.length > 0" placement="bottom" trigger="click"
             width="280" @show="onFilterPopoverShow" @hide="onFilterPopoverHide">
             <template #reference>
-              <el-button text size="small" style="color: var(--color-text-secondary)">
-                <el-icon class="mr-1">
-                  <Filter />
-                </el-icon>筛选
-              </el-button>
+              <button class="flex items-center gap-1.5 px-3 py-1.5 transition-colors duration-150 hover:bg-[var(--color-bg-elevated)]"
+                style="color: var(--color-primary); border-radius: var(--radius-sm, 6px);">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+                <span class="text-[13px] font-medium whitespace-nowrap">筛选</span>
+              </button>
             </template>
             <div v-for="group in activeFilters" :key="group.key" class="mb-3">
               <div class="text-sm font-medium mb-1" style="color: var(--color-text-primary)">{{ group.name }}:</div>
@@ -94,16 +115,13 @@
               </div>
             </div>
           </el-popover>
-          <el-button text size="small" @click="$router.push('/search')" style="color: var(--color-text-secondary)">
-            <el-icon class="mr-1">
-              <Search />
-            </el-icon>搜索
-          </el-button>
         </div>
+        <!-- Time Display (theme color) -->
+        <span class="text-[12px] tabular-nums whitespace-nowrap font-medium" style="color: var(--color-primary)">{{ currentTime }}</span>
       </header>
 
       <!-- Content -->
-      <main class="flex-1 overflow-auto" style="background: var(--color-bg-base)">
+      <main class="flex-1 min-h-0 overflow-auto" style="background: var(--color-bg-base)">
         <router-view v-slot="{ Component }">
           <transition name="page-slide" mode="out-in">
             <keep-alive :exclude="['Detail']">
@@ -193,7 +211,7 @@ import { PanLogin } from './core/PanLogin'
 import { restoreFromFile, saveToFile, flushSave } from './core/ConfigSync'
 import type { RemoteControlHandler } from './core/RemoteServer'
 import {
-  HomeFilled, Search, Monitor, Clock, Star, FolderOpened, Setting, VideoPlay, Fold, Expand, Filter,
+  HomeFilled, Search, Monitor, Clock, Star, FolderOpened, Setting, Fold, Expand,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -201,6 +219,15 @@ const router = useRouter()
 const store = useAppStore()
 const sidebarExpanded = ref(true)
 const currentTime = ref('')
+
+// Navigation active state helper
+function isNavActive(item: { path: string }) {
+  if (item.path === '/') return route.path === '/' || route.name === 'detail'
+  return route.path === item.path
+}
+
+// Active site name for source selector
+const activeSiteName = computed(() => store.activeSite?.name || '')
 
 // Unsupported format dialog state
 const formatDialog = reactive({
@@ -347,7 +374,6 @@ const navItems = [
   { path: '/history', icon: Clock, label: '观看历史' },
   { path: '/favorites', icon: Star, label: '我的收藏' },
   { path: '/drive', icon: FolderOpened, label: '网盘浏览' },
-  { path: '/settings', icon: Setting, label: '配置设置' },
 ]
 
 const remoteHandler: RemoteControlHandler = {
@@ -844,23 +870,45 @@ const onSiteChange = (val: string) => {
   opacity: 0;
 }
 
-/* Navigation items */
+/* Navigation items — left border indicator style per design */
 .nav-item {
   color: var(--color-text-secondary);
+  border-left: 3px solid transparent;
+  border-radius: 0 6px 6px 0;
 }
 
 .nav-item:hover {
-  background: var(--color-bg-elevated);
+  background: var(--color-bg-glass-light);
   color: var(--color-text-primary);
 }
 
 .nav-item-active {
   background: var(--color-primary-soft) !important;
   color: var(--color-primary) !important;
+  border-left-color: var(--color-primary) !important;
 }
 
 .nav-item-active:hover {
   background: var(--color-primary-soft) !important;
   color: var(--color-primary) !important;
+}
+
+/* Filter chips */
+.filter-chip {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.filter-chip:hover {
+  border-color: var(--color-primary-border);
+  color: var(--color-primary);
+}
+
+.filter-chip-active {
+  background: var(--color-primary) !important;
+  color: white !important;
+  border-color: var(--color-primary) !important;
+  font-weight: 500;
 }
 </style>

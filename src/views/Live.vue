@@ -1,10 +1,16 @@
 <template>
   <div class="h-full flex flex-col" style="background: var(--color-bg-base)">
     <!-- Top bar -->
-    <div class="h-12 flex items-center px-4 justify-between flex-shrink-0" style="background:var(--color-bg-elevated);border-bottom:1px solid var(--color-border)">
+    <div class="h-[52px] flex items-center px-6 justify-between flex-shrink-0 live-topbar" style="background: var(--color-bg-glass); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border-bottom: var(--glass-border);">
       <div class="flex items-center gap-3">
-        <el-button :icon="'Back'" size="small" @click="resetToSourceLoading">返回首页</el-button>
-        <span class="font-semibold" style="color: var(--color-text-primary)">直播电视</span>
+        <h1 class="text-base font-semibold tracking-tight" style="color: var(--color-text-primary); font-family: var(--font-display, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif);">直播电视</h1>
+        <span v-if="currentChannel" class="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium whitespace-nowrap" style="background: rgba(239, 68, 68, 0.15); color: var(--color-danger); border-radius: 9999px;">
+          <span class="relative flex h-1.5 w-1.5">
+            <span class="animate-ping absolute inline-flex h-full w-full opacity-75" style="background: var(--color-danger); border-radius: 50%;"></span>
+            <span class="relative inline-flex h-1.5 w-1.5" style="background: var(--color-danger); border-radius: 50%;"></span>
+          </span>
+          LIVE
+        </span>
       </div>
       <div class="flex items-center gap-2">
         <el-switch v-model="showEpg" active-text="EPG" inactive-text="" size="small" />
@@ -12,6 +18,7 @@
         <el-button v-if="!groups.length" size="small" @click="showUrlInput = !showUrlInput">
           输入直播地址
         </el-button>
+        <el-button :icon="'Back'" size="small" @click="resetToSourceLoading">返回</el-button>
       </div>
     </div>
 
@@ -35,91 +42,144 @@
       <p v-else>请输入直播源地址或前往设置配置直播源</p>
     </div>
 
-    <!-- Main content: sidebar + channel list + player -->
-    <div v-else class="flex-1 flex overflow-hidden" tabindex="0" @keydown="onKeyDown">
-      <!-- Sidebar: channel groups -->
-      <div class="w-48 lg:w-56 border-r overflow-y-auto flex-shrink-0 live-sidebar">
-        <!-- Channel search -->
-        <div class="p-2 border-b" style="border-color: var(--color-border)">
-          <el-input v-model="channelSearch" placeholder="搜索频道" size="small" clearable prefix-icon="Search" />
-        </div>
-        <div
-          v-for="group in groups"
-          :key="group.groupName"
-          class="px-3 py-2.5 cursor-pointer text-sm transition-colors live-group-item"
-          :class="activeGroup?.groupName === group.groupName ? 'live-group-active' : ''"
-          @click="selectGroup(group)"
-        >
-          <div class="flex items-center justify-between">
-            <span class="truncate">{{ group.groupName }}</span>
-            <span class="text-xs" style="opacity:0.6">{{ group.channels.length }}</span>
+    <!-- Main content: three-column layout -->
+    <div v-else class="flex-1 flex overflow-hidden min-h-0" tabindex="0" @keydown="onKeyDown">
+      <!-- LEFT PANEL: Channel Groups -->
+      <div class="shrink-0 flex flex-col border-r overflow-hidden live-sidebar" style="width: 180px; background: var(--color-bg-surface); border-color: var(--color-border);">
+        <!-- Search -->
+        <div class="p-3 shrink-0">
+          <div class="flex items-center gap-2 px-3 py-1.5 live-search-box" style="background: var(--color-bg-glass); border: var(--glass-border); border-radius: var(--radius-md, 10px); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);">
+            <el-icon :size="14" style="color: var(--color-text-tertiary); flex-shrink: 0;"><Search /></el-icon>
+            <el-input v-model="channelSearch" placeholder="搜索频道" size="small" clearable class="live-search-input" style="--el-input-bg-color: transparent; --el-input-border-color: transparent; --el-input-hover-border-color: transparent; --el-input-focus-border-color: transparent;" />
           </div>
-          <!-- Password input for locked groups -->
-          <el-input
-            v-if="group.groupPassword && unlockedGroups[group.groupName] === undefined"
-            v-model="passwordInput"
-            size="small"
-            type="password"
-            placeholder="输入密码"
-            class="mt-1"
-            @click.stop
-            @keyup.enter.stop="unlockGroup(group)"
-          />
         </div>
-      </div>
 
-      <!-- Channel list -->
-      <div class="w-52 lg:w-64 border-r overflow-y-auto flex-shrink-0 live-channel-list">
-        <div v-if="activeGroup">
-          <div class="px-3 py-2 text-xs border-b live-channel-header">
-            {{ activeGroup.groupName }} ({{ filteredChannels.length }})
-          </div>
-          <div
-            v-for="channel in filteredChannels"
-            :key="channel.channelIndex"
-            class="px-3 py-2 cursor-pointer text-sm flex items-center gap-2 transition-colors live-channel-item"
-            :class="currentChannel?.channelIndex === channel.channelIndex ? 'live-channel-active' : ''"
-            @click="playChannel(channel)"
-          >
-            <span v-if="currentChannel?.channelIndex === channel.channelIndex" class="live-dot flex-shrink-0" />
-            <span class="text-xs w-6 text-right flex-shrink-0 live-channel-num">{{ channel.channelNum }}</span>
-            <span class="truncate flex-1">{{ channel.channelName }}</span>
-            <span v-if="channel.channelUrls.length > 1" class="text-xs flex-shrink-0 live-channel-source">
-              {{ channel.channelUrls.length }}源
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Player area -->
-      <div class="flex-1 flex flex-col bg-black">
-        <div class="flex-1 relative">
-          <VideoPlayer v-if="currentLiveUrl" :url="currentLiveUrl" :title="currentChannelName" @error="onPlayError" @net-speed="onNetSpeed" />
-          <div v-else class="absolute inset-0 flex items-center justify-center" style="color: var(--color-text-tertiary)">
-            <div class="text-center">
-              <el-icon class="text-5xl mb-2"><VideoPlay /></el-icon>
-              <p>选择频道开始播放</p>
+        <!-- Group list -->
+        <div class="flex-1 overflow-y-auto px-2 pb-3">
+          <div class="flex flex-col gap-0.5">
+            <div
+              v-for="group in groups"
+              :key="group.groupName"
+              class="flex items-center gap-2 w-full px-3 py-2 text-left text-sm transition-colors duration-150 truncate cursor-pointer live-group-item"
+              :class="activeGroup?.groupName === group.groupName ? 'live-group-active' : ''"
+              @click="selectGroup(group)"
+            >
+              <el-icon v-if="group.groupPassword && unlockedGroups[group.groupName] === undefined" :size="12" style="flex-shrink: 0; color: var(--color-text-tertiary);"><Lock /></el-icon>
+              <span class="truncate flex-1">{{ group.groupName }}</span>
+              <span class="ml-auto text-xs shrink-0" style="color: var(--color-text-tertiary);">{{ group.channels.length }}</span>
+            </div>
+            <!-- Password input for locked groups -->
+            <div v-for="group in groups" :key="'pwd-' + group.groupName" v-show="group.groupPassword && unlockedGroups[group.groupName] === undefined && activeGroup?.groupName === group.groupName" class="px-3 py-2">
+              <el-input
+                v-model="passwordInput"
+                size="small"
+                type="password"
+                placeholder="输入密码"
+                @click.stop
+                @keyup.enter.stop="unlockGroup(group)"
+              />
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- MIDDLE PANEL: Channel List -->
+      <div class="shrink-0 flex flex-col border-r overflow-hidden live-channel-list" style="width: 200px; background: var(--color-bg-base); border-color: var(--color-border);">
+        <!-- Channel list header -->
+        <div v-if="activeGroup" class="flex items-center justify-between px-4 py-3 shrink-0 border-b" style="border-color: var(--color-border);">
+          <span class="text-xs font-medium" style="color: var(--color-text-tertiary);">{{ activeGroup.groupName }}</span>
+          <span class="text-xs" style="color: var(--color-text-tertiary);">{{ filteredChannels.length }}个频道</span>
+        </div>
+
+        <!-- Channel items -->
+        <div v-if="activeGroup" class="flex-1 overflow-y-auto">
+          <div class="flex flex-col">
+            <div
+              v-for="channel in filteredChannels"
+              :key="channel.channelIndex"
+              class="flex items-center gap-3 w-full px-4 py-3 text-left transition-colors duration-150 border-l-2 cursor-pointer live-channel-item"
+              :class="currentChannel?.channelIndex === channel.channelIndex ? 'live-channel-active' : ''"
+              @click="playChannel(channel)"
+            >
+              <span class="text-xs tabular-nums w-5 text-center shrink-0 live-channel-num" :style="currentChannel?.channelIndex === channel.channelIndex ? 'color: var(--color-primary); font-weight: 500;' : 'color: var(--color-text-tertiary);'">
+                {{ String(channel.channelNum).padStart(2, '0') }}
+              </span>
+              <div class="flex items-center gap-2 flex-1 min-w-0">
+                <span v-if="currentChannel?.channelIndex === channel.channelIndex" class="relative flex h-1.5 w-1.5 shrink-0">
+                  <span class="animate-ping absolute inline-flex h-full w-full opacity-75" style="background: var(--color-danger); border-radius: 50%;"></span>
+                  <span class="relative inline-flex h-1.5 w-1.5" style="background: var(--color-danger); border-radius: 50%;"></span>
+                </span>
+                <span class="text-sm truncate" :class="currentChannel?.channelIndex === channel.channelIndex ? 'font-medium' : ''">{{ channel.channelName }}</span>
+              </div>
+              <span v-if="channel.channelUrls.length > 1" class="text-xs flex-shrink-0" style="color: var(--color-text-tertiary);">
+                {{ channel.channelUrls.length }}源
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT PANEL: Player Area -->
+      <div class="flex flex-col flex-1 min-h-0 min-w-0 p-4 gap-4 live-player-area" style="background: var(--color-bg-base);">
+        <!-- Video Player -->
+        <div class="relative w-full flex-1 min-h-0 flex items-center justify-center overflow-hidden live-video-container" style="background: var(--color-bg-elevated); border-radius: var(--radius-lg, 16px);">
+          <VideoPlayer v-if="currentLiveUrl" :url="currentLiveUrl" :title="currentChannelName" @error="onPlayError" @net-speed="onNetSpeed" class="w-full h-full" />
+          <div v-else class="absolute inset-0 flex flex-col items-center justify-center gap-4" style="background: linear-gradient(180deg, var(--color-bg-elevated) 0%, var(--color-bg-base) 100%);">
+            <button class="flex items-center justify-center w-16 h-16 transition-transform duration-250" style="background: var(--color-primary-glow); border: 1px solid var(--color-primary-border); border-radius: 50%; backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);" aria-label="播放">
+              <svg width="28" height="28" viewBox="0 0 24 24" :fill="'var(--color-primary)'" stroke="none">
+                <polygon points="6,3 20,12 6,21"/>
+              </svg>
+            </button>
+            <span class="text-sm" style="color: var(--color-text-tertiary);">选择频道开始播放</span>
+          </div>
           <!-- Channel number overlay -->
-          <div v-if="channelNumberDisplay" class="absolute top-2 left-2 text-2xl font-mono bg-black/50 px-3 py-1 rounded pointer-events-none" style="color: var(--color-primary)">
+          <div v-if="channelNumberDisplay" class="absolute top-4 left-4 text-2xl font-mono px-4 py-2 rounded-lg pointer-events-none" style="background: var(--color-bg-glass-heavy); color: var(--color-primary); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border: var(--glass-border);">
             {{ channelNumberDisplay }}
           </div>
           <!-- Net speed indicator -->
-          <div v-if="currentLiveUrl && showNetSpeed" class="absolute top-2 right-2 text-xs bg-black/50 px-2 py-1 rounded pointer-events-none" style="color: var(--color-text-secondary)">
+          <div v-if="currentLiveUrl && showNetSpeed" class="absolute top-4 right-4 text-xs px-3 py-1.5 rounded-lg pointer-events-none" style="background: var(--color-bg-glass-heavy); color: var(--color-text-secondary); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border: var(--glass-border);">
             {{ netSpeedText }}
           </div>
         </div>
-        <!-- Current channel info bar -->
-        <div class="h-10 flex items-center px-4 text-sm flex-shrink-0 live-info-bar">
-          <span v-if="currentChannel" class="truncate" style="color: var(--color-text-primary)">
-            {{ currentChannel.channelName }}
-            <span v-if="currentSourceIndex > 0" class="ml-2" style="color: var(--color-text-tertiary)">线路{{ currentSourceIndex + 1 }}</span>
-          </span>
-          <span class="mx-2" style="color: var(--color-text-disabled)">|</span>
-          <el-switch v-model="autoSwitchSource" active-text="自动换源" inactive-text="" size="small" class="mr-2" />
+
+        <!-- EPG Info Strip (when EPG is enabled) -->
+        <div v-if="showEpg && currentEpgInfo" class="shrink-0 flex items-center gap-6 px-4 py-3 live-epg-strip" style="background: var(--color-bg-surface); border: var(--glass-border); border-radius: var(--radius-md, 10px); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);">
+          <!-- Current program -->
+          <div class="flex items-center gap-2 flex-1 min-w-0">
+            <span class="relative flex h-2 w-2 shrink-0">
+              <span class="animate-ping absolute inline-flex h-full w-full opacity-75" style="background: var(--color-danger); border-radius: 50%;"></span>
+              <span class="relative inline-flex h-2 w-2" style="background: var(--color-danger); border-radius: 50%;"></span>
+            </span>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-medium truncate" style="color: var(--color-text-primary);">{{ currentEpgInfo.current?.title || '未知' }}</span>
+                <span class="text-xs whitespace-nowrap" style="color: var(--color-text-tertiary);">{{ formatEpgTime(currentEpgInfo.current?.start || '') }} - {{ formatEpgTime(currentEpgInfo.current?.end || '') }}</span>
+              </div>
+              <span class="text-xs truncate block mt-0.5" style="color: var(--color-text-tertiary);">正在直播</span>
+            </div>
+          </div>
+          <!-- Separator -->
+          <div class="w-px self-stretch shrink-0" style="background: var(--color-border);"></div>
+          <!-- Next program -->
+          <div v-if="currentEpgInfo.next" class="flex items-center gap-2 min-w-0" style="flex: 0 0 auto;">
+            <span class="text-xs whitespace-nowrap" style="color: var(--color-text-tertiary);">{{ formatEpgTime(currentEpgInfo.next?.start || '') }}</span>
+            <span class="text-sm truncate" style="color: var(--color-text-secondary);">{{ currentEpgInfo.next?.title || '未知' }}</span>
+          </div>
+        </div>
+
+        <!-- Current channel info bar + source switch -->
+        <div class="shrink-0 flex items-center gap-4 px-4 py-3 live-info-bar" style="background: var(--color-bg-surface); border: var(--glass-border); border-radius: var(--radius-md, 10px); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);">
+          <div class="flex items-center gap-2 flex-1 min-w-0">
+            <span v-if="currentChannel" class="text-sm font-medium truncate" style="color: var(--color-text-primary);">
+              {{ currentChannel.channelName }}
+            </span>
+            <span v-if="currentChannel && currentSourceIndex > 0" class="text-xs" style="color: var(--color-text-tertiary);">
+              线路{{ currentSourceIndex + 1 }}
+            </span>
+          </div>
+          <el-switch v-model="autoSwitchSource" active-text="自动换源" inactive-text="" size="small" />
           <!-- Source switch buttons -->
-          <div v-if="currentChannel && currentChannel.channelUrls.length > 1" class="ml-auto flex gap-1">
+          <div v-if="currentChannel && currentChannel.channelUrls.length > 1" class="flex gap-1">
             <el-button
               v-for="(_, idx) in currentChannel.channelUrls"
               :key="idx"
@@ -131,10 +191,11 @@
             </el-button>
           </div>
         </div>
-        <!-- EPG date selector + info -->
-        <div v-if="showEpg" class="flex-shrink-0 max-h-60 overflow-y-auto live-epg-panel">
+
+        <!-- EPG Panel (full program list) -->
+        <div v-if="showEpg" class="shrink-0 live-epg-panel" style="background: var(--color-bg-surface); border: var(--glass-border); border-radius: var(--radius-md, 10px); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);">
           <!-- EPG date selector -->
-          <div v-if="epgDates.length > 0" class="flex gap-1 px-4 py-1 overflow-x-auto sticky top-0 z-10 live-epg-dates">
+          <div v-if="epgDates.length > 0" class="flex gap-1 px-3 py-2 overflow-x-auto sticky top-0 z-10 live-epg-dates" style="border-bottom: 1px solid var(--color-border);">
             <el-button
               v-for="(date, di) in epgDates"
               :key="di"
@@ -145,46 +206,35 @@
               {{ date.label }}
             </el-button>
           </div>
-          <!-- EPG current/next info -->
-          <div v-if="currentEpgInfo" class="px-4 py-2 text-sm border-b" style="border-color: var(--color-border)">
-            <p style="color: var(--color-primary)">
-              正在播放: {{ currentEpgInfo.current?.title || '未知' }}
-              <span class="ml-2" style="color: var(--color-text-tertiary)">{{ currentEpgInfo.current?.start || '' }}</span>
-            </p>
-            <p style="color: var(--color-text-secondary)">
-              下一个: {{ currentEpgInfo.next?.title || '未知' }}
-              <span class="ml-2" style="color: var(--color-text-tertiary)">{{ currentEpgInfo.next?.start || '' }}</span>
-            </p>
-          </div>
-          <!-- EPG program list (clickable for time-shift) -->
-          <div v-if="epgProgramList.length > 0" class="px-2 py-1">
+          <!-- EPG program list -->
+          <div v-if="epgProgramList.length > 0" class="px-2 py-2 max-h-48 overflow-y-auto">
             <div
               v-for="prog in epgProgramList"
               :key="prog.start"
-              class="flex items-center px-2 py-1 text-xs cursor-pointer rounded transition-colors live-epg-item"
+              class="flex items-center px-2 py-1.5 text-xs cursor-pointer rounded transition-colors live-epg-item"
               :class="isCurrentEpgProgram(prog) ? 'live-epg-current' : ''"
               @click="onEpgClick(prog)"
             >
-              <span class="w-16 flex-shrink-0" style="color: var(--color-text-tertiary)">{{ formatEpgTime(prog.start) }}</span>
+              <span class="w-16 flex-shrink-0 tabular-nums" style="color: var(--color-text-tertiary);">{{ formatEpgTime(prog.start) }}</span>
               <span class="truncate">{{ prog.title }}</span>
             </div>
           </div>
-          <div v-else-if="currentChannel && !currentEpgInfo" class="px-4 py-2 text-sm" style="color: var(--color-text-tertiary)">
+          <div v-else-if="currentChannel && !currentEpgInfo" class="px-4 py-3 text-sm" style="color: var(--color-text-tertiary);">
             暂无节目信息
           </div>
         </div>
 
         <!-- Live Settings Panel -->
-        <div v-if="showSettings" class="p-4 flex-shrink-0 live-settings-panel">
+        <div v-if="showSettings" class="shrink-0 p-4 live-settings-panel" style="background: var(--color-bg-surface); border: var(--glass-border); border-radius: var(--radius-md, 10px); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);">
           <div class="grid grid-cols-2 gap-4 text-sm">
             <div>
-              <label class="mb-1 block" style="color: var(--color-text-secondary)">画面比例</label>
+              <label class="mb-1 block" style="color: var(--color-text-secondary);">画面比例</label>
               <el-select v-model="liveAspectRatio" size="small" @change="onAspectRatioChange">
                 <el-option v-for="r in aspectRatios" :key="r.value" :label="r.label" :value="r.value" />
               </el-select>
             </div>
             <div>
-              <label class="mb-1 block" style="color: var(--color-text-secondary)">超时换台(秒)</label>
+              <label class="mb-1 block" style="color: var(--color-text-secondary);">超时换台(秒)</label>
               <el-select v-model="timeoutSeconds" size="small">
                 <el-option v-for="t in [5, 10, 15, 30, 60]" :key="t" :label="t + '秒'" :value="t" />
               </el-select>
@@ -203,11 +253,12 @@
             </div>
           </div>
         </div>
+
       </div>
     </div>
 
     <!-- Time display overlay -->
-    <div v-if="showTime && currentLiveUrl" class="fixed top-2 left-1/2 -translate-x-1/2 text-xs bg-black/50 px-2 py-1 rounded pointer-events-none z-50" style="color: var(--color-text-secondary)">
+    <div v-if="showTime && currentLiveUrl" class="fixed top-2 left-1/2 -translate-x-1/2 text-xs px-3 py-1.5 rounded-lg pointer-events-none z-50" style="background: var(--color-bg-glass-heavy); color: var(--color-text-secondary); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border: var(--glass-border);">
       {{ currentTimeDisplay }}
     </div>
   </div>
@@ -219,6 +270,7 @@ import { useAppStore } from '../store/app'
 import { LiveParser, EpgLoader } from '../core/LiveParser'
 import type { LiveChannelGroup, LiveChannelItem, EpgInfo } from '../core/models'
 import VideoPlayer from '../components/VideoPlayer.vue'
+import { Search, Lock, Loading, VideoPlay } from '@element-plus/icons-vue'
 
 const store = useAppStore()
 
@@ -262,12 +314,11 @@ const netSpeedText = ref('')
 let retryCount = 0
 const MAX_RETRIES = 3
 
-// EPG date selector: yesterday through next 7 days (9 days total)
-const activeEpgDateIndex = ref(1) // Default to "today" (index 1)
+const activeEpgDateIndex = ref(1)
 
 interface EpgDateItem {
   label: string
-  date: string // YYYY-MM-DD
+  date: string
 }
 
 const epgDates = computed<EpgDateItem[]>(() => {
@@ -296,7 +347,6 @@ const activeGroup = computed(() =>
 
 const currentChannelName = computed(() => currentChannel.value?.channelName || '')
 
-// Filter channels by search keyword
 const filteredChannels = computed(() => {
   const channels = activeGroup.value?.channels || []
   if (!channelSearch.value) return channels
@@ -319,7 +369,6 @@ const currentEpgInfo = computed(() => {
   let next: EpgInfo | null = null
 
   if (activeEpgDateIndex.value === 1) {
-    // Today: show current/next relative to now
     const now = new Date()
     const nowStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
     for (const prog of epg.programs) {
@@ -330,7 +379,6 @@ const currentEpgInfo = computed(() => {
       }
     }
   } else {
-    // Other dates: show first two programs of that day
     const dayProgs = epg.programs.filter(p => p.start.startsWith(selectedDate))
     if (dayProgs.length > 0) current = dayProgs[0]
     if (dayProgs.length > 1) next = dayProgs[1]
@@ -340,7 +388,6 @@ const currentEpgInfo = computed(() => {
   return { current, next }
 })
 
-// EPG program list for the selected date
 const epgProgramList = computed(() => {
   if (!currentChannel.value || !showEpg.value) return []
   const epg = epgMap.value.get(currentChannel.value.channelName)
@@ -353,14 +400,13 @@ const epgProgramList = computed(() => {
 })
 
 function isCurrentEpgProgram(prog: EpgInfo): boolean {
-  if (activeEpgDateIndex.value !== 1) return false // Only highlight on "today"
+  if (activeEpgDateIndex.value !== 1) return false
   const now = new Date()
   const nowStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
   return prog.start <= nowStr && prog.end > nowStr
 }
 
 function formatEpgTime(dateTimeStr: string): string {
-  // "2024-01-01 06:00:00" -> "06:00"
   const parts = dateTimeStr.split(' ')
   if (parts.length < 2) return dateTimeStr
   return parts[1].substring(0, 5)
@@ -368,11 +414,9 @@ function formatEpgTime(dateTimeStr: string): string {
 
 function onEpgClick(prog: EpgInfo) {
   if (!currentLiveUrl.value) return
-  // If clicking a past program, try time-shift via ?playseek= parameter
   const now = new Date()
   const nowStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
   if (prog.end <= nowStr && currentLiveUrl.value.includes('.m3u8')) {
-    // Time-shift: append playseek parameter (format: YYYYMMDDHHmmss)
     const seekTime = prog.start.replace(/[-: ]/g, '').substring(0, 14)
     const url = new URL(currentLiveUrl.value)
     url.searchParams.set('playseek', seekTime)
@@ -381,14 +425,9 @@ function onEpgClick(prog: EpgInfo) {
 }
 
 onMounted(async () => {
-  // Restore last channel from localStorage
   const lastChannel = localStorage.getItem('tvbox_live_last_channel')
   const lastGroup = localStorage.getItem('tvbox_live_last_group')
 
-  // store.liveGroups may only contain a placeholder group whose groupName is
-  // a proxy URL and channels is empty (ConfigParser pushes such a placeholder
-  // when the config has a live URL). In that case we must re-parse via
-  // store.liveUrl to actually populate the channel list.
   const hasRealChannels =
     !!store.liveGroups && store.liveGroups.some(g => g.channels.length > 0)
   console.log('[Live] onMounted: liveGroups=', store.liveGroups.length,
@@ -412,7 +451,6 @@ onMounted(async () => {
     loadEpg()
   }
 
-  // Auto-play last channel
   if (lastChannel && activeGroup.value) {
     const ch = activeGroup.value.channels.find(c => c.channelName === lastChannel)
     if (ch) playChannel(ch)
@@ -431,7 +469,6 @@ async function loadLiveSource() {
   loadError.value = ''
   console.log('[Live] loadLiveSource: original url=', url)
   try {
-    // Handle proxy:// URLs by routing through local proxy server
     if (url.startsWith('proxy://')) {
       const proxyHost = `http://127.0.0.1:9978`
       const ext = btoa(url.replace('proxy://', ''))
@@ -452,7 +489,6 @@ async function loadLiveSource() {
       if (result.length > 0) {
         activeGroupName.value = result[0].groupName
       }
-      // Save URL to store
       if (liveUrlInput.value) {
         store.setLiveUrl(liveUrlInput.value)
       }
@@ -475,9 +511,8 @@ async function loadEpg() {
 }
 
 function selectGroup(group: LiveChannelGroup) {
-  // Check password
   if (group.groupPassword && !unlockedGroups.value[group.groupName]) {
-    return // Must unlock first via password input
+    return
   }
   activeGroupName.value = group.groupName
   localStorage.setItem('tvbox_live_last_group', group.groupName)
@@ -496,11 +531,9 @@ function playChannel(channel: LiveChannelItem) {
   currentSourceIndex.value = 0
   currentLiveUrl.value = channel.channelUrls[0] || ''
 
-  // Save to localStorage
   localStorage.setItem('tvbox_live_last_channel', channel.channelName)
   localStorage.setItem('tvbox_live_last_group', activeGroupName.value)
 
-  // Show channel number overlay
   channelNumberDisplay.value = String(channel.channelNum)
   if (channelNumberTimer) clearTimeout(channelNumberTimer)
   channelNumberTimer = setTimeout(() => {
@@ -533,7 +566,6 @@ function onNetSpeed(speed: string) {
   netSpeedText.value = speed
 }
 
-// Live settings persistence
 watch(liveAspectRatio, v => localStorage.setItem('tvbox_live_aspect', v))
 watch(crossGroupSwitch, v => localStorage.setItem('tvbox_live_cross_group', String(v)))
 watch(showNetSpeed, v => localStorage.setItem('tvbox_live_show_speed', String(v)))
@@ -542,7 +574,6 @@ watch(channelReverse, v => localStorage.setItem('tvbox_live_channel_reverse', St
 watch(timeoutSeconds, v => localStorage.setItem('tvbox_live_timeout', String(v)))
 
 function onAspectRatioChange(mode: string) {
-  // Apply to the video element in the player
   const video = document.querySelector('.video-player-wrapper video') as HTMLVideoElement | null
   if (!video) return
   switch (mode) {
@@ -568,7 +599,6 @@ function resetToSourceLoading() {
 
 function onChannelReverse() {
   if (!activeGroup.value) return
-  // Reverse the channel order within the group
   for (const g of groups.value) {
     if (g.groupName === activeGroup.value.groupName) {
       g.channels = [...g.channels].reverse()
@@ -577,7 +607,6 @@ function onChannelReverse() {
   }
 }
 
-// Update current time display
 let timeDisplayInterval: ReturnType<typeof setInterval> | null = null
 function updateTimeDisplay() {
   const now = new Date()
@@ -586,12 +615,10 @@ function updateTimeDisplay() {
 timeDisplayInterval = setInterval(updateTimeDisplay, 1000)
 updateTimeDisplay()
 
-// Watch autoSwitchSource for persistence
 watch(autoSwitchSource, (val) => {
   localStorage.setItem('tvbox_live_auto_switch', String(val))
 })
 
-// Keyboard controls
 let numberBuffer = ''
 let numberTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -605,7 +632,6 @@ function onKeyDown(e: KeyboardEvent) {
       const idx = channels.findIndex(c => c.channelIndex === currentChannel.value!.channelIndex)
       if (idx > 0) playChannel(channels[idx - 1])
       else if (crossGroupSwitch.value) {
-        // Cross to previous group's last channel
         const gIdx = groups.value.findIndex(g => g.groupName === activeGroupName.value)
         if (gIdx > 0) {
           selectGroup(groups.value[gIdx - 1])
@@ -621,7 +647,6 @@ function onKeyDown(e: KeyboardEvent) {
       const idx = channels.findIndex(c => c.channelIndex === currentChannel.value!.channelIndex)
       if (idx < channels.length - 1) playChannel(channels[idx + 1])
       else if (crossGroupSwitch.value) {
-        // Cross to next group's first channel
         const gIdx = groups.value.findIndex(g => g.groupName === activeGroupName.value)
         if (gIdx < groups.value.length - 1) {
           selectGroup(groups.value[gIdx + 1])
@@ -633,20 +658,17 @@ function onKeyDown(e: KeyboardEvent) {
     }
     case 'ArrowLeft': {
       e.preventDefault()
-      // Previous group
       const gIdx = groups.value.findIndex(g => g.groupName === activeGroupName.value)
       if (gIdx > 0) selectGroup(groups.value[gIdx - 1])
       break
     }
     case 'ArrowRight': {
       e.preventDefault()
-      // Next group
       const gIdx = groups.value.findIndex(g => g.groupName === activeGroupName.value)
       if (gIdx < groups.value.length - 1) selectGroup(groups.value[gIdx + 1])
       break
     }
     default: {
-      // Number input: type channel number and press Enter to switch
       if (/^\d$/.test(e.key)) {
         numberBuffer += e.key
         if (numberTimer) clearTimeout(numberTimer)
@@ -666,94 +688,77 @@ function onKeyDown(e: KeyboardEvent) {
 </script>
 
 <style scoped>
-/* Sidebar */
+/* Top bar */
+.live-topbar {
+  font-family: var(--font-display, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif);
+}
+
+/* Sidebar groups */
 .live-sidebar {
-  background: var(--color-bg-surface);
   border-color: var(--color-border);
 }
 
 .live-group-item {
   color: var(--color-text-secondary);
+  border-left: 2px solid transparent;
+  border-radius: 0 var(--radius-sm, 6px) var(--radius-sm, 6px) 0;
 }
 
 .live-group-item:hover {
   background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
 }
 
 .live-group-active {
   background: var(--color-primary-soft) !important;
   color: var(--color-primary) !important;
-  font-weight: 600;
+  border-left-color: var(--color-primary) !important;
+  font-weight: 500;
 }
 
 /* Channel list */
 .live-channel-list {
-  background: var(--color-bg-elevated);
-  border-color: var(--color-border);
-}
-
-.live-channel-header {
-  background: var(--color-bg-surface);
-  color: var(--color-text-tertiary);
   border-color: var(--color-border);
 }
 
 .live-channel-item {
   color: var(--color-text-secondary);
+  border-left-color: transparent;
 }
 
 .live-channel-item:hover {
-  background: var(--color-bg-surface);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
 }
 
 .live-channel-active {
   background: var(--color-primary-soft) !important;
   color: var(--color-primary) !important;
-  font-weight: 600;
+  border-left-color: var(--color-primary) !important;
 }
 
-/* Live indicator dot with pulse animation */
-.live-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-danger);
-  box-shadow: 0 0 0 0 var(--color-danger);
-  animation: live-pulse 2s ease-out infinite;
+/* Player area */
+.live-player-area {
+  overflow-y: auto;
 }
 
-@keyframes live-pulse {
-  0% {
-    box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.6);
-  }
-  70% {
-    box-shadow: 0 0 0 6px rgba(248, 113, 113, 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(248, 113, 113, 0);
-  }
+.live-video-container {
+  box-shadow: var(--surface-floating-shadow, 0 8px 32px rgba(0, 0, 0, 0.35));
 }
 
-.live-channel-num {
-  color: var(--color-text-tertiary);
-}
-
-.live-channel-source {
-  color: var(--color-text-tertiary);
+/* EPG strip */
+.live-epg-strip {
+  box-shadow: var(--surface-static-shadow, 0 1px 3px rgba(0, 0, 0, 0.04));
 }
 
 /* Info bar */
 .live-info-bar {
-  background: var(--color-bg-overlay);
+  box-shadow: var(--surface-static-shadow, 0 1px 3px rgba(0, 0, 0, 0.04));
 }
 
 /* EPG panel */
 .live-epg-panel {
-  background: var(--color-bg-elevated);
-}
-
-.live-epg-dates {
-  background: var(--color-bg-elevated);
+  box-shadow: var(--surface-static-shadow, 0 1px 3px rgba(0, 0, 0, 0.04));
 }
 
 .live-epg-item {
@@ -767,11 +772,71 @@ function onKeyDown(e: KeyboardEvent) {
 .live-epg-current {
   background: var(--color-primary-soft);
   color: var(--color-primary);
+  font-weight: 500;
 }
 
 /* Settings panel */
 .live-settings-panel {
-  background: var(--color-bg-elevated);
-  border-top: 1px solid var(--color-border);
+  box-shadow: var(--surface-static-shadow, 0 1px 3px rgba(0, 0, 0, 0.04));
+}
+
+/* Search input customization */
+.live-search-input :deep(.el-input__wrapper) {
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0;
+}
+
+.live-search-input :deep(.el-input__inner) {
+  font-size: 12px;
+  color: var(--color-text-primary);
+}
+
+.live-search-input :deep(.el-input__placeholder) {
+  color: var(--color-text-tertiary);
+}
+
+/* Ping animation for live indicators */
+.animate-ping {
+  animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes ping {
+  75%, 100% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-ping {
+    animation-duration: 0.01ms !important;
+  }
+}
+
+/* Scrollbar styling for consistency */
+.live-sidebar::-webkit-scrollbar,
+.live-channel-list::-webkit-scrollbar,
+.live-player-area::-webkit-scrollbar {
+  width: 6px;
+}
+
+.live-sidebar::-webkit-scrollbar-track,
+.live-channel-list::-webkit-scrollbar-track,
+.live-player-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.live-sidebar::-webkit-scrollbar-thumb,
+.live-channel-list::-webkit-scrollbar-thumb,
+.live-player-area::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+
+.live-sidebar::-webkit-scrollbar-thumb:hover,
+.live-channel-list::-webkit-scrollbar-thumb:hover,
+.live-player-area::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-tertiary);
 }
 </style>

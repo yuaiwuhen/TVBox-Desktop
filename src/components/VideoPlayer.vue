@@ -30,7 +30,10 @@ import {
   Microphone,
   Mute,
   MoreFilled,
-  Rank
+  Rank,
+  ArrowLeft,
+  CaretLeft,
+  CaretRight
 } from '@element-plus/icons-vue';
 
 // ==================== Props ====================
@@ -238,6 +241,82 @@ const bufferedPercent = computed(() => {
 
 const formattedCurrentTime = computed(() => formatTime(currentTime.value));
 const formattedDuration = computed(() => formatTime(duration.value));
+
+// Custom seek bar state
+const seekBarRef = ref<HTMLDivElement>();
+const isDragging = ref(false);
+const hoverPercent = ref(0);
+const showHoverTime = ref(false);
+
+const onSeekBarMouseDown = (e: MouseEvent) => {
+  if (!seekBarRef.value || !duration.value) return;
+  isDragging.value = true;
+  wasPlayingBeforeSeek = isPlaying.value;
+  if (wasPlayingBeforeSeek) pauseVideo();
+  handleSeek(e);
+  window.addEventListener('mousemove', handleSeek);
+  window.addEventListener('mouseup', onSeekBarMouseUp);
+};
+
+const handleSeek = (e: MouseEvent) => {
+  if (!seekBarRef.value || !duration.value) return;
+  const rect = seekBarRef.value.getBoundingClientRect();
+  const percent = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+  hoverPercent.value = percent;
+  if (isDragging.value) {
+    onProgressInput(percent);
+  }
+};
+
+const onSeekBarMouseUp = () => {
+  if (isDragging.value) {
+    isDragging.value = false;
+    onProgressChange(hoverPercent.value);
+  }
+  window.removeEventListener('mousemove', handleSeek);
+  window.removeEventListener('mouseup', onSeekBarMouseUp);
+};
+
+const onSeekBarMouseMove = (e: MouseEvent) => {
+  if (!seekBarRef.value || !duration.value) return;
+  const rect = seekBarRef.value.getBoundingClientRect();
+  hoverPercent.value = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+  showHoverTime.value = true;
+};
+
+const onSeekBarMouseLeave = () => {
+  showHoverTime.value = false;
+};
+
+const getHoverTime = computed(() => {
+  if (!duration.value) return '0:00';
+  return formatTime((hoverPercent.value / 100) * duration.value);
+});
+
+// Volume slider
+const volumeSliderRef = ref<HTMLDivElement>();
+const isVolumeDragging = ref(false);
+
+const onVolumeSliderMouseDown = (e: MouseEvent) => {
+  if (!volumeSliderRef.value) return;
+  isVolumeDragging.value = true;
+  handleVolume(e);
+  window.addEventListener('mousemove', handleVolume);
+  window.addEventListener('mouseup', onVolumeSliderMouseUp);
+};
+
+const handleVolume = (e: MouseEvent) => {
+  if (!volumeSliderRef.value) return;
+  const rect = volumeSliderRef.value.getBoundingClientRect();
+  const percent = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+  setVolume(percent / 100);
+};
+
+const onVolumeSliderMouseUp = () => {
+  isVolumeDragging.value = false;
+  window.removeEventListener('mousemove', handleVolume);
+  window.removeEventListener('mouseup', onVolumeSliderMouseUp);
+};
 
 // ==================== 初始化播放器 ====================
 const initPlayer = async () => {
@@ -1010,7 +1089,8 @@ const showClickFeedback = (x: number, y: number, icon: string) => {
 
 const onMouseDown = (e: MouseEvent) => {
   const target = e.target as HTMLElement;
-  if (target.closest('.el-slider') || target.closest('.ctrl-btn')) {
+  if (target.closest('.el-slider') || target.closest('.ctrl-btn') ||
+    target.closest('.vp-seek-bar') || target.closest('.vp-volume-slider')) {
     return;
   }
 
@@ -1033,7 +1113,8 @@ const onMouseUp = (e: MouseEvent) => {
 
   if (target.closest('.ctrl-btn') || target.closest('.el-slider') ||
     target.closest('.el-dropdown') || target.closest('.el-dropdown-menu') ||
-    target.closest('.el-switch')) {
+    target.closest('.el-switch') || target.closest('.vp-seek-bar') ||
+    target.closest('.vp-volume-slider')) {
     if (longPressTimer) {
       clearTimeout(longPressTimer);
       longPressTimer = null;
@@ -1072,7 +1153,8 @@ const onMouseMove = (e: MouseEvent) => {
 
   const target = e.target as HTMLElement;
   if (target.closest('.ctrl-btn') || target.closest('.el-slider') ||
-    target.closest('.el-dropdown') || target.closest('.el-dropdown-menu')) {
+    target.closest('.el-dropdown') || target.closest('.el-dropdown-menu') ||
+    target.closest('.vp-seek-bar')) {
     return;
   }
 
@@ -1383,20 +1465,33 @@ defineExpose({
 
       <!-- Subtitle overlay -->
       <div v-if="currentSubtitle && subtitleEnabled"
-        class="absolute bottom-16 left-1/2 -translate-x-1/2 text-center pointer-events-none z-10"
+        class="absolute bottom-24 left-1/2 -translate-x-1/2 text-center pointer-events-none z-10"
         :style="{ fontSize: subtitleFontSize + 'px', color: subtitleColor }">
-        <span class="bg-black/70 px-2 py-1 rounded whitespace-pre-wrap">{{ currentSubtitle.text }}</span>
+        <span class="px-2 py-1 rounded whitespace-pre-wrap" style="background: rgba(0,0,0,0.7);">{{ currentSubtitle.text
+          }}</span>
       </div>
 
       <!-- Danmu overlay -->
       <div ref="danmuContainer" class="absolute top-0 left-0 w-full h-3/4 pointer-events-none overflow-hidden z-10">
       </div>
 
-      <!-- Screen display info overlay -->
-      <div v-if="screenDisplayEnabled && isPlaying"
-        class="absolute top-2 left-2 text-xs text-white/70 bg-black/40 px-2 py-1 rounded pointer-events-none z-10 space-y-0.5">
-        <div>{{ screenDisplayTime }}</div>
-        <div v-if="netSpeedDisplay">{{ netSpeedDisplay }}</div>
+      <!-- OSD info overlay (top-left, below top bar) -->
+      <div v-if="screenDisplayEnabled && isPlaying" class="vp-osd-info absolute z-20 pointer-events-none">
+        <div class="flex items-center gap-2 px-3 py-1.5 rounded-md"
+          style="background: rgba(10,11,16,0.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);">
+          <span class="text-xs whitespace-nowrap"
+            style="color: var(--color-text-tertiary); font-variant-numeric: tabular-nums;">H.264 1080p</span>
+          <span style="color: var(--color-border);">|</span>
+          <span v-if="netSpeedDisplay" class="text-xs whitespace-nowrap"
+            style="color: var(--color-text-tertiary); font-variant-numeric: tabular-nums;">{{ netSpeedDisplay }}</span>
+        </div>
+      </div>
+
+      <!-- Current time + date display (top-right corner) -->
+      <div v-if="screenDisplayEnabled" class="vp-time-display absolute z-20 pointer-events-none">
+        <span class="text-xs whitespace-nowrap"
+          style="color: var(--color-text-tertiary); font-variant-numeric: tabular-nums; opacity: 0.7;">{{
+          screenDisplayTime }}</span>
       </div>
 
       <!-- Skip intro/outro indicator -->
@@ -1416,185 +1511,321 @@ defineExpose({
         </div>
       </div>
 
-      <!-- Lock icon -->
-      <div v-if="screenLocked" class="absolute top-4 left-1/2 -translate-x-1/2 z-40">
-        <button class="w-10 h-10 rounded-full flex items-center justify-center animate-pulse"
-          style="background: var(--color-primary)" @click="unlockScreen">
-          <el-icon :size="18" style="color: #fff">
-            <Unlock />
+      <!-- Center play button (shown when paused) -->
+      <div v-if="!isPlaying && !isLoading && !hasError && !screenLocked"
+        class="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+        <button class="vp-center-play pointer-events-auto flex items-center justify-center rounded-full"
+          @click="togglePlay" aria-label="播放">
+          <el-icon :size="32" style="color: var(--color-text-primary); margin-left: 3px;">
+            <component :is="isPlaying ? VideoPause : VideoPlay" />
           </el-icon>
         </button>
       </div>
 
-      <!-- 加载状态 -->
-      <div v-if="isLoading" class="absolute inset-0 flex items-center justify-center z-50">
-        <div class="flex flex-col items-center gap-2">
-          <div class="w-12 h-12 rounded-full border-4 border-white/30 border-t-white animate-spin"></div>
-          <div class="text-white text-sm bg-black/60 px-2 py-1 rounded">加载中...</div>
+      <!-- Locked screen overlay -->
+      <div v-if="screenLocked"
+        class="vp-locked-overlay absolute inset-0 z-35 flex items-center justify-center pointer-events-none"
+        style="background: rgba(10,11,16,0.3);">
+        <div class="flex items-center gap-6">
+          <button class="vp-locked-btn pointer-events-auto flex items-center justify-center rounded-full"
+            @click="unlockScreen" aria-label="解锁">
+            <el-icon :size="24" style="color: var(--color-text-primary);">
+              <Unlock />
+            </el-icon>
+          </button>
+          <button class="vp-locked-btn pointer-events-auto flex items-center justify-center rounded-full"
+            @click="togglePlay" aria-label="播放">
+            <el-icon :size="24" style="color: var(--color-text-primary);">
+              <component :is="isPlaying ? VideoPause : VideoPlay" />
+            </el-icon>
+          </button>
+          <button class="vp-locked-btn pointer-events-auto flex items-center justify-center rounded-full"
+            @click="toggleFullscreen" aria-label="全屏">
+            <el-icon :size="24" style="color: var(--color-text-primary);">
+              <FullScreen />
+            </el-icon>
+          </button>
         </div>
       </div>
 
-      <!-- 错误状态 -->
-      <div v-if="hasError" class="absolute inset-0 flex items-center justify-center bg-black/80 z-50">
-        <div class="text-white text-center px-6">
-          <div class="text-3xl mb-4">⚠️</div>
-          <div class="text-lg mb-2">{{ errorMessage }}</div>
+      <!-- Buffering indicator -->
+      <div v-if="isBuffering && !longPressActive"
+        class="vp-buffering-overlay absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+        <div class="flex flex-col items-center gap-3">
+          <div class="vp-buffering-spinner"></div>
+          <span class="text-xs whitespace-nowrap" style="color: var(--color-text-tertiary);">缓冲中...</span>
+        </div>
+      </div>
+
+      <!-- Loading state -->
+      <div v-if="isLoading" class="absolute inset-0 flex items-center justify-center z-50">
+        <div class="flex flex-col items-center gap-3">
+          <div class="vp-buffering-spinner"></div>
+          <div class="text-sm" style="color: var(--color-text-secondary);">加载中...</div>
+        </div>
+      </div>
+
+      <!-- Error state -->
+      <div v-if="hasError" class="absolute inset-0 flex items-center justify-center z-50"
+        style="background: rgba(10,11,16,0.92); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);">
+        <div class="text-center px-6 py-8 rounded-xl max-w-sm"
+          style="background: var(--color-bg-glass); backdrop-filter: var(--glass-blur-heavy); -webkit-backdrop-filter: var(--glass-blur-heavy); border: var(--glass-border);">
+          <div class="flex items-center justify-center w-14 h-14 rounded-full mx-auto mb-5"
+            style="background: rgba(248,113,113,0.12);">
+            <svg class="w-7 h-7" style="color: var(--state-error);" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+          </div>
+          <div class="text-base font-medium mb-1" style="color: var(--color-text-primary);">{{ errorMessage }}</div>
+          <div class="text-sm mb-5" style="color: var(--color-text-tertiary);">视频播放出现错误</div>
 
           <!-- Unsupported format specific UI -->
-          <div v-if="unsupportedFormat" class="mt-4 space-y-3">
-            <div class="text-sm text-gray-300">
+          <div v-if="unsupportedFormat" class="space-y-3">
+            <div class="text-sm" style="color: var(--color-text-secondary);">
               格式: {{ unsupportedFormat.format }}
             </div>
             <div class="flex gap-3 justify-center">
-              <button
-                @click="openWithExternalPlayer"
-                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm flex items-center gap-2"
-              >
-                <el-icon><Monitor /></el-icon>
-                外部播放器打开
+              <button @click="openWithExternalPlayer"
+                class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-colors"
+                style="background: var(--color-primary); color: var(--color-primary-foreground);">
+                <el-icon :size="16">
+                  <Monitor />
+                </el-icon>
+                外部播放器
               </button>
-              <button
-                @click="copyVideoUrl"
-                class="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded-lg text-sm"
-              >
+              <button @click="copyVideoUrl"
+                class="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm transition-colors"
+                style="background: rgba(255,255,255,0.06); color: var(--color-text-primary); border: 1px solid var(--color-border);">
                 复制链接
               </button>
             </div>
-            <div class="text-xs text-gray-400 mt-2">
+            <div class="text-xs mt-2" style="color: var(--color-text-tertiary);">
               提示: 可在设置中配置VLC播放器路径
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Controls overlay (hidden when screen locked) -->
+      <!-- Controls overlay -->
       <div v-if="showControls && !screenLocked && !hasError"
         class="absolute inset-0 flex flex-col justify-between pointer-events-none z-30">
-        <!-- Top bar -->
-        <div class="flex items-center justify-between px-4 py-2 pointer-events-auto vp-top-bar" @click.stop>
-          <span class="text-white text-sm truncate max-w-[60%]">{{ title }}</span>
-          <div class="flex gap-1">
-            <button class="ctrl-btn" :class="{ active: danmuEnabled }" @click="toggleDanmu" title="弹幕">
-              <el-icon :size="16">
-                <ChatDotRound />
+
+        <!-- Top bar (glass gradient) -->
+        <div class="vp-overlay-top flex items-center px-4 md:px-6 lg:px-8 pointer-events-auto" @click.stop>
+          <!-- Left: back button -->
+          <button class="vp-icon-btn shrink-0 flex items-center justify-center" @click="emit('prev')" v-if="hasPrev"
+            title="返回">
+            <el-icon :size="20" style="color: var(--color-text-primary);">
+              <ArrowLeft />
+            </el-icon>
+          </button>
+          <div v-else class="w-9 h-9 shrink-0"></div>
+
+          <!-- Center: episode prev/next with title -->
+          <div class="flex items-center justify-center flex-1 min-w-0 gap-3">
+            <button v-if="hasPrev" class="vp-episode-btn shrink-0 flex items-center justify-center gap-1"
+              @click="emit('prev')" title="上一集">
+              <el-icon :size="16" style="color: var(--color-text-secondary);">
+                <CaretLeft />
+              </el-icon>
+              <span class="vp-episode-text">上一集</span>
+            </button>
+            <span class="vp-title truncate text-sm md:text-base font-medium text-center" :title="title">{{ title
+              }}</span>
+            <button v-if="hasNext" class="vp-episode-btn shrink-0 flex items-center justify-center gap-1"
+              @click="emit('next')" title="下一集">
+              <span class="vp-episode-text">下一集</span>
+              <el-icon :size="16" style="color: var(--color-text-secondary);">
+                <CaretRight />
               </el-icon>
             </button>
-            <button class="ctrl-btn" @click="showDanmuSettings = !showDanmuSettings" title="弹幕设置">
-              <el-icon :size="16">
-                <Setting />
-              </el-icon>
-            </button>
-            <button class="ctrl-btn" :class="{ active: subtitleEnabled }" @click="toggleSubtitle" title="字幕">
-              <el-icon :size="16">
+          </div>
+
+          <!-- Right: action buttons -->
+          <div class="flex items-center gap-1 shrink-0">
+            <!-- Subtitle toggle -->
+            <button class="vp-icon-btn" :class="{ active: subtitleEnabled }" @click="toggleSubtitle" title="字幕">
+              <el-icon :size="20">
                 <Document />
               </el-icon>
             </button>
-            <button v-if="subtitleEnabled" class="ctrl-btn" @click="adjustSubtitleDelay(-0.5)" title="字幕延迟-0.5s">
-              <el-icon :size="14">
-                <DArrowLeft />
-              </el-icon>
-            </button>
-            <button v-if="subtitleEnabled" class="ctrl-btn" @click="adjustSubtitleDelay(0.5)" title="字幕延迟+0.5s">
-              <el-icon :size="14">
-                <DArrowRight />
-              </el-icon>
-            </button>
-            <button v-if="showSubtitleSearch" class="ctrl-btn" @click="onSearchSubtitleClick" title="搜索字幕">
-              <el-icon :size="16">
+            <!-- Subtitle search -->
+            <button v-if="showSubtitleSearch" class="vp-icon-btn" @click="onSearchSubtitleClick" title="搜索字幕">
+              <el-icon :size="20">
                 <Search />
               </el-icon>
             </button>
-            <button class="ctrl-btn" @click="lockScreen" title="锁屏">
-              <el-icon :size="16">
+            <!-- Danmu toggle -->
+            <button class="vp-icon-btn" :class="{ active: danmuEnabled }" @click="toggleDanmu" title="弹幕">
+              <el-icon :size="20">
+                <ChatDotRound />
+              </el-icon>
+            </button>
+            <!-- Lock screen -->
+            <button class="vp-icon-btn" @click="lockScreen" title="锁屏">
+              <el-icon :size="20">
                 <Lock />
               </el-icon>
             </button>
-            <button class="ctrl-btn" @click="togglePiP" title="画中画">
-              <el-icon :size="16">
+            <!-- Picture-in-Picture -->
+            <button class="vp-icon-btn" @click="togglePiP" title="画中画">
+              <el-icon :size="20">
                 <Monitor />
+              </el-icon>
+            </button>
+            <!-- Fullscreen -->
+            <button class="vp-icon-btn" @click="toggleFullscreen" title="全屏">
+              <el-icon :size="20">
+                <FullScreen />
               </el-icon>
             </button>
           </div>
         </div>
 
-        <!-- Bottom bar -->
-        <div class="px-4 py-3 pointer-events-auto vp-bottom-bar" @click.stop>
-          <!-- Progress bar -->
-          <div class="flex items-center gap-3 mb-2">
-            <span class="text-white/80 text-xs w-14 text-right">{{ formattedCurrentTime }}</span>
-            <el-slider v-model="progressPercent" :show-tooltip="false" class="flex-1" @input="onProgressInput"
-              @change="onProgressChange" />
-            <span class="text-white/80 text-xs w-14">{{ formattedDuration }}</span>
+        <!-- Bottom control bar (glass gradient) -->
+        <div class="vp-overlay-bottom px-4 md:px-6 lg:px-8 pb-4 pt-8 pointer-events-auto" @click.stop>
+          <!-- Seek bar -->
+          <div ref="seekBarRef" class="vp-seek-bar group relative w-full mb-3 cursor-pointer"
+            @mousedown="onSeekBarMouseDown" @mousemove="onSeekBarMouseMove" @mouseleave="onSeekBarMouseLeave">
+            <!-- Track background -->
+            <div class="vp-seek-track absolute left-0 right-0">
+              <div class="vp-seek-track-bg absolute left-0 right-0 h-full"></div>
+              <!-- Buffered range -->
+              <div class="vp-seek-buffered absolute left-0 top-0 h-full" :style="{ width: bufferedPercent + '%' }">
+              </div>
+              <!-- Progress fill -->
+              <div class="vp-seek-progress absolute left-0 top-0 h-full" :style="{ width: progressPercent + '%' }">
+              </div>
+            </div>
+            <!-- Thumb -->
+            <div class="vp-seek-thumb absolute" :style="{ left: progressPercent + '%' }">
+            </div>
+            <!-- Hover time tooltip -->
+            <div v-if="showHoverTime" class="vp-seek-tooltip absolute" :style="{ left: hoverPercent + '%' }">
+              {{ getHoverTime }}
+            </div>
           </div>
 
-          <!-- Control buttons -->
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-1">
-              <button v-if="hasPrev" class="ctrl-btn" @click="emit('prev')" title="上一集">
-                <el-icon :size="18">
-                  <Back />
-                </el-icon>
-              </button>
-              <button class="ctrl-btn" @click="skipBackward" :title="`快退${timeStep}秒`">
-                <el-icon :size="16">
+          <!-- Time display -->
+          <div class="flex items-center justify-center mb-2.5 pointer-events-none">
+            <span class="text-xs whitespace-nowrap tabular-nums" style="color: var(--color-text-secondary);">
+              <span style="color: var(--color-text-primary);">{{ formattedCurrentTime }}</span> / {{ formattedDuration
+              }}
+            </span>
+          </div>
+
+          <!-- Controls row -->
+          <div class="flex items-center gap-2">
+            <!-- LEFT SIDE: playback controls -->
+            <div class="flex items-center gap-1 shrink-0">
+              <!-- Skip back -->
+              <button class="vp-control-btn flex items-center justify-center gap-1" @click="skipBackward"
+                :title="`快退${timeStep}秒`">
+                <el-icon :size="20" style="color: var(--color-text-primary);">
                   <RefreshLeft />
                 </el-icon>
+                <span class="vp-control-text">{{ timeStep }}s</span>
               </button>
-              <button class="ctrl-btn play-btn" @click="togglePlay" :title="isPlaying ? '暂停' : '播放'">
-                <el-icon :size="22">
+              <!-- Play/Pause -->
+              <button class="vp-play-btn flex items-center justify-center" @click="togglePlay"
+                :title="isPlaying ? '暂停' : '播放'">
+                <el-icon :size="24" style="color: var(--color-text-primary);">
                   <component :is="isPlaying ? VideoPause : VideoPlay" />
                 </el-icon>
               </button>
-              <button class="ctrl-btn" @click="skipForward" :title="`快进${timeStep}秒`">
-                <el-icon :size="16">
+              <!-- Skip forward -->
+              <button class="vp-control-btn flex items-center justify-center gap-1" @click="skipForward"
+                :title="`快进${timeStep}秒`">
+                <el-icon :size="20" style="color: var(--color-text-primary);">
                   <RefreshRight />
                 </el-icon>
+                <span class="vp-control-text">{{ timeStep }}s</span>
               </button>
-              <button v-if="hasNext" class="ctrl-btn" @click="emit('next')" title="下一集">
-                <el-icon :size="18">
+              <!-- Divider -->
+              <div class="vp-divider mx-1 hidden md:block"></div>
+              <!-- Next Episode -->
+              <button v-if="hasNext" class="vp-control-btn flex items-center justify-center gap-1.5"
+                @click="emit('next')" title="下一集">
+                <el-icon :size="16" style="color: var(--color-text-primary);">
                   <Right />
                 </el-icon>
+                <span class="vp-episode-text">下一集</span>
               </button>
             </div>
 
-            <div class="flex items-center gap-1">
-              <button class="ctrl-btn" @click="toggleMute" :title="isMuted ? '取消静音' : '静音'">
-                <el-icon :size="16">
-                  <component :is="isMuted ? Mute : Microphone" />
-                </el-icon>
-              </button>
+            <!-- Center spacer -->
+            <div class="flex-1"></div>
 
-              <!-- Playback rate dropdown -->
+            <!-- RIGHT SIDE: utility controls -->
+            <div class="flex items-center gap-1 shrink-0">
+              <!-- Volume group (icon + expandable slider) -->
+              <div class="vp-volume-group hidden sm:flex items-center gap-0.5 relative">
+                <button class="vp-icon-btn" @click="toggleMute" :title="isMuted ? '取消静音' : '静音'">
+                  <el-icon :size="20" style="color: var(--color-text-primary);">
+                    <component :is="isMuted ? Mute : Microphone" />
+                  </el-icon>
+                </button>
+                <div class="vp-volume-slider flex items-center w-0 overflow-hidden">
+                  <div ref="volumeSliderRef"
+                    class="vp-volume-track relative w-20 h-full flex items-center cursor-pointer"
+                    @mousedown="onVolumeSliderMouseDown">
+                    <div class="absolute left-0 right-0"
+                      style="height: 3px; background: rgba(255,255,255,0.12); border-radius: 2px;">
+                      <div class="absolute left-0 top-0 h-full"
+                        style="background: var(--color-primary); border-radius: 2px;"
+                        :style="{ width: (isMuted ? 0 : volume * 100) + '%' }"></div>
+                    </div>
+                    <div class="absolute"
+                      style="width: 12px; height: 12px; border-radius: 50%; background: var(--color-text-primary);"
+                      :style="{ left: (isMuted ? 0 : volume * 100) + '%', top: '50%', transform: 'translate(-50%, -50%)' }">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Divider -->
+              <div class="vp-divider mx-0.5 hidden sm:block"></div>
+
+              <!-- Playback speed dropdown -->
               <el-dropdown @command="changeSpeed" trigger="click">
-                <button class="ctrl-btn text-xs">{{ playbackRate }}x</button>
+                <button class="vp-speed-btn flex items-center justify-center" title="播放速度">
+                  {{ playbackRate }}x
+                </button>
                 <template #dropdown>
-                  <el-dropdown-menu>
+                  <el-dropdown-menu class="vp-dropdown-menu">
                     <el-dropdown-item v-for="s in [0.5, 0.75, 1, 1.25, 1.5, 2, 3]" :key="s" :command="s">{{ s
                       }}x</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
 
-              <!-- Time step dropdown -->
-              <el-dropdown @command="setTimeStep" trigger="click">
-                <button class="ctrl-btn text-xs">{{ timeStep }}s</button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item v-for="s in [5, 10, 15, 20, 25, 30]" :key="s" :command="s">{{ s
-                      }}s</el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
+              <!-- Danmu settings -->
+              <button class="vp-icon-btn" :class="{ active: showDanmuSettings }"
+                @click="showDanmuSettings = !showDanmuSettings" title="弹幕设置">
+                <el-icon :size="20">
+                  <Setting />
+                </el-icon>
+              </button>
+
+              <!-- Subtitle ON/OFF toggle -->
+              <button class="vp-icon-btn" :class="{ active: subtitleEnabled }" @click="toggleSubtitle" title="字幕">
+                <el-icon :size="20">
+                  <Document />
+                </el-icon>
+              </button>
 
               <!-- More options dropdown -->
               <el-dropdown trigger="click">
-                <button class="ctrl-btn" title="更多">
-                  <el-icon :size="16">
+                <button class="vp-icon-btn" title="更多">
+                  <el-icon :size="20">
                     <MoreFilled />
                   </el-icon>
                 </button>
                 <template #dropdown>
-                  <el-dropdown-menu>
+                  <el-dropdown-menu class="vp-dropdown-menu">
                     <el-dropdown-item @click="toggleSkipIntro">
                       <span :style="{ color: skipIntro > 0 ? 'var(--color-primary)' : '' }">片头跳过 {{ skipIntro > 0 ?
                         skipIntro + 's' : '关' }}</span>
@@ -1607,9 +1838,20 @@ defineExpose({
                       <el-dropdown @command="changeAspectRatio" trigger="hover" placement="left-start">
                         <span>画面比例</span>
                         <template #dropdown>
-                          <el-dropdown-menu>
+                          <el-dropdown-menu class="vp-dropdown-menu">
                             <el-dropdown-item v-for="r in aspectRatios" :key="r.value" :command="r.value">{{ r.label
                               }}</el-dropdown-item>
+                          </el-dropdown-menu>
+                        </template>
+                      </el-dropdown>
+                    </el-dropdown-item>
+                    <el-dropdown-item divided>
+                      <el-dropdown @command="setTimeStep" trigger="hover" placement="left-start">
+                        <span>快进/快退步长</span>
+                        <template #dropdown>
+                          <el-dropdown-menu class="vp-dropdown-menu">
+                            <el-dropdown-item v-for="s in [5, 10, 15, 20, 25, 30]" :key="s" :command="s">{{ s
+                              }}s</el-dropdown-item>
                           </el-dropdown-menu>
                         </template>
                       </el-dropdown>
@@ -1618,16 +1860,16 @@ defineExpose({
                 </template>
               </el-dropdown>
 
-              <!-- 应用全屏按钮 -->
-              <button class="ctrl-btn" @click="toggleAppFullscreen" :title="isAppFullscreen ? '退出应用全屏' : '应用全屏'">
-                <el-icon :size="16">
+              <!-- App fullscreen button -->
+              <button class="vp-icon-btn" @click="toggleAppFullscreen" :title="isAppFullscreen ? '退出应用全屏' : '应用全屏'">
+                <el-icon :size="20">
                   <Rank />
                 </el-icon>
               </button>
 
-              <!-- 全屏按钮 -->
-              <button class="ctrl-btn" @click="toggleFullscreen" :title="isFullscreen ? '退出全屏' : '全屏'">
-                <el-icon :size="16">
+              <!-- Fullscreen -->
+              <button class="vp-icon-btn" @click="toggleFullscreen" :title="isFullscreen ? '退出全屏' : '全屏'">
+                <el-icon :size="20">
                   <FullScreen />
                 </el-icon>
               </button>
@@ -1637,31 +1879,31 @@ defineExpose({
       </div>
 
       <!-- Danmu settings panel -->
-      <div v-if="showDanmuSettings" class="absolute top-12 right-2 p-3 rounded-lg z-20 w-56 space-y-2 text-sm"
-        style="background: rgba(0,0,0,0.85); backdrop-filter: blur(8px); color: #fff">
+      <div v-if="showDanmuSettings && showControls && !screenLocked"
+        class="vp-danmu-panel absolute p-3 rounded-lg z-40 w-56 space-y-2 text-sm">
         <div class="flex justify-between items-center">
-          <span>弹幕开关</span>
+          <span style="color: var(--color-text-primary);">弹幕开关</span>
           <el-switch v-model="danmuEnabled" size="small" @change="onDanmuToggle" />
         </div>
         <div>
-          <span>速度</span>
+          <span style="color: var(--color-text-secondary);">速度</span>
           <el-slider v-model="danmuSpeedIndex" :min="0" :max="3" :step="1"
             :format-tooltip="(v: number) => danmuSpeedOptions[v].label" @change="onDanmuSpeedChange" />
         </div>
         <div>
-          <span>透明度 {{ danmuOpacity }}%</span>
+          <span style="color: var(--color-text-secondary);">透明度 {{ danmuOpacity }}%</span>
           <el-slider v-model="danmuOpacity" :min="10" :max="100" :step="10" @change="onDanmuOpacityChange" />
         </div>
         <div class="flex justify-between items-center">
-          <span>行数</span>
+          <span style="color: var(--color-text-secondary);">行数</span>
           <div class="flex items-center gap-1">
             <el-button size="small" @click="adjustDanmuLines(-1)">-</el-button>
-            <span class="w-6 text-center">{{ danmuLines }}</span>
+            <span class="w-6 text-center" style="color: var(--color-text-primary);">{{ danmuLines }}</span>
             <el-button size="small" @click="adjustDanmuLines(1)">+</el-button>
           </div>
         </div>
         <div class="flex justify-between items-center">
-          <span>颜色</span>
+          <span style="color: var(--color-text-secondary);">颜色</span>
           <el-select v-model="danmuColorMode" size="small" style="width:80px">
             <el-option label="默认" value="default" />
             <el-option label="随机" value="random" />
@@ -1672,17 +1914,14 @@ defineExpose({
 
       <!-- Long press speed indicator -->
       <div v-if="longPressActive"
-        class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white text-4xl font-bold pointer-events-none z-20">
-        {{ playbackRate }}x <el-icon :size="32">
-          <DArrowRight />
-        </el-icon>
-      </div>
-
-      <!-- Buffering / seeking indicator -->
-      <div v-if="isBuffering && !longPressActive"
-        class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-20 flex flex-col items-center gap-2">
-        <div class="w-12 h-12 rounded-full border-4 border-white/30 border-t-white animate-spin"></div>
-        <span class="text-white text-sm bg-black/60 px-2 py-1 rounded">缓冲中…</span>
+        class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none z-20">
+        <div class="flex items-center gap-2 px-4 py-2 rounded-lg"
+          style="background: var(--color-bg-glass-heavy); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border: var(--glass-border);">
+          <el-icon :size="20" style="color: var(--color-primary);">
+            <DArrowRight />
+          </el-icon>
+          <span class="text-sm font-medium" style="color: var(--color-text-primary);">{{ playbackRate }}x 快进</span>
+        </div>
       </div>
     </div>
   </Teleport>
@@ -1700,56 +1939,354 @@ defineExpose({
   border-radius: 0;
 }
 
-/* Glass morphism control bars per design */
-.vp-top-bar {
-  background: linear-gradient(
-    to bottom,
-    var(--color-bg-glass-heavy),
-    transparent
-  );
+/* ===== Top Bar ===== */
+.vp-overlay-top {
+  height: 56px;
+  background: linear-gradient(180deg, var(--color-bg-glass-heavy) 0%, transparent 100%);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
+  transition: opacity var(--duration-slow, 400ms) var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
 }
 
-.vp-bottom-bar {
-  background: linear-gradient(
-    to top,
-    var(--color-bg-glass-heavy),
-    transparent
-  );
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-}
-
-.ctrl-btn {
-  background: transparent;
-  border: none;
-  color: white;
-  padding: 6px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background var(--transition-fast) var(--ease-out-expo),
-    color var(--transition-fast) var(--ease-out-expo);
+/* ===== Icon Button ===== */
+.vp-icon-btn {
+  width: 36px;
+  height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 150ms ease;
 }
 
-.ctrl-btn:hover {
-  background: var(--color-bg-glass);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+.vp-icon-btn:hover {
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.06);
 }
 
-.ctrl-btn.active {
+.vp-icon-btn:active {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.vp-icon-btn.active {
+  color: var(--color-primary);
+}
+
+/* ===== Episode Button ===== */
+.vp-episode-btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.vp-episode-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.vp-episode-btn:active {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.vp-episode-text {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  display: none;
+}
+
+@media (min-width: 640px) {
+  .vp-episode-text {
+    display: inline;
+  }
+}
+
+/* ===== Title ===== */
+.vp-title {
+  max-width: 400px;
+  color: var(--color-text-primary);
+  font-family: var(--font-display, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+}
+
+/* ===== Bottom Control Bar ===== */
+.vp-overlay-bottom {
+  background: linear-gradient(0deg, var(--color-bg-glass-heavy) 0%, transparent 100%);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  transition: opacity var(--duration-slow, 400ms) var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+/* ===== Seek Bar ===== */
+.vp-seek-bar {
+  height: 20px;
+  display: flex;
+  align-items: center;
+}
+
+.vp-seek-track {
+  height: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-radius: 2px;
+}
+
+.vp-seek-track-bg {
+  height: 100%;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+}
+
+.vp-seek-buffered {
+  height: 100%;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+}
+
+.vp-seek-progress {
+  height: 100%;
   background: var(--color-primary);
-  color: var(--color-bg-base);
+  border-radius: 2px;
 }
 
-.play-btn {
+.vp-seek-thumb {
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  box-shadow: 0 0 10px var(--color-primary-glow), 0 0 20px rgba(232, 145, 58, 0.25);
+  opacity: 0;
+  transition: opacity 150ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.vp-seek-bar:hover .vp-seek-thumb {
+  opacity: 1;
+}
+
+.vp-seek-bar:active .vp-seek-thumb {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1.2);
+}
+
+.vp-seek-tooltip {
+  top: -24px;
+  transform: translateX(-50%);
+  background: var(--color-bg-glass-heavy);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+  border: var(--glass-border);
+}
+
+/* ===== Control Buttons ===== */
+.vp-control-btn {
   padding: 8px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: all 150ms ease;
 }
 
+.vp-control-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.vp-control-btn:active {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.vp-control-text {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  display: none;
+}
+
+@media (min-width: 768px) {
+  .vp-control-text {
+    display: inline;
+  }
+}
+
+.vp-play-btn {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.vp-play-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.vp-play-btn:active {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* ===== Divider ===== */
+.vp-divider {
+  width: 1px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+/* ===== Speed Button ===== */
+.vp-speed-btn {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 150ms ease;
+}
+
+.vp-speed-btn:hover {
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ===== Volume Slider ===== */
+.vp-volume-group:hover .vp-volume-slider {
+  width: 80px;
+}
+
+.vp-volume-slider {
+  height: 20px;
+  transition: width 250ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+/* ===== Center Play Button ===== */
+.vp-center-play {
+  width: 72px;
+  height: 72px;
+  background: var(--color-bg-glass);
+  backdrop-filter: var(--glass-blur-heavy);
+  -webkit-backdrop-filter: var(--glass-blur-heavy);
+  border: var(--glass-border);
+  transition: transform 250ms ease;
+  cursor: pointer;
+}
+
+.vp-center-play:hover {
+  transform: scale(1.08);
+}
+
+.vp-center-play:active {
+  transform: scale(0.95);
+}
+
+/* ===== Locked Overlay ===== */
+.vp-locked-overlay {
+  z-index: 35;
+}
+
+.vp-locked-btn {
+  width: 56px;
+  height: 56px;
+  background: var(--color-bg-glass);
+  backdrop-filter: var(--glass-blur-heavy);
+  -webkit-backdrop-filter: var(--glass-blur-heavy);
+  border: var(--glass-border);
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.vp-locked-btn:hover {
+  background: var(--color-bg-glass-light);
+  transform: scale(1.05);
+}
+
+/* ===== Buffering Spinner ===== */
+.vp-buffering-spinner {
+  width: 40px;
+  height: 40px;
+  border: 2.5px solid rgba(255, 255, 255, 0.1);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: vp-spin 0.8s linear infinite;
+}
+
+@keyframes vp-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ===== OSD Info ===== */
+.vp-osd-info {
+  top: 64px;
+  left: 16px;
+}
+
+@media (min-width: 768px) {
+  .vp-osd-info {
+    left: 24px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .vp-osd-info {
+    left: 32px;
+  }
+}
+
+/* ===== Time Display ===== */
+.vp-time-display {
+  top: 64px;
+  right: 16px;
+}
+
+@media (min-width: 768px) {
+  .vp-time-display {
+    right: 24px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .vp-time-display {
+    right: 32px;
+  }
+}
+
+/* ===== Danmu Panel ===== */
+.vp-danmu-panel {
+  top: 48px;
+  right: 8px;
+  background: var(--color-bg-elevated);
+  backdrop-filter: var(--glass-blur-heavy);
+  -webkit-backdrop-filter: var(--glass-blur-heavy);
+  border: var(--glass-border);
+  box-shadow: var(--surface-floating-shadow);
+}
+
+.vp-dropdown-menu {
+  background: var(--color-bg-elevated) !important;
+  border: 1px solid var(--color-border) !important;
+}
+
+/* ===== Danmu Scroll Animation ===== */
 @keyframes danmu-scroll {
   from {
     transform: translateX(0);
@@ -1757,6 +2294,20 @@ defineExpose({
 
   to {
     transform: translateX(calc(-100% - 100vw));
+  }
+}
+
+/* ===== Reduced Motion ===== */
+@media (prefers-reduced-motion: reduce) {
+
+  .vp-center-play,
+  .vp-overlay-top,
+  .vp-overlay-bottom,
+  .vp-seek-thumb,
+  .vp-buffering-spinner,
+  .vp-volume-slider {
+    transition: none !important;
+    animation: none !important;
   }
 }
 </style>
