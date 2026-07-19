@@ -3100,6 +3100,12 @@ export class JarLoader {
     ext: string,
     jarUrl: string = '',
   ): Promise<boolean> {
+    // Clear stale error from previous getSpider/getJar calls so the IPC
+    // handler doesn't return a misleading "Tried candidates: ..." message
+    // for a completely different spider. Every return false path below
+    // sets this.lastError before returning.
+    this.lastError = '';
+
     if (!this.java) {
       this.lastError = 'java-bridge not available';
       console.error('[JarLoader]', this.lastError);
@@ -3186,6 +3192,9 @@ export class JarLoader {
         guardOk = await this.loadGuardSpiderJar();
       }
       if (!guardOk) {
+        this.lastError =
+          'Guard spider JAR (wexguard-spider-enjarify.jar) failed to load. Check that the file exists and is readable.';
+        console.error('[JarLoader]', this.lastError);
         return false;
       }
     } else {
