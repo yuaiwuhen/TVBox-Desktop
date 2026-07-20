@@ -20,6 +20,7 @@ import { fileURLToPath } from 'url';
 import { exec as execCb, execFile as execFileCb } from 'child_process';
 import { promisify } from 'util';
 import { DexConverter, dexConverter } from './DexConverter';
+import { GuardDecryptor, type DecryptProgress } from './GuardDecryptor';
 // Top-level imports instead of dynamic require() — vite bundles dynamic
 // require('./QuarkPanService') as createRequire(import.meta.url) which points
 // at dist-electron/main.js, where ./QuarkPanService doesn't exist as a file
@@ -110,6 +111,7 @@ export class JarLoader {
   // Guard spider classes. Guard spider getSpider()/callSpiderMethod() must
   // switch to THIS classloader so importClass resolves NewWogg/NewZhiZhen/etc.
   private guardClassLoader: any = null;
+  private guardDecryptor: GuardDecryptor | null = null;
   private jarCacheDir: string;
   private java: JavaBridge | null = null;
   private recentJarKey: string = 'main';
@@ -461,6 +463,95 @@ export class JarLoader {
    * Verify if libLoadNiMa.so was downloaded by InitOrigin.init(),
    * and if not, manually download it from the newgo.txt URLs.
    */
+  /**
+   * Check if Guard JAR needs re-decryption (NetEase JAR updated or cache missing)
+   */
+  private async shouldRedecryptGuardJar(): Promise<boolean> {
+    const decryptedJarPath = path.join(
+      this.jarCacheDir,
+      'wexguard',
+      'wexguard-decrypted.jar',
+    );
+    const versionFile = path.join(this.jarCacheDir, 'wexguard', 'version.json');
+
+    // No decrypted JAR exists
+    if (!fs.existsSync(decryptedJarPath)) {
+      console.log('[JarLoader] No decrypted Guard JAR found, need to decrypt');
+      return true;
+    }
+
+    // No version info, can't verify
+    if (!fs.existsSync(versionFile)) {
+      console.log('[JarLoader] No version info found, re-decrypting');
+      return true;
+    }
+
+    try {
+      // Find NetEase JAR
+      const neteaseJarPath = await this.findNetEaseJar();
+      if (!neteaseJarPath) {
+        console.warn(
+          '[JarLoader] NetEase JAR not found, skipping re-decryption',
+        );
+        return false;
+      }
+
+      // Compare MD5
+      const versionInfo = JSON.parse(fs.readFileSync(versionFile, 'utf8'));
+      const neteaseBuffer = fs.readFileSync(neteaseJarPath);
+      const currentMd5 = crypto
+        .createHash('md5')
+        .update(neteaseBuffer)
+        .digest('hex');
+
+      if (versionInfo.neteaseJarMd5 !== currentMd5) {
+        console.log('[JarLoader] NetEase JAR updated, need to re-decrypt');
+        return true;
+      }
+
+      return false;
+    } catch (e: any) {
+      console.warn('[JarLoader] Failed to check version:', e.message);
+      return false; // Don't force re-decryption on error
+    }
+  }
+
+  /**
+   * Find NetEase JAR path from loaded config
+   */
+  private async findNetEaseJar(): Promise<string | null> {
+    // Look for NetEase JAR in jar_cache
+    const neteaseJarPattern = /bd630429.*\.jar$/;
+    const jarCacheFiles = fs.existsSync(this.jarCacheDir)
+      ? fs.readdirSync(this.jarCacheDir)
+      : [];
+
+    for (const file of jarCacheFiles) {
+      if (neteaseJarPattern.test(file)) {
+        return path.join(this.jarCacheDir, file);
+      }
+    }
+
+    // Look for converted JAR
+    for (const file of jarCacheFiles) {
+      if (file.endsWith('_converted.jar')) {
+        // Check if this is NetEase JAR by reading metadata
+        const metadataFile = file.replace('_converted.jar', '.json');
+        const metadataPath = path.join(this.jarCacheDir, metadataFile);
+        if (fs.existsSync(metadataPath)) {
+          try {
+            const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+            if (metadata.url && metadata.url.includes('bd630429')) {
+              return path.join(this.jarCacheDir, file);
+            }
+          } catch {}
+        }
+      }
+    }
+
+    return null;
+  }
+
   private async verifyAndDownloadLibLoadNiMa(): Promise<void> {
     try {
       // Get filesDir where InitOrigin downloads libs
@@ -2803,7 +2894,19 @@ export class JarLoader {
       return true;
     }
 
+    // Initialize GuardDecryptor for runtime decryption
+    if (!this.guardDecryptor) {
+      this.guardDecryptor = new GuardDecryptor();
+    }
+
+    // Candidate paths in order of preference:
+    // 1. Runtime decrypted JAR (most up-to-date)
+    // 2. Pre-decrypted JAR in tools/wexguard_work/
+    // 3. Packaged runtime JAR
     const candidatePaths = [
+      // Runtime decrypted JAR (from jar_cache/wexguard/)
+      path.join(this.jarCacheDir, 'wexguard', 'wexguard-decrypted.jar'),
+      // Pre-decrypted JAR (development)
       path.join(
         process.cwd(),
         'tools',
@@ -2822,16 +2925,13 @@ export class JarLoader {
         'wexguard_work',
         'wexguard-spider-enjarify.jar',
       ),
+      // Packaged runtime JAR
       path.join(
         process.resourcesPath || '',
         'tools',
         'wexguard_work',
         'wexguard-spider-enjarify.jar',
       ),
-      // Packaged flat path: extraResources copies tools/runtime/* to
-      // resources/tools/* (no wexguard_work/ subdir). The runtime JAR
-      // is renamed to wexguard-spider-enjarify.jar (without -final suffix)
-      // to match this lookup.
       path.join(
         process.resourcesPath || '',
         'tools',
@@ -2839,7 +2939,64 @@ export class JarLoader {
       ),
     ];
 
-    const jarPath = candidatePaths.find((p) => fs.existsSync(p));
+    let jarPath = candidatePaths.find((p) => fs.existsSync(p));
+
+    // If no JAR found or NetEase JAR updated, try runtime decryption
+    if (!jarPath || (await this.shouldRedecryptGuardJar())) {
+      console.log('[JarLoader] Attempting runtime Guard JAR decryption...');
+
+      // Find NetEase JAR path
+      const neteaseJarPath = await this.findNetEaseJar();
+      if (neteaseJarPath) {
+        try {
+          // Report progress to UI
+          this.progressCallback?.(
+            'decrypt',
+            'Decrypting Guard spider classes...',
+            0,
+          );
+
+          jarPath = await this.guardDecryptor.decrypt(
+            neteaseJarPath,
+            this.jarCacheDir,
+            (progress: DecryptProgress) => {
+              console.log(
+                `[GuardDecryptor] ${progress.stage}: ${progress.message}`,
+              );
+              this.progressCallback?.(
+                'decrypt',
+                progress.message,
+                progress.percent || 0,
+              );
+            },
+          );
+
+          this.progressCallback?.('decrypt', 'Guard spider JAR decrypted', 100);
+          console.log('[JarLoader] Runtime decryption successful:', jarPath);
+        } catch (decryptErr: any) {
+          console.error(
+            '[JarLoader] Runtime decryption failed:',
+            decryptErr.message,
+          );
+          this.progressCallback?.(
+            'error',
+            `Decryption failed: ${decryptErr.message}`,
+            0,
+          );
+          // Fall through to use pre-decrypted JAR if available
+        }
+      } else {
+        console.warn(
+          '[JarLoader] NetEase JAR not found for runtime decryption',
+        );
+      }
+    }
+
+    // Fallback to pre-decrypted JAR if runtime decryption failed
+    if (!jarPath) {
+      jarPath = candidatePaths.slice(1).find((p) => fs.existsSync(p)); // Skip runtime decrypted path
+    }
+
     if (!jarPath) {
       this.lastError =
         'wexguard-spider-enjarify.jar not found. Run unidbg decryption + enjarify + ASM patcher first.';
