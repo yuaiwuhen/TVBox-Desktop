@@ -165,30 +165,77 @@ export class DexConverter {
     const libDir = path.join(this.toolsDir, 'dex-tools-v2.4', 'lib');
     const cmd = `"${javaExe}" -Xms512m -Xmx2048m -cp "${libDir}/*" com.googlecode.dex2jar.tools.Dex2jarCmd "${dexPath}" -o "${jarPath}"`;
 
-    try {
-      console.log('[DexConverter] Running:', cmd);
-      const output = await this.execCommand(cmd);
-      console.log('[DexConverter] Conversion output:', output);
-
-      // Verify output exists and is non-trivial in size
+    // Retry conversion up to 3 times. The dex2jar process occasionally exits
+    // cleanly without producing output (transient Windows file-lock / antivirus
+    // interference during JVM startup or DEX parsing). Empirically, a second
+    // or third attempt succeeds. Without retry, the first spider of a fresh
+    // config fails permanently with "JAR file not created after conversion"
+    // even though subsequent spiders using the same JAR convert fine.
+    const maxAttempts = 3;
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Clean up any partial / empty output from a previous attempt so
+      // execCommand starts from a clean slate.
       if (fs.existsSync(jarPath)) {
-        const stats = fs.statSync(jarPath);
-        console.log('[DexConverter] Converted JAR size:', stats.size, 'bytes');
-        // An empty ZIP is 22 bytes (just End of Central Directory record).
-        // If the output is too small, the conversion silently failed.
-        if (stats.size < MIN_VALID_JAR_SIZE) {
-          throw new Error(
+        try {
+          fs.unlinkSync(jarPath);
+        } catch {
+          /* ignore — will be overwritten by dex2jar */
+        }
+      }
+
+      try {
+        console.log(
+          `[DexConverter] Running (attempt ${attempt}/${maxAttempts}):`,
+          cmd,
+        );
+        const output = await this.execCommand(cmd);
+        console.log(
+          `[DexConverter] Conversion output (attempt ${attempt}):`,
+          output,
+        );
+
+        if (fs.existsSync(jarPath)) {
+          const stats = fs.statSync(jarPath);
+          console.log(
+            '[DexConverter] Converted JAR size:',
+            stats.size,
+            'bytes',
+          );
+          if (stats.size >= MIN_VALID_JAR_SIZE) {
+            return jarPath;
+          }
+          lastError = new Error(
             `Conversion produced an empty or too-small JAR (${stats.size} bytes). The DEX file may be corrupted or in an unsupported format.`,
           );
+        } else {
+          lastError = new Error('JAR file not created after conversion');
         }
-        return jarPath;
-      } else {
-        throw new Error('JAR file not created after conversion');
+      } catch (e: any) {
+        console.error(
+          `[DexConverter] Conversion command failed (attempt ${attempt}):`,
+          e.message,
+        );
+        lastError = e;
       }
-    } catch (e: any) {
-      console.error('[DexConverter] Conversion failed:', e);
-      throw e;
+
+      if (attempt < maxAttempts) {
+        const delayMs = 1000 * attempt; // 1s, 2s
+        console.log(
+          `[DexConverter] Conversion failed, retrying in ${delayMs}ms...`,
+        );
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
     }
+
+    console.error(
+      `[DexConverter] Conversion failed after ${maxAttempts} attempts:`,
+      lastError?.message,
+    );
+    throw (
+      lastError ||
+      new Error(`JAR file not created after ${maxAttempts} conversion attempts`)
+    );
   }
 
   /**
