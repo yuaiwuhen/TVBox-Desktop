@@ -174,20 +174,31 @@
 
     </div>
 
-    <!-- Loading state -->
-    <div v-if="store.searchLoading" class="flex-1 flex flex-col items-center justify-center" style="color: var(--color-text-tertiary)">
-      <el-icon class="is-loading text-5xl mb-4"><Loading /></el-icon>
-      <p>正在搜索 {{ selectedSiteKeys.length }} 个源...</p>
+    <!-- Streaming progress indicator (shown while searching AND results are coming in) -->
+    <div
+      v-if="store.searchLoading"
+      class="flex items-center justify-center gap-2 py-3 text-xs"
+      style="color: var(--color-text-tertiary)"
+    >
+      <el-icon class="is-loading"><Loading /></el-icon>
+      <span>正在搜索 {{ selectedSiteKeys.length }} 个源… 已收到 {{ store.searchResults.length }} 个源结果</span>
     </div>
 
-    <!-- Empty state -->
-    <div v-else-if="hasSearched && store.searchResults.length === 0" class="flex-1 flex flex-col items-center justify-center" style="color: var(--color-text-tertiary)">
+    <!-- Empty state (only after search fully completes with no results) -->
+    <div
+      v-if="!store.searchLoading && hasSearched && store.searchResults.length === 0"
+      class="flex-1 flex flex-col items-center justify-center"
+      style="color: var(--color-text-tertiary)"
+    >
       <el-icon class="text-5xl mb-4"><Search /></el-icon>
       <p>未找到结果</p>
     </div>
 
-    <!-- Results -->
-    <div v-else class="flex-1 overflow-auto px-6 pb-8">
+    <!-- Results (streaming: show even while searchLoading if any results arrived) -->
+    <div
+      v-if="store.searchResults.length > 0"
+      class="flex-1 overflow-auto px-6 pb-8"
+    >
       <div style="max-width: var(--content-max-width, 960px); margin: 0 auto">
 
         <!-- Fast search mode with sidebar filter -->
@@ -407,7 +418,12 @@ async function doSearch() {
   filteredSiteKey.value = ''
   initChecked()
   addSearchHistory(keyword.value.trim())
-  await store.doSearch(keyword.value.trim(), selectedSiteKeys.value)
+  // quick flag mirrors Android: getQuickSearch (true) vs getSearch (false).
+  await store.doSearch(
+    keyword.value.trim(),
+    selectedSiteKeys.value,
+    fastSearchMode.value,
+  )
 }
 
 function goToDetail(siteKey: string, vod: Movie) {

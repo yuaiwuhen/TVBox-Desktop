@@ -70,6 +70,13 @@ export const useAppStore = defineStore('app', () => {
   );
   const wallpaper = ref('');
 
+  // ===== Multi-Config (多仓) =====
+  const subConfigs = ref<Array<{ name: string; url: string }>>([]);
+  const activeSubConfigIndex = ref(-1);
+  const mergeSubConfigs = ref(
+    localStorage.getItem('tvbox_merge_subconfigs') === 'true',
+  ); // 多仓合并开关
+
   // ===== Home =====
   const classes = ref<MovieSort[]>([]);
   const filters = ref<Record<string, FilterGroup[]>>({});
@@ -157,6 +164,9 @@ export const useAppStore = defineStore('app', () => {
     );
   });
 
+  // 多仓模式判断
+  const isMultiConfig = computed(() => subConfigs.value.length > 0);
+
   // ===== Config Actions =====
   function setConfigUrl(url: string) {
     configUrl.value = url;
@@ -164,10 +174,26 @@ export const useAppStore = defineStore('app', () => {
     saveToFile();
   }
 
-  async function loadConfig(): Promise<boolean> {
-    if (!configUrl.value) return false;
+  // 多仓相关方法
+  function setSubConfigs(configs: Array<{ name: string; url: string }>) {
+    subConfigs.value = configs;
+    activeSubConfigIndex.value = -1;
+  }
+
+  function clearSubConfigs() {
+    subConfigs.value = [];
+    activeSubConfigIndex.value = -1;
+  }
+
+  async function loadSubConfig(index: number): Promise<boolean> {
+    if (index < 0 || index >= subConfigs.value.length) return false;
+    const sub = subConfigs.value[index];
+    const savedUrl = configUrl.value;
     try {
-      await configParser.load(configUrl.value);
+      await configParser.load(sub.url);
+      configUrl.value = sub.url;
+      activeSubConfigIndex.value = index;
+
       sites.value = configParser.getSites().filter((s) => s.hide !== 1);
       parses.value = configParser.getParses();
       wallpaper.value = configParser.getWallpaper();
@@ -178,13 +204,13 @@ export const useAppStore = defineStore('app', () => {
         '';
       epgUrl.value = localStorage.getItem('tvbox_epg_url') || '';
 
-      // Pass the spider base URL to SpiderEngine for resolving api key names
+      // Set config URL FIRST so setSpiderBaseUrl can resolve relative
+      // spider URLs (e.g. "./jar/fan.txt;md5;hash") against it.
+      spiderEngine.setConfigUrl(sub.url);
       const spiderBase = configParser.getSpider();
       if (spiderBase) {
         spiderEngine.setSpiderBaseUrl(spiderBase);
       }
-      // Pass config URL as fallback base URL for resolving relative paths
-      spiderEngine.setConfigUrl(configUrl.value);
 
       if (
         !activeSiteKey.value ||
@@ -192,6 +218,144 @@ export const useAppStore = defineStore('app', () => {
       ) {
         if (sites.value.length > 0) setActiveSite(getUniqueKey(sites.value[0]));
       }
+
+      return true;
+    } catch (e) {
+      console.error(`loadSubConfig failed for ${sub.name}:`, e);
+      configUrl.value = savedUrl;
+      return false;
+    }
+  }
+
+  // 设置多仓合并开关
+  function setMergeSubConfigs(merge: boolean) {
+    const wasMerged = mergeSubConfigs.value;
+    mergeSubConfigs.value = merge;
+    localStorage.setItem('tvbox_merge_subconfigs', String(merge));
+    saveToFile();
+
+    // 只有在状态真正改变且有多仓配置时才执行
+    if (wasMerged !== merge && subConfigs.value.length > 0) {
+      if (merge) {
+        // 切换到合并模式：合并所有子配置
+        mergeAllSubConfigs();
+      } else {
+        // 切换到非合并模式：加载第一个子配置
+        if (activeSubConfigIndex.value < 0) {
+          loadSubConfig(0);
+        } else {
+          loadSubConfig(activeSubConfigIndex.value);
+        }
+      }
+    }
+  }
+
+  // 合并所有子配置的站点
+  async function mergeAllSubConfigs() {
+    if (subConfigs.value.length === 0) return;
+
+    const allSites: SourceBean[] = [];
+    const allParses: ParseBean[] = [];
+
+    for (let i = 0; i < subConfigs.value.length; i++) {
+      const sub = subConfigs.value[i];
+      try {
+        const savedUrl = configUrl.value;
+        configUrl.value = sub.url;
+        await configParser.load(sub.url);
+        const subSites = configParser.getSites().filter((s) => s.hide !== 1);
+        // 为每个站点添加前缀以区分来源
+        subSites.forEach((site) => {
+          allSites.push({
+            ...site,
+            key: `${sub.name}__${site.key}`,
+            name: `${sub.name}/${site.name}`,
+          });
+        });
+        const subParses = configParser.getParses();
+        subParses.forEach((parse) => {
+          allParses.push({
+            ...parse,
+            name: `${sub.name}/${parse.name}`,
+          });
+        });
+        configUrl.value = savedUrl;
+      } catch (e) {
+        console.error(
+          `[mergeAllSubConfigs] Failed to load sub config ${sub.name}:`,
+          e,
+        );
+      }
+    }
+
+    sites.value = allSites;
+    parses.value = allParses;
+
+    // 设置默认源
+    if (
+      allSites.length > 0 &&
+      !sites.value.find((s) => getUniqueKey(s) === activeSiteKey.value)
+    ) {
+      setActiveSite(getUniqueKey(allSites[0]));
+    }
+  }
+
+  async function loadConfig(): Promise<boolean> {
+    if (!configUrl.value) return false;
+    try {
+      await configParser.load(configUrl.value);
+      const config = configParser.config;
+
+      // 检查是否是多仓模式
+      if (
+        config &&
+        (config as any).isMultiConfig &&
+        Array.isArray((config as any).subConfigs)
+      ) {
+        setSubConfigs((config as any).subConfigs);
+
+        // 根据合并开关决定行为
+        if (mergeSubConfigs.value) {
+          // 合并所有子配置
+          await mergeAllSubConfigs();
+        } else {
+          // 未合并时，自动加载第一个子配置
+          if (subConfigs.value.length > 0) {
+            await loadSubConfig(0);
+          } else {
+            sites.value = [];
+          }
+        }
+        return true;
+      }
+
+      // 单仓模式：加载站点
+      sites.value = configParser.getSites().filter((s) => s.hide !== 1);
+      parses.value = configParser.getParses();
+      wallpaper.value = configParser.getWallpaper();
+      liveGroups.value = configParser.getLiveChannelGroups();
+      liveUrl.value =
+        localStorage.getItem('tvbox_live_url') ||
+        configParser.getConfigLiveUrl() ||
+        '';
+      epgUrl.value = localStorage.getItem('tvbox_epg_url') || '';
+
+      // Set config URL FIRST so setSpiderBaseUrl can resolve relative
+      // spider URLs (e.g. "./jar/fan.txt;md5;hash") against it.
+      spiderEngine.setConfigUrl(configUrl.value);
+      const spiderBase = configParser.getSpider();
+      if (spiderBase) {
+        spiderEngine.setSpiderBaseUrl(spiderBase);
+      }
+
+      if (
+        !activeSiteKey.value ||
+        !sites.value.find((s) => getUniqueKey(s) === activeSiteKey.value)
+      ) {
+        if (sites.value.length > 0) setActiveSite(getUniqueKey(sites.value[0]));
+      }
+
+      clearSubConfigs();
       return true;
     } catch (e) {
       console.error('loadConfig failed:', e);
@@ -961,11 +1125,19 @@ export const useAppStore = defineStore('app', () => {
     return null;
   }
 
-  async function doSearch(keyword: string, siteKeys?: string[]) {
+  // Mirrors Android's SearchActivity.searchResult(): concurrent search across
+  // selected sites, with results streamed into searchResults as each site
+  // returns (Android uses EventBus + addData; we just push into the ref).
+  // quick flag maps to Android's getSearch (false) vs getQuickSearch (true).
+  async function doSearch(
+    keyword: string,
+    siteKeys?: string[],
+    quick: boolean = false,
+  ) {
     searchLoading.value = true;
     searchResults.value = [];
     console.log(
-      `[Store] doSearch: keyword=${keyword}, siteKeys=${siteKeys?.join(',') || 'all'}`,
+      `[Store] doSearch: keyword=${keyword}, siteKeys=${siteKeys?.join(',') || 'all'}, quick=${quick}`,
     );
     try {
       const targets =
@@ -977,45 +1149,65 @@ export const useAppStore = defineStore('app', () => {
 
       console.log(`[Store] doSearch: searching across ${targets.length} sites`);
 
-      const promises = targets.map(async (site) => {
+      // Android uses newFixedThreadPool(5); cap concurrent in-flight searches
+      // to avoid hammering all sources simultaneously.
+      const CONCURRENCY = 5;
+      let cursor = 0;
+      let completed = 0;
+      const total = targets.length;
+
+      async function runOne(site: any): Promise<void> {
         try {
           const spider = await spiderEngine.getSpider(site);
           if (!spider) {
             console.warn(`[Store] doSearch: spider is null for ${site.name}`);
-            return null;
+            return;
           }
-          const rawResult = await spider.searchContent(keyword, true);
-          let parsedRaw: any;
-          try {
-            parsedRaw = JSON.parse(rawResult);
-          } catch {
-            parsedRaw = rawResult;
-          }
-          console.log(`[Store] doSearch: ${site.name} raw result:`, parsedRaw);
-          const result = JSON.parse(rawResult);
+          const rawResult = await spider.searchContent(keyword, quick);
+          const result = JSON.parse(rawResult || '{}');
           const list = result.list || [];
           console.log(
             `[Store] doSearch: ${site.name} found ${list.length} results`,
           );
-          return {
-            siteKey: getUniqueKey(site),
-            siteName: site.name,
-            list,
-          };
+          if (list.length > 0) {
+            // Stream result into searchResults immediately (mirrors Android
+            // searchAdapter.addData on EventBus event).
+            searchResults.value = [
+              ...searchResults.value,
+              {
+                siteKey: getUniqueKey(site),
+                siteName: site.name,
+                list,
+              },
+            ];
+          }
         } catch (e) {
           console.error(`[Store] doSearch: ${site.name} failed:`, e);
-          return null;
+        } finally {
+          completed++;
+          console.log(`[Store] doSearch: progress ${completed}/${total}`);
+          if (completed >= total) {
+            console.log(
+              `[Store] doSearch: completed, sites with results=${searchResults.value.length}`,
+            );
+          }
         }
-      });
+      }
 
-      const results = await Promise.all(promises);
-      const validResults = results.filter(
-        (r) => r && r.list.length > 0,
-      ) as typeof searchResults.value;
-      searchResults.value = validResults;
-      console.log(
-        `[Store] doSearch: completed, total sites with results=${validResults.length}`,
-      );
+      // Simple N-at-a-time scheduler to emulate Executors.newFixedThreadPool(5).
+      async function scheduleNext(): Promise<void> {
+        if (cursor >= total) return;
+        const idx = cursor++;
+        const site = targets[idx];
+        await runOne(site);
+        await scheduleNext();
+      }
+
+      const workers: Promise<void>[] = [];
+      for (let i = 0; i < Math.min(CONCURRENCY, total); i++) {
+        workers.push(scheduleNext());
+      }
+      await Promise.all(workers);
     } catch (e) {
       console.error('doSearch failed:', e);
     } finally {
@@ -1081,6 +1273,13 @@ export const useAppStore = defineStore('app', () => {
     parses,
     defaultParseName,
     wallpaper,
+    // 多仓
+    subConfigs,
+    activeSubConfigIndex,
+    mergeSubConfigs,
+    isMultiConfig,
+    setMergeSubConfigs,
+    mergeAllSubConfigs,
     classes,
     filters,
     homeVodList,
@@ -1120,6 +1319,9 @@ export const useAppStore = defineStore('app', () => {
     loadConfig,
     setActiveSite,
     setDefaultParse,
+    setSubConfigs,
+    clearSubConfigs,
+    loadSubConfig,
     loadHome,
     setCategory,
     setFilter,
