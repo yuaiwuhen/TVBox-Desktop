@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia';
+import { defineStore, acceptHMRUpdate } from 'pinia';
 import { ref, computed } from 'vue';
 import { configParser } from '../core/ConfigParser';
 import { spiderEngine } from '../core/SpiderEngine';
@@ -1347,3 +1347,10 @@ export const useAppStore = defineStore('app', () => {
     resetHome,
   };
 });
+
+// Enable HMR for Pinia setup stores. Without this, edits to actions like
+// doSearch / loadHome are not picked up by vite-plugin-electron's HMR — the
+// renderer keeps calling the old action implementation until a full reload.
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useAppStore, import.meta.hot));
+}
