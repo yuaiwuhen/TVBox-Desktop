@@ -2906,6 +2906,13 @@ export class JarLoader {
     const candidatePaths = [
       // Runtime decrypted JAR (from jar_cache/wexguard/)
       path.join(this.jarCacheDir, 'wexguard', 'wexguard-decrypted.jar'),
+      // Test script decrypted JAR (tools/guard_decrypt_work/)
+      path.join(
+        process.cwd(),
+        'tools',
+        'guard_decrypt_work',
+        'wexguard-decrypted.jar',
+      ),
       // Pre-decrypted JAR (development)
       path.join(
         process.cwd(),
