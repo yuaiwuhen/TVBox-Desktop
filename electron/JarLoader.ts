@@ -1254,6 +1254,11 @@ export class JarLoader {
       // work (default JCE only supports PKCS5Padding).
       this.registerBouncyCastle(java);
 
+      // Set Environment.getExternalStorageDirectory() to jar_cache/native_libs
+      // so that native libraries (libdecjni.so, libLoadNiMa.so, etc.) are
+      // downloaded to a predictable location.
+      this.setupEnvironmentStorage(java);
+
       return java;
     } catch (e: any) {
       console.error('[JarLoader] Failed to load java-bridge:', e.message || e);
@@ -1281,6 +1286,36 @@ export class JarLoader {
       }
 
       return null;
+    }
+  }
+
+  /**
+   * Set up Environment.getExternalStorageDirectory() to return a predictable
+   * directory (jar_cache/native_libs) instead of system temp directory.
+   * This ensures native libraries downloaded by InitOrigin.init() or merge
+   * classes are in a consistent location.
+   */
+  private setupEnvironmentStorage(java: JavaBridge): void {
+    try {
+      const nativeLibDir = path.join(this.jarCacheDir, 'native_libs');
+      if (!fs.existsSync(nativeLibDir)) {
+        fs.mkdirSync(nativeLibDir, { recursive: true });
+      }
+
+      const Environment = java.importClass('android.os.Environment');
+      const File = java.importClass('java.io.File');
+      const storageDir = new File(nativeLibDir);
+
+      Environment.setExternalStorageDirectory(storageDir);
+      console.log(
+        '[JarLoader] Set Environment.getExternalStorageDirectory to:',
+        nativeLibDir,
+      );
+    } catch (e: any) {
+      console.warn(
+        '[JarLoader] Failed to set Environment.getExternalStorageDirectory:',
+        e.message,
+      );
     }
   }
 
