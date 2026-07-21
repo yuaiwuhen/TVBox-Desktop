@@ -171,3 +171,6 @@ export function registerDockerIPC(): void {
 
   console.log('[DockerIPC] Registered all Docker IPC handlers');
 }
+
+// Export dockerManager for use in main.ts
+export { dockerManager };
