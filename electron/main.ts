@@ -14,7 +14,7 @@ import https from 'https';
 import http from 'http';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-// import { registerJarLoaderIPC, jarLoader } from './JarLoader'; // Removed: migrated to Docker
+import { registerJarLoaderIPC, jarLoader } from './JarLoader';
 import { QuarkPanService } from './QuarkPanService';
 import { UCPanService } from './UCPanService';
 import { AliyunPanService } from './AliyunPanService';
@@ -682,8 +682,8 @@ app.whenReady().then(async () => {
     ],
   });
 
-  // Register Docker IPC handlers
-  // registerJarLoaderIPC(); // Removed: migrated to Docker
+  // Register JarLoader IPC handlers
+  registerJarLoaderIPC();
   QuarkPanService.init();
   UCPanService.init();
   AliyunPanService.init();
