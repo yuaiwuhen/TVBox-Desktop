@@ -1,22 +1,18 @@
 # 基于redroid-headless镜像
-FROM redroid/redroid:15.0.0_64only-latest
+# 使用国内镜像加速
+FROM docker.m.daocloud.io/redroid/redroid:15.0.0_64only-latest
 
 # 设置环境变量
 ENV ANDROID_HOME=/system \
-    SPIDER_SERVER_PORT=9978
+    SPIDER_SERVER_PORT=9978 \
+    REDROID_GPU_MODE=guest
 
-# 创建工作目录
-RUN mkdir -p /data/app /jars /logs
+# 暴露端口
+EXPOSE 9978
 
-# 复制Android应用APK（需要先编译）
-# COPY app/build/outputs/apk/debug/spider-server-debug.apk /data/app/
+# 数据卷
+VOLUME ["/data"]
 
-# 复制启动脚本
-COPY start-server.sh /start-server.sh
-RUN chmod +x /start-server.sh
-
-# 暴露HTTP API端口
-EXPOSE 9978 5555
-
-# 启动服务
-CMD ["/start-server.sh"]
+# 启动命令（redroid默认会启动Android系统）
+# Spider服务需要在Android启动后手动安装和启动
+# 或者通过adb命令远程安装

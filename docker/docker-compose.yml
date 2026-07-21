@@ -1,30 +1,36 @@
-version: '3.8'
-
+# Docker Compose配置
+# 用于管理Spider服务容器
 services:
   spider-server:
+    # 构建配置
     build:
       context: .
       dockerfile: Dockerfile
     image: tvbox-spider-server:latest
+    
+    # 容器名称
     container_name: tvbox-spider
+    
+    # 特权模式（redroid需要）
     privileged: true
+    
+    # 端口映射
     ports:
-      - '9978:9978' # HTTP API端口
-      - '5555:5555' # ADB端口（可选，用于调试）
+      - "9978:9978"
+    
+    # 数据卷
     volumes:
-      - ./data:/data # 持久化数据
-      - ./jars:/jars # JAR文件目录
+      - spider-data:/data
+    
+    # 环境变量
     environment:
       - REDROID_PROP_ro.debuggable=1
-      - REDROID_PROP_service.adb.tcp.port=5555
-      - ANDROIDBOOT_REDROID_WIDTH=1080
-      - ANDROIDBOOT_REDROID_HEIGHT=1920
-      - ANDROIDBOOT_REDROID_DPI=480
       - ANDROIDBOOT_REDROID_GPU_MODE=guest
+    
+    # 重启策略
     restart: unless-stopped
-    networks:
-      - spider-network
 
-networks:
-  spider-network:
-    driver: bridge
+# 数据卷定义
+volumes:
+  spider-data:
+    driver: local
