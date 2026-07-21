@@ -66,7 +66,6 @@ feimao_*.log
 fatcat/*.txt
 
 # Debug scripts (temporary development files)
-scripts/
 dev/
 *.error.zip
 commit_msg.txt
