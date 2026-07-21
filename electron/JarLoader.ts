@@ -70,3 +70,4 @@ export function registerJarLoaderIPC(): void {
   );
   // No-op
 }
+
