@@ -2,37 +2,124 @@
   <div class="h-full overflow-y-auto" style="background:var(--color-bg-base)">
     <div class="max-w-3xl mx-auto px-5 pt-6 pb-10 flex flex-col gap-5">
 
-      <el-form label-position="top">
-
-        <!-- Section 1: 配置源 -->
-        <section class="settings-card">
+      <!-- SECTION 1: 配置源 -->
+      <section class="settings-card">
         <div class="flex items-center gap-2.5 mb-4">
           <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
             <el-icon :size="16" style="color: var(--color-primary)"><Link /></el-icon>
           </div>
           <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">配置源</h2>
         </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">配置地址</span>
-          <div class="flex w-full gap-2">
+        <div class="flex gap-2.5">
+          <div class="flex-1 min-w-0">
             <el-input
               v-model="inputUrl"
-              placeholder="请输入 http:// 或 https:// 开头的配置链接"
+              placeholder="输入配置订阅地址"
               clearable
-            >
-              <template #prefix>
-                <el-icon><Link /></el-icon>
-              </template>
-            </el-input>
-            <el-button type="primary" :loading="configLoading" @click="loadConfig">
-              加载
+              class="settings-input"
+            />
+          </div>
+          <el-button type="primary" :loading="configLoading" @click="loadConfig" class="shrink-0">加载</el-button>
+          <el-dropdown trigger="click" class="shrink-0">
+            <el-button class="flex items-center gap-1.5">
+              <span>历史</span>
+              <el-icon class="w-3.5 h-3.5"><ArrowDown /></el-icon>
             </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item v-for="url in configUrlHistory" :key="url" @click="selectHistoryUrl(url)">
+                  {{ url.length > 40 ? url.substring(0, 40) + '...' : url }}
+                </el-dropdown-item>
+                <el-dropdown-item v-if="configUrlHistory.length === 0" disabled>暂无历史记录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
+
+        <!-- 多仓配置选择器 -->
+        <div v-if="store.subConfigs.length > 0" class="mt-4">
+          <!-- 配置切换 + 合并所有 在同一行 -->
+          <div class="flex items-center gap-3 mb-3">
+            <el-select
+              v-model="activeSubConfigUrl"
+              placeholder="选择配置"
+              class="flex-1"
+              @change="onSubConfigChange"
+              :disabled="mergeSubConfigsValue"
+            >
+              <el-option
+                v-for="sub in store.subConfigs"
+                :key="sub.url"
+                :label="sub.name"
+                :value="sub.url"
+              />
+            </el-select>
+            <div class="flex items-center gap-2 shrink-0">
+              <span class="text-[13px]" style="color: var(--color-text-tertiary)">合并所有</span>
+              <el-switch v-model="mergeSubConfigsValue" @change="onMergeSubConfigsChange" />
+            </div>
+          </div>
+
+          <!-- 源列表（标签形式）- 显示时不隐藏上面的配置选择器 -->
+          <div v-if="store.sites.length > 0">
+            <div
+              class="flex items-center justify-between cursor-pointer mb-2"
+              @click="sourceListCollapsed = !sourceListCollapsed"
+            >
+              <span class="text-[13px]" style="color: var(--color-text-secondary)">源列表 ({{ store.sites.length }}个)</span>
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                style="color: var(--color-text-secondary); transition: transform 0.2s"
+                :style="{ transform: sourceListCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)' }"
+              >
+                <path d="M6 9l6 6 6-6"/>
+              </svg>
+            </div>
+            <div v-show="!sourceListCollapsed" class="flex flex-wrap gap-2">
+              <el-tag
+                v-for="site in store.sites"
+                :key="site.key"
+                :type="site.key === store.activeSiteKey ? 'primary' : 'info'"
+                :effect="site.key === store.activeSiteKey ? 'dark' : 'plain'"
+                class="cursor-pointer"
+                @click="store.setActiveSite(site.key)"
+              >
+                {{ site.name }}
+              </el-tag>
+            </div>
           </div>
         </div>
 
-        <div v-if="store.sites.length > 0" class="mb-4">
-          <p class="text-sm mb-2" style="color:var(--color-text-secondary)">已加载源 (点击切换当前源)：</p>
-          <div class="flex flex-wrap gap-2">
+        <!-- 单仓模式源列表 -->
+        <div v-if="store.sites.length > 0 && store.subConfigs.length === 0" class="mt-4">
+          <div
+            class="flex items-center justify-between cursor-pointer mb-2"
+            @click="sourceListCollapsed = !sourceListCollapsed"
+          >
+            <span class="text-[13px]" style="color: var(--color-text-secondary)">源列表 ({{ store.sites.length }}个)</span>
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              style="color: var(--color-text-secondary); transition: transform 0.2s"
+              :style="{ transform: sourceListCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)' }"
+            >
+              <path d="M6 9l6 6 6-6"/>
+            </svg>
+          </div>
+          <div v-show="!sourceListCollapsed" class="flex flex-wrap gap-2">
             <el-tag
               v-for="site in store.sites"
               :key="site.key"
@@ -45,153 +132,134 @@
             </el-tag>
           </div>
         </div>
+      </section>
 
-        </section>
-
-        <!-- Section 2: 解析设置 -->
-        <section class="settings-card">
-        <div class="flex items-center gap-2.5 mb-4">
-          <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
-            <el-icon :size="16" style="color: var(--color-primary)"><MagicStick /></el-icon>
-          </div>
-          <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">解析设置</h2>
-        </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">默认解析</span>
-          <el-select v-model="parseName" placeholder="选择默认解析" @change="onParseChange">
-            <el-option
-              v-for="p in store.parses"
-              :key="p.name"
-              :label="p.name"
-              :value="p.name"
-            />
-          </el-select>
-        </div>
-
-        <div v-if="store.parses.length > 0" class="mb-4">
-          <p class="text-sm" style="color:var(--color-text-tertiary)">已加载 {{ store.parses.length }} 个解析器</p>
-        </div>
-
-        </section>
-
-        <!-- Section 3: 播放设置 -->
-        <section class="settings-card">
+      <!-- SECTION 2: 播放设置 -->
+      <section class="settings-card">
         <div class="flex items-center gap-2.5 mb-4">
           <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
             <el-icon :size="16" style="color: var(--color-primary)"><VideoPlay /></el-icon>
           </div>
           <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">播放设置</h2>
         </div>
-        <div class="flex items-center justify-between">
-          <span class="text-[13px]" style="color:var(--color-text-primary)">自动播放下一集</span>
-          <el-switch v-model="autoPlayNext" @change="onAutoPlayNextChange" />
-        </div>
-
-        <div class="flex items-center justify-between">
-          <span class="text-[13px]" style="color:var(--color-text-primary)">屏显信息</span>
-          <el-switch v-model="screenDisplayValue" @change="onScreenDisplayChange" />
-        </div>
-
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">外部播放器路径</span>
-          <div class="flex gap-2 items-center">
-            <el-input
-              v-model="vlcPathValue"
-              placeholder="如: C:\Program Files\VideoLAN\VLC\vlc.exe"
-              clearable
-              @change="onVlcPathChange"
-              class="flex-1"
-            />
-            <el-button @click="selectVlcPath" size="small">浏览</el-button>
+        <div class="flex flex-col gap-4">
+          <!-- Toggle: Auto play next -->
+          <div class="flex items-center justify-between">
+            <span class="text-[13px]" style="color: var(--color-text-secondary)">自动播放下一集</span>
+            <el-switch v-model="autoPlayNext" @change="onAutoPlayNextChange" />
           </div>
-          <div class="text-xs mt-1" style="color:var(--color-text-tertiary)">
-            用于播放不支持网页格式的视频（如MKV）
+          <!-- Toggle: Show info -->
+          <div class="flex items-center justify-between">
+            <span class="text-[13px]" style="color: var(--color-text-secondary)">播放时显示信息</span>
+            <el-switch v-model="screenDisplayValue" @change="onScreenDisplayChange" />
+          </div>
+          <!-- External player path -->
+          <div>
+            <label class="block text-[13px] mb-2" style="color: var(--color-text-secondary)">外部播放器路径</label>
+            <div class="flex gap-2.5 items-center">
+              <el-input
+                v-model="vlcPathValue"
+                placeholder="例如: C:\Program Files\VLC\vlc.exe"
+                clearable
+                @change="onVlcPathChange"
+                class="flex-1"
+              />
+              <el-button @click="selectVlcPath" size="default">浏览</el-button>
+            </div>
           </div>
         </div>
+      </section>
 
-        </section>
-
-        <!-- Section: 字幕设置 -->
-        <section class="settings-card">
+      <!-- SECTION 3: 字幕设置 -->
+      <section class="settings-card">
         <div class="flex items-center gap-2.5 mb-4">
           <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
             <el-icon :size="16" style="color: var(--color-primary)"><ChatLineSquare /></el-icon>
           </div>
           <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">字幕设置</h2>
         </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">字幕字号</span>
-          <el-slider v-model="subtitleSizeValue" :min="12" :max="48" :step="2" show-input @change="onSubtitleSizeChange" />
+        <div class="flex flex-col gap-5">
+          <!-- Font size slider -->
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-[13px]" style="color: var(--color-text-secondary)">字体大小</span>
+              <span class="text-[13px] tabular-nums font-medium" style="color: var(--color-text-primary)">{{ subtitleSizeValue }}px</span>
+            </div>
+            <el-slider v-model="subtitleSizeValue" :min="12" :max="48" :step="2" @change="onSubtitleSizeChange" />
+          </div>
+          <!-- Color picker -->
+          <div>
+            <span class="block text-[13px] mb-3" style="color: var(--color-text-secondary)">字幕颜色</span>
+            <div class="flex items-center gap-3">
+              <button
+                v-for="c in subtitleColorPresets"
+                :key="c"
+                class="settings-color-dot"
+                :class="{ active: subtitleColorValue === c }"
+                :style="{ background: c }"
+                @click="onSubtitleColorChange(c)"
+              />
+              <el-color-picker v-model="subtitleColorValue" @change="onSubtitleColorChange" />
+            </div>
+          </div>
+          <!-- Delay slider -->
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-[13px]" style="color: var(--color-text-secondary)">延迟调整</span>
+              <span class="text-[13px] tabular-nums font-medium" style="color: var(--color-text-primary)">{{ subtitleDelayValue.toFixed(1) }}s</span>
+            </div>
+            <el-slider v-model="subtitleDelayValue" :min="-5" :max="5" :step="0.1" @change="onSubtitleDelayChange" />
+          </div>
         </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">字幕颜色</span>
-          <el-color-picker v-model="subtitleColorValue" @change="onSubtitleColorChange" />
-        </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">字幕延迟 (秒)</span>
-          <el-slider v-model="subtitleDelayValue" :min="-5" :max="5" :step="0.1" show-input @change="onSubtitleDelayChange" />
-        </div>
+      </section>
 
-        </section>
-
-        <!-- Section: 弹幕设置 -->
-        <section class="settings-card">
+      <!-- SECTION 4: 弹幕设置 -->
+      <section class="settings-card">
         <div class="flex items-center gap-2.5 mb-4">
           <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
             <el-icon :size="16" style="color: var(--color-primary)"><ChatDotRound /></el-icon>
           </div>
           <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">弹幕设置</h2>
         </div>
-        <div class="flex items-center justify-between">
-          <span class="text-[13px]" style="color:var(--color-text-primary)">弹幕默认开启</span>
-          <el-switch v-model="danmuEnabledValue" @change="onDanmuEnabledChange" />
+        <div class="flex flex-col gap-5">
+          <!-- Toggle: Default on/off -->
+          <div class="flex items-center justify-between">
+            <span class="text-[13px]" style="color: var(--color-text-secondary)">默认开启弹幕</span>
+            <el-switch v-model="danmuEnabledValue" @change="onDanmuEnabledChange" />
+          </div>
+          <!-- Density slider -->
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-[13px]" style="color: var(--color-text-secondary)">弹幕密度</span>
+              <span class="text-[13px] tabular-nums font-medium" style="color: var(--color-text-primary)">{{ danmuDensityLabel }}</span>
+            </div>
+            <el-slider v-model="danmuDensityValue" :min="1" :max="3" :step="1" @change="onDanmuDensityChange" />
+          </div>
         </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">弹幕同屏数量</span>
-          <el-slider v-model="danmuMaxValue" :min="5" :max="50" :step="5" show-input @change="onDanmuMaxChange" />
-        </div>
+      </section>
 
-        </section>
-
-        <!-- Section 4: 直播设置 -->
-        <section class="settings-card">
+      <!-- SECTION 5: 直播设置 -->
+      <section class="settings-card">
         <div class="flex items-center gap-2.5 mb-4">
           <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
             <el-icon :size="16" style="color: var(--color-primary)"><Monitor /></el-icon>
           </div>
           <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">直播设置</h2>
         </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">直播地址</span>
-          <el-input v-model="liveUrlInput" placeholder="直播源地址" clearable @change="onLiveUrlChange" />
-        </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">EPG 地址</span>
-          <el-input v-model="epgUrlInput" placeholder="EPG 节目单地址" clearable @change="onEpgUrlChange" />
-        </div>
-
-        </section>
-
-        <!-- Section 5: 搜索设置 -->
-        <section class="settings-card">
-        <div class="flex items-center gap-2.5 mb-4">
-          <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
-            <el-icon :size="16" style="color: var(--color-primary)"><Search /></el-icon>
+        <div class="flex flex-col gap-4">
+          <div>
+            <label class="block text-[13px] mb-2" style="color: var(--color-text-secondary)">直播源地址</label>
+            <el-input v-model="liveUrlInput" placeholder="输入直播源订阅地址" clearable @change="onLiveUrlChange" />
           </div>
-          <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">搜索设置</h2>
+          <div>
+            <label class="block text-[13px] mb-2" style="color: var(--color-text-secondary)">EPG节目单地址</label>
+            <el-input v-model="epgUrlInput" placeholder="输入EPG节目单地址" clearable @change="onEpgUrlChange" />
+          </div>
         </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">搜索视图模式</span>
-          <el-radio-group v-model="searchViewModeValue" @change="onSearchViewModeChange">
-            <el-radio-button :value="0">列表</el-radio-button>
-            <el-radio-button :value="1">缩略图</el-radio-button>
-          </el-radio-group>
-        </div>
+      </section>
 
-        </section>
-
-        <!-- Section 6: 网络设置 -->
-        <section class="settings-card">
+      <!-- SECTION 6: 网络设置 -->
+      <section class="settings-card">
         <div class="flex items-center gap-2.5 mb-4">
           <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
             <el-icon :size="16" style="color: var(--color-primary)"><Connection /></el-icon>
@@ -199,376 +267,250 @@
           <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">网络设置</h2>
         </div>
         <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">DoH (DNS over HTTPS)</span>
-          <el-select v-model="dohValue" @change="onDohChange">
-            <el-option v-for="item in dohOptions" :key="item.value" :label="item.label" :value="item.value" />
-          </el-select>
-        </div>
-
-        </section>
-
-        <!-- Section 7: 数据管理 -->
-        <section class="settings-card">
-        <div class="flex items-center gap-2.5 mb-4">
-          <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
-            <el-icon :size="16" style="color: var(--color-primary)"><Coin /></el-icon>
+          <span class="block text-[13px] mb-3" style="color: var(--color-text-secondary)">DNS over HTTPS 提供商</span>
+          <div class="flex flex-wrap gap-2">
+            <label
+              v-for="item in dohOptions"
+              :key="item.value"
+              class="settings-radio"
+              :class="{ active: dohValue === item.value }"
+            >
+              <input type="radio" name="doh" :value="item.value" :checked="dohValue === item.value" @change="onDohChange(item.value)" />
+              <span class="radio-label">{{ item.label }}</span>
+            </label>
           </div>
-          <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">数据管理</h2>
         </div>
-        <div class="flex items-center justify-between">
-          <span class="text-[13px]" style="color:var(--color-text-primary)">历史记录</span>
-          <el-button type="danger" @click="clearHistory">清除历史记录</el-button>
-        </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">配置地址历史</span>
-          <el-select v-model="inputUrl" placeholder="选择历史配置地址" @change="onHistoryUrlSelect" filterable allow-create>
-            <el-option v-for="url in configUrlHistory" :key="url" :label="url" :value="url" />
-          </el-select>
-        </div>
+      </section>
 
-        </section>
-
-        <!-- Section: 主题设置 -->
-        <section class="settings-card">
+      <!-- SECTION 7: 主题设置 -->
+      <section class="settings-card">
         <div class="flex items-center gap-2.5 mb-4">
           <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
             <el-icon :size="16" style="color: var(--color-primary)"><Brush /></el-icon>
           </div>
           <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">主题设置</h2>
         </div>
-
-        <div class="mb-5">
-          <span class="block text-[13px] mb-3" style="color:var(--color-text-primary)">主题模式</span>
-          <div class="grid grid-cols-2 gap-3">
-            <div
-              class="theme-mode-card"
-              :class="{ active: theme.mode === 'dark' }"
-              @click="theme.setMode('dark')"
-            >
-              <el-icon><Moon /></el-icon>
-              <span>深色</span>
-            </div>
-            <div
-              class="theme-mode-card"
-              :class="{ active: theme.mode === 'light' }"
-              @click="theme.setMode('light')"
-            >
-              <el-icon><Sunny /></el-icon>
-              <span>浅色</span>
-            </div>
-            <div
-              class="theme-mode-card"
-              :class="{ active: theme.mode === 'system' }"
-              @click="theme.setMode('system')"
-            >
-              <el-icon><Monitor /></el-icon>
-              <span>跟随系统</span>
-            </div>
-            <div
-              class="theme-mode-card"
-              :class="{ active: theme.mode === 'custom' }"
-              @click="theme.setMode('custom')"
-            >
-              <el-icon><Brush /></el-icon>
-              <span>自定义</span>
-            </div>
+        <div class="flex flex-col gap-5">
+          <!-- Dark/Light mode toggle -->
+          <div class="flex items-center justify-between">
+            <span class="text-[13px]" style="color: var(--color-text-secondary)">深色模式</span>
+            <el-switch v-model="darkModeValue" @change="onDarkModeChange" />
           </div>
-        </div>
-
-        <div v-if="theme.mode === 'custom'" class="custom-theme-section">
-          <div class="mb-5">
-            <span class="block text-[13px] mb-3" style="color:var(--color-text-primary)">主题色</span>
-            <div class="flex gap-3 items-center flex-wrap">
-              <el-color-picker v-model="localPrimaryColor" @change="onPrimaryColorChange" />
+          <!-- Color swatches -->
+          <div>
+            <span class="block text-[13px] mb-3" style="color: var(--color-text-secondary)">主题色</span>
+            <div class="flex items-center gap-3 flex-wrap">
+              <button
+                v-for="c in presetColors"
+                :key="c"
+                class="settings-swatch"
+                :class="{ active: localPrimaryColor === c }"
+                :style="{ background: c }"
+                @click="onPrimaryColorChange(c)"
+              />
               <el-input
                 v-model="localPrimaryColorHex"
                 class="hex-input"
                 placeholder="#RRGGBB"
-                @input="onPrimaryColorHexInput"
                 @change="onPrimaryColorHexChange"
               />
-              <div class="flex gap-1.5 flex-wrap">
-                <button
-                  v-for="c in presetColors"
-                  :key="c"
-                  class="preset-swatch"
-                  :style="{ background: c }"
-                  :class="{ active: localPrimaryColor === c }"
-                  @click="onPrimaryColorChange(c)"
-                />
-              </div>
             </div>
           </div>
-
-          <div class="mb-5">
-            <span class="block text-[13px] mb-3" style="color:var(--color-text-primary)">背景选择</span>
-            <el-radio-group v-model="bgTab" size="default" @change="onBgTabChange">
+          <!-- Background settings -->
+          <div>
+            <label class="block text-[13px] mb-2" style="color: var(--color-text-secondary)">背景设置</label>
+            <el-radio-group v-model="bgTab" size="default" @change="onBgTabChange" class="mb-3">
               <el-radio-button value="color">背景色</el-radio-button>
-              <el-radio-button value="image">背景图</el-radio-button>
+              <el-radio-button value="image">背景图片</el-radio-button>
             </el-radio-group>
 
-            <div v-if="bgTab === 'color'" class="mt-3">
-              <div class="flex gap-3 items-center">
-                <el-color-picker v-model="localBgColor" @change="onBgColorChange" />
-                <el-input
-                  v-model="localBgColorHex"
-                  class="hex-input"
-                  placeholder="#RRGGBB"
-                  @input="onBgColorHexInput"
-                  @change="onBgColorHexChange"
-                />
-              </div>
+            <div v-if="bgTab === 'color'" class="flex gap-3 items-center">
+              <el-color-picker v-model="localBgColor" @change="onBgColorChange" />
+              <el-input
+                v-model="localBgColorHex"
+                class="hex-input"
+                placeholder="#RRGGBB"
+                @change="onBgColorHexChange"
+              />
             </div>
 
-            <div v-else class="mt-3">
-              <div class="flex w-full gap-2">
-                <el-input
-                  v-model="localBgImage"
-                  placeholder="输入图片URL或上传本地图片"
-                  clearable
-                  @change="onBgImageChange"
-                >
-                  <template #prefix>
-                    <el-icon><Picture /></el-icon>
-                  </template>
-                </el-input>
-                <el-button @click="selectBgImage" size="small">浏览</el-button>
-                <el-button v-if="localBgImage" @click="clearBgImage" size="small" type="danger" plain>
-                  清除
-                </el-button>
-              </div>
-
-              <div v-if="localBgImage" class="mt-3">
-                <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">背景透明度</span>
-                <el-slider
-                  v-model="localBgOpacity"
-                  :min="0.02"
-                  :max="0.5"
-                  :step="0.01"
-                  show-input
-                  @change="onBgOpacityChange"
-                />
-              </div>
+            <div v-else class="flex gap-2.5">
+              <el-input
+                v-model="localBgImage"
+                placeholder="输入背景图片URL"
+                clearable
+                @change="onBgImageChange"
+                class="flex-1"
+              />
+              <el-button @click="clearBgImage" plain>
+                <el-icon><Close /></el-icon>
+                <span class="ml-1">清除</span>
+              </el-button>
             </div>
           </div>
-
-          <div v-if="bgTab === 'color'">
-            <span class="block text-[13px] mb-3" style="color:var(--color-text-primary)">基础模式</span>
-            <el-radio-group v-model="localCustomBase" size="default" @change="onCustomBaseChange">
-              <el-radio-button value="dark">深色</el-radio-button>
-              <el-radio-button value="light">浅色</el-radio-button>
-            </el-radio-group>
-            <div class="text-xs mt-2" style="color:var(--color-text-tertiary)">
-              选择文字和元素的对比模式，根据背景色深浅调整
+          <!-- Opacity slider -->
+          <div v-if="bgTab === 'image' && localBgImage">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-[13px]" style="color: var(--color-text-secondary)">透明度</span>
+              <span class="text-[13px] tabular-nums font-medium" style="color: var(--color-text-primary)">{{ Math.round(localBgOpacity * 100) }}%</span>
             </div>
+            <el-slider v-model="localBgOpacity" :min="0.02" :max="1" :step="0.01" @change="onBgOpacityChange" />
           </div>
         </div>
+      </section>
 
-        </section>
-
-        <!-- Section: WebDAV 备份 -->
-        <section class="settings-card">
+      <!-- SECTION 8: 数据管理 -->
+      <section class="settings-card">
         <div class="flex items-center gap-2.5 mb-4">
           <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
-            <el-icon :size="16" style="color: var(--color-primary)"><Upload /></el-icon>
+            <el-icon :size="16" style="color: var(--color-primary)"><Coin /></el-icon>
           </div>
-          <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">WebDAV 备份</h2>
+          <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">数据管理</h2>
         </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">WebDAV 地址</span>
-          <el-input v-model="webdavUrl" placeholder="https://dav.example.com/path" clearable />
-        </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">用户名</span>
-          <el-input v-model="webdavUser" placeholder="WebDAV 用户名" clearable />
-        </div>
-        <div>
-          <span class="block text-[13px] mb-2" style="color:var(--color-text-primary)">密码</span>
-          <el-input v-model="webdavPass" type="password" placeholder="WebDAV 密码" show-password />
-        </div>
-        <div class="flex gap-2">
-          <el-button @click="webdavBackup" :loading="webdavLoading">备份到 WebDAV</el-button>
-          <el-button @click="webdavRestore" :loading="webdavLoading">从 WebDAV 恢复</el-button>
-          <el-button @click="webdavTest" :loading="webdavLoading">测试连接</el-button>
-        </div>
+        <div class="flex flex-col gap-3">
+          <div class="flex items-center justify-between py-2">
+            <div>
+              <span class="block text-[13px]" style="color: var(--color-text-secondary)">清除播放历史</span>
+              <span class="block text-[11px] mt-0.5" style="color: var(--color-text-tertiary)">将删除所有观看记录</span>
+            </div>
+            <el-button type="danger" plain @click="clearHistory">清除历史</el-button>
+          </div>
+          <div style="border-top: 1px solid var(--color-border)"></div>
+          <div class="flex items-center justify-between py-2">
+            <div>
+              <span class="block text-[13px]" style="color: var(--color-text-secondary)">清除全部配置</span>
+              <span class="block text-[11px] mt-0.5" style="color: var(--color-text-tertiary)">恢复为默认设置</span>
+            </div>
+            <el-button type="danger" plain @click="clearAllConfig">清除配置</el-button>
+          </div>
 
-        </section>
+          <!-- WebDAV 备份/恢复 -->
+          <div style="border-top: 1px solid var(--color-border)" class="mt-2"></div>
+          <div class="pt-2">
+            <span class="block text-[13px] mb-3" style="color: var(--color-text-secondary)">WebDAV 备份</span>
+            <div class="flex flex-col gap-3">
+              <el-input v-model="webdavUrl" placeholder="WebDAV 地址" clearable />
+              <div class="flex gap-2">
+                <el-input v-model="webdavUser" placeholder="用户名" clearable class="flex-1" />
+                <el-input v-model="webdavPass" type="password" placeholder="密码" show-password class="flex-1" />
+              </div>
+              <div class="flex gap-2">
+                <el-button @click="webdavBackup" :loading="webdavLoading">备份</el-button>
+                <el-button @click="webdavRestore" :loading="webdavLoading">恢复</el-button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
-        <!-- Section 8: 关于 -->
-        <section class="settings-card">
+      <!-- SECTION 9: 关于 -->
+      <section class="settings-card">
         <div class="flex items-center gap-2.5 mb-4">
           <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
             <el-icon :size="16" style="color: var(--color-primary)"><InfoFilled /></el-icon>
           </div>
           <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">关于</h2>
         </div>
-        <div class="text-sm space-y-1" style="color:var(--color-text-secondary)">
-          <p>版本：1.0.0</p>
-          <p>项目地址：<el-link type="primary" href="https://github.com/CatVodTVOfficial/TVBoxOSC" target="_blank">TVBoxOSC</el-link></p>
-          <p>远程控制端口：<el-tag size="small">{{ remotePort }}</el-tag></p>
-          <p>本地代理端口：<el-tag size="small">{{ proxyPort }}</el-tag></p>
+        <div class="flex flex-col gap-3">
+          <div class="flex items-center justify-between">
+            <span class="text-[13px]" style="color: var(--color-text-secondary)">应用版本</span>
+            <span class="text-[13px] tabular-nums" style="color: var(--color-text-primary)">1.2.0</span>
+          </div>
+          <div style="border-top: 1px solid var(--color-border)"></div>
+          <div class="flex items-center justify-between">
+            <span class="text-[13px]" style="color: var(--color-text-secondary)">构建版本</span>
+            <span class="text-[13px] tabular-nums" style="color: var(--color-text-tertiary)">{{ buildDate }}</span>
+          </div>
+          <div style="border-top: 1px solid var(--color-border)"></div>
+          <div class="flex items-center gap-4 mt-1">
+            <a href="#" class="flex items-center gap-1.5 transition-colors duration-150" style="color: var(--color-text-tertiary)">
+              <el-icon><Link /></el-icon>
+              <span class="text-[13px]">GitHub</span>
+            </a>
+            <a href="#" class="flex items-center gap-1.5 transition-colors duration-150" style="color: var(--color-text-tertiary)">
+              <el-icon><Document /></el-icon>
+              <span class="text-[13px]">文档</span>
+            </a>
+          </div>
         </div>
-        </section>
+      </section>
 
-      </el-form>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAppStore } from '../store/app'
 import { useThemeStore } from '../stores/theme'
 import { WebDAV } from '../core/WebDAV'
-import { remoteServer } from '../core/RemoteServer'
-import { localProxy } from '../core/LocalProxyServer'
 import { saveToFile } from '../core/ConfigSync'
 
 const store = useAppStore()
 const theme = useThemeStore()
 
+// Config
 const inputUrl = ref('')
 const configLoading = ref(false)
-const parseName = ref('')
+const configUrlHistory = ref<string[]>([])
+const sourceListCollapsed = ref(false)
+
+// Multi-config - 用 computed 直接绑定 store 状态，确保同步
+const activeSubConfigUrl = computed(() => {
+  if (store.activeSubConfigIndex >= 0 && store.subConfigs[store.activeSubConfigIndex]) {
+    return store.subConfigs[store.activeSubConfigIndex].url
+  }
+  return ''
+})
+const mergeSubConfigsValue = computed({
+  get: () => store.mergeSubConfigs,
+  set: (val: boolean) => {
+    store.setMergeSubConfigs(val)
+  }
+})
+
+// Playback
 const autoPlayNext = ref(true)
-const vlcPathValue = ref(localStorage.getItem('tvbox_vlc_path') || '')
 const screenDisplayValue = ref(true)
+const vlcPathValue = ref(localStorage.getItem('tvbox_vlc_path') || '')
+
+// Subtitle
+const subtitleSizeValue = ref(24)
+const subtitleColorValue = ref('#f0f0f5')
+const subtitleDelayValue = ref(0)
+const subtitleColorPresets = ['#f0f0f5', '#fbbf24', '#34d399', '#60a5fa', '#f87171']
+
+// Danmaku
+const danmuEnabledValue = ref(false)
+const danmuDensityValue = ref(2)
+const danmuDensityLabel = computed(() => {
+  const labels = ['稀疏', '中等', '密集']
+  return labels[danmuDensityValue.value - 1] || '中等'
+})
+
+// Live
 const liveUrlInput = ref('')
 const epgUrlInput = ref('')
-const searchViewModeValue = ref(1)
+
+// Network
 const dohValue = ref(0)
-const subtitleSizeValue = ref(24)
-const subtitleColorValue = ref('#ffffff')
-const subtitleDelayValue = ref(0)
-const danmuEnabledValue = ref(false)
-const danmuMaxValue = ref(30)
+const dohOptions = [
+  { label: '不使用', value: 0 },
+  { label: '阿里 DNS', value: 1 },
+  { label: 'Google DNS', value: 2 },
+  { label: 'Cloudflare', value: 3 },
+]
 
-const configUrlHistory = ref<string[]>([])
-
-// Theme settings
+// Theme
+const darkModeValue = ref(theme.mode === 'dark')
 const localPrimaryColor = ref(theme.primaryColor)
 const localPrimaryColorHex = ref(theme.primaryColor)
 const localBgColor = ref(theme.bgColor || '')
 const localBgColorHex = ref(theme.bgColor || '')
 const localBgImage = ref(theme.bgImage || '')
 const localBgOpacity = ref(theme.bgOpacity)
-const localCustomBase = ref(theme.customBase)
 const bgTab = ref<'color' | 'image'>(theme.bgColor ? 'color' : 'image')
-
-function normalizeHex(hex: string): string | null {
-  let cleaned = hex.trim().replace('#', '')
-  if (cleaned.length === 3) {
-    cleaned = cleaned[0] + cleaned[0] + cleaned[1] + cleaned[1] + cleaned[2] + cleaned[2]
-  }
-  if (cleaned.length !== 6) return null
-  if (!/^[0-9a-fA-F]{6}$/.test(cleaned)) return null
-  return `#${cleaned.toLowerCase()}`
-}
-
-function onPrimaryColorChange(color: string) {
-  const normalized = normalizeHex(color)
-  if (!normalized) return
-  localPrimaryColor.value = normalized
-  localPrimaryColorHex.value = normalized
-  theme.setPrimaryColor(normalized)
-}
-
-function onPrimaryColorHexInput(val: string) {
-  localPrimaryColorHex.value = val
-}
-
-function onPrimaryColorHexChange(val: string) {
-  const normalized = normalizeHex(val)
-  if (normalized) {
-    localPrimaryColor.value = normalized
-    localPrimaryColorHex.value = normalized
-    theme.setPrimaryColor(normalized)
-  } else {
-    localPrimaryColorHex.value = localPrimaryColor.value
-  }
-}
-
-function onBgColorChange(color: string) {
-  const normalized = normalizeHex(color)
-  if (!normalized) return
-  localBgColor.value = normalized
-  localBgColorHex.value = normalized
-  theme.setBgColor(normalized)
-}
-
-function onBgColorHexInput(val: string) {
-  localBgColorHex.value = val
-}
-
-function onBgColorHexChange(val: string) {
-  const normalized = normalizeHex(val)
-  if (normalized) {
-    localBgColor.value = normalized
-    localBgColorHex.value = normalized
-    theme.setBgColor(normalized)
-  } else {
-    localBgColorHex.value = localBgColor.value || ''
-  }
-}
-
-function onBgTabChange(tab: 'color' | 'image') {
-  bgTab.value = tab
-  if (tab === 'image') {
-    theme.setBgColor(null)
-  } else {
-    theme.setBgImage(null)
-    if (localBgColor.value) {
-      theme.setBgColor(localBgColor.value)
-    }
-  }
-}
-
-function onBgImageChange(url: string) {
-  localBgImage.value = url
-  theme.setBgImage(url || null)
-}
-
-async function selectBgImage() {
-  try {
-    const { ipcRenderer } = window.require('electron')
-    const result = await ipcRenderer.invoke('dialog:openFile', {
-      title: '选择背景图片',
-      filters: [
-        { name: '图片文件', extensions: ['jpg', 'jpeg', 'png', 'webp', 'bmp'] },
-        { name: '所有文件', extensions: ['*'] },
-      ],
-    })
-    if (result && !result.canceled && result.filePaths.length > 0) {
-      localBgImage.value = result.filePaths[0]
-      if (bgTab.value === 'image') {
-        theme.setBgImage(result.filePaths[0])
-      }
-    }
-  } catch {
-    const path = prompt('请输入图片路径:', localBgImage.value)
-    if (path) {
-      localBgImage.value = path
-      if (bgTab.value === 'image') {
-        theme.setBgImage(path)
-      }
-    }
-  }
-}
-
-function clearBgImage() {
-  localBgImage.value = ''
-  theme.setBgImage(null)
-}
-
-function onBgOpacityChange(val: number) {
-  theme.setBgOpacity(val)
-}
-
-function onCustomBaseChange(base: 'dark' | 'light') {
-  localCustomBase.value = base
-  theme.setCustomBase(base)
-}
 
 const presetColors = [
   '#e8913a',
@@ -583,33 +525,46 @@ const presetColors = [
   '#e8e8ed',
 ]
 
-const dohOptions = [
-  { label: '关闭', value: 0 },
-  { label: '腾讯', value: 1 },
-  { label: '阿里', value: 2 },
-  { label: '360', value: 3 },
-  { label: 'Google', value: 4 },
-  { label: 'AdGuard', value: 5 },
-  { label: 'Quad9', value: 6 },
-]
+// WebDAV
+const webdavUrl = ref(localStorage.getItem('tvbox_webdav_url') || '')
+const webdavUser = ref(localStorage.getItem('tvbox_webdav_user') || '')
+const webdavPass = ref(localStorage.getItem('tvbox_webdav_pass') || '')
+const webdavLoading = ref(false)
+
+// Build date
+const buildDate = new Date().toISOString().split('T')[0].replace(/-/g, '.')
 
 onMounted(() => {
+  // Config
   inputUrl.value = store.configUrl
-  parseName.value = store.defaultParseName
+  loadHistory()
+
+  // Playback
   autoPlayNext.value = store.autoPlayNext
   screenDisplayValue.value = localStorage.getItem('tvbox_screen_display') !== 'false'
+
+  // Subtitle
+  subtitleSizeValue.value = Number(localStorage.getItem('tvbox_subtitle_size') || '24')
+  subtitleColorValue.value = localStorage.getItem('tvbox_subtitle_color') || '#f0f0f5'
+  subtitleDelayValue.value = Number(localStorage.getItem('tvbox_subtitle_delay') || '0')
+
+  // Danmaku
+  danmuEnabledValue.value = localStorage.getItem('tvbox_danmu_enabled') === 'true'
+  const savedDensity = Number(localStorage.getItem('tvbox_danmu_density') || '2')
+  danmuDensityValue.value = Math.max(1, Math.min(3, savedDensity))
+
+  // Live
   liveUrlInput.value = store.liveUrl
   epgUrlInput.value = store.epgUrl
-  searchViewModeValue.value = store.searchViewMode
+
+  // Network
   dohValue.value = store.dohIndex
-  subtitleSizeValue.value = Number(localStorage.getItem('tvbox_subtitle_size') || '24')
-  subtitleColorValue.value = localStorage.getItem('tvbox_subtitle_color') || '#ffffff'
-  subtitleDelayValue.value = Number(localStorage.getItem('tvbox_subtitle_delay') || '0')
-  danmuEnabledValue.value = localStorage.getItem('tvbox_danmu_enabled') === 'true'
-  danmuMaxValue.value = Number(localStorage.getItem('tvbox_danmu_max') || '30')
-  loadHistory()
+
+  // Theme
+  darkModeValue.value = theme.mode === 'dark'
 })
 
+// ===== Config =====
 function loadHistory() {
   try {
     configUrlHistory.value = JSON.parse(localStorage.getItem('tvbox_config_url_history') || '[]')
@@ -646,11 +601,35 @@ async function loadConfig() {
   }
 }
 
-function onParseChange(name: string) {
-  store.setDefaultParse(name)
-  ElMessage.success(`默认解析已切换为 ${name}`)
+function selectHistoryUrl(url: string) {
+  inputUrl.value = url
 }
 
+// ===== Multi-config =====
+function onMergeSubConfigsChange(val: boolean) {
+  if (val) {
+    ElMessage.success('已合并所有子配置')
+  }
+}
+
+async function onSubConfigChange(url: string) {
+  const index = store.subConfigs.findIndex(s => s.url === url)
+  if (index >= 0) {
+    configLoading.value = true
+    try {
+      const success = await store.loadSubConfig(index)
+      if (success) {
+        ElMessage.success(`已加载: ${store.subConfigs[index].name}`)
+      } else {
+        ElMessage.error('子配置加载失败')
+      }
+    } finally {
+      configLoading.value = false
+    }
+  }
+}
+
+// ===== Playback =====
 function onAutoPlayNextChange(val: boolean) {
   store.setAutoPlayNext(val)
 }
@@ -679,7 +658,6 @@ async function selectVlcPath() {
       onVlcPathChange(result.filePaths[0])
     }
   } catch (e) {
-    // Fallback: show input prompt
     const path = prompt('请输入播放器路径:', vlcPathValue.value)
     if (path) {
       vlcPathValue.value = path
@@ -688,6 +666,30 @@ async function selectVlcPath() {
   }
 }
 
+// ===== Subtitle =====
+function onSubtitleSizeChange(val: number) {
+  localStorage.setItem('tvbox_subtitle_size', String(val))
+}
+
+function onSubtitleColorChange(val: string) {
+  subtitleColorValue.value = val
+  localStorage.setItem('tvbox_subtitle_color', val)
+}
+
+function onSubtitleDelayChange(val: number) {
+  localStorage.setItem('tvbox_subtitle_delay', String(val))
+}
+
+// ===== Danmaku =====
+function onDanmuEnabledChange(val: boolean) {
+  localStorage.setItem('tvbox_danmu_enabled', String(val))
+}
+
+function onDanmuDensityChange(val: number) {
+  localStorage.setItem('tvbox_danmu_density', String(val))
+}
+
+// ===== Live =====
 function onLiveUrlChange(val: string) {
   store.setLiveUrl(val)
 }
@@ -696,43 +698,123 @@ function onEpgUrlChange(val: string) {
   store.setEpgUrl(val)
 }
 
-function onSearchViewModeChange(val: number) {
-  store.setSearchViewMode(val)
-}
-
-function onDohChange(val: number) {
+// ===== Network =====
+async function onDohChange(val: number) {
+  dohValue.value = val
   store.setDohIndex(val)
+  const { localProxy } = await import('../core/LocalProxyServer')
   localProxy.setDohIndex(val)
 }
 
-function onSubtitleSizeChange(val: number) {
-  localStorage.setItem('tvbox_subtitle_size', String(val))
+// ===== Theme =====
+function onDarkModeChange(val: boolean) {
+  theme.setMode(val ? 'dark' : 'light')
 }
 
-function onSubtitleColorChange(val: string) {
-  localStorage.setItem('tvbox_subtitle_color', val)
+function normalizeHex(hex: string): string | null {
+  let cleaned = hex.trim().replace('#', '')
+  if (cleaned.length === 3) {
+    cleaned = cleaned[0] + cleaned[0] + cleaned[1] + cleaned[1] + cleaned[2] + cleaned[2]
+  }
+  if (cleaned.length !== 6) return null
+  if (!/^[0-9a-fA-F]{6}$/.test(cleaned)) return null
+  return `#${cleaned.toLowerCase()}`
 }
 
-function onSubtitleDelayChange(val: number) {
-  localStorage.setItem('tvbox_subtitle_delay', String(val))
+function onPrimaryColorChange(color: string) {
+  const normalized = normalizeHex(color)
+  if (!normalized) return
+  localPrimaryColor.value = normalized
+  localPrimaryColorHex.value = normalized
+  theme.setPrimaryColor(normalized)
 }
 
-function onDanmuEnabledChange(val: boolean) {
-  localStorage.setItem('tvbox_danmu_enabled', String(val))
+function onPrimaryColorHexChange(val: string) {
+  const normalized = normalizeHex(val)
+  if (normalized) {
+    localPrimaryColor.value = normalized
+    localPrimaryColorHex.value = normalized
+    theme.setPrimaryColor(normalized)
+  } else {
+    localPrimaryColorHex.value = localPrimaryColor.value
+  }
 }
 
-function onDanmuMaxChange(val: number) {
-  localStorage.setItem('tvbox_danmu_max', String(val))
+function onBgTabChange(tab: 'color' | 'image') {
+  bgTab.value = tab
+  if (tab === 'image') {
+    theme.setBgColor(null)
+  } else {
+    theme.setBgImage(null)
+    if (localBgColor.value) {
+      theme.setBgColor(localBgColor.value)
+    }
+  }
 }
 
-// WebDAV
-const webdavUrl = ref(localStorage.getItem('tvbox_webdav_url') || '')
-const webdavUser = ref(localStorage.getItem('tvbox_webdav_user') || '')
-const webdavPass = ref(localStorage.getItem('tvbox_webdav_pass') || '')
-const webdavLoading = ref(false)
-const remotePort = ref(remoteServer.getPort())
-const proxyPort = ref(localProxy.getPort())
+function onBgColorChange(color: string) {
+  const normalized = normalizeHex(color)
+  if (!normalized) return
+  localBgColor.value = normalized
+  localBgColorHex.value = normalized
+  theme.setBgColor(normalized)
+}
 
+function onBgColorHexChange(val: string) {
+  const normalized = normalizeHex(val)
+  if (normalized) {
+    localBgColor.value = normalized
+    localBgColorHex.value = normalized
+    theme.setBgColor(normalized)
+  } else {
+    localBgColorHex.value = localBgColor.value || ''
+  }
+}
+
+function onBgImageChange(url: string) {
+  localBgImage.value = url
+  theme.setBgImage(url || null)
+}
+
+function clearBgImage() {
+  localBgImage.value = ''
+  theme.setBgImage(null)
+}
+
+function onBgOpacityChange(val: number) {
+  theme.setBgOpacity(val)
+}
+
+// ===== Data Management =====
+async function clearHistory() {
+  try {
+    await ElMessageBox.confirm('确定要清除所有历史记录吗？此操作不可恢复。', '确认清除', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    await store.clearHistory()
+    ElMessage.success('历史记录已清除')
+  } catch {
+    // cancelled
+  }
+}
+
+async function clearAllConfig() {
+  try {
+    await ElMessageBox.confirm('确定要清除所有配置吗？此操作不可恢复。', '确认清除', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    localStorage.clear()
+    location.reload()
+  } catch {
+    // cancelled
+  }
+}
+
+// ===== WebDAV =====
 function getWebdavClient(): WebDAV | null {
   if (!webdavUrl.value) return null
   localStorage.setItem('tvbox_webdav_url', webdavUrl.value)
@@ -743,20 +825,6 @@ function getWebdavClient(): WebDAV | null {
     username: webdavUser.value,
     password: webdavPass.value,
   })
-}
-
-async function webdavTest() {
-  const client = getWebdavClient()
-  if (!client) return ElMessage.warning('请输入WebDAV地址')
-  webdavLoading.value = true
-  try {
-    const ok = await client.testConnection()
-    ElMessage[ok ? 'success' : 'error'](ok ? '连接成功' : '连接失败')
-  } catch {
-    ElMessage.error('连接失败')
-  } finally {
-    webdavLoading.value = false
-  }
 }
 
 async function webdavBackup() {
@@ -776,7 +844,6 @@ async function webdavBackup() {
     }
     const filename = `tvbox-pc-backup-${Date.now()}.json`
     const ok = await client.backup(filename, data)
-    // Also save as "latest" for easy restore
     if (ok) await client.backup('tvbox-pc-backup-latest.json', data)
     ElMessage[ok ? 'success' : 'error'](ok ? '备份成功' : '备份失败')
   } catch {
@@ -808,88 +875,105 @@ async function webdavRestore() {
     webdavLoading.value = false
   }
 }
-
-async function clearHistory() {
-  try {
-    await ElMessageBox.confirm('确定要清除所有历史记录吗？此操作不可恢复。', '确认清除', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      type: 'warning',
-    })
-    await store.clearHistory()
-    ElMessage.success('历史记录已清除')
-  } catch {
-    // cancelled
-  }
-}
-
-function onHistoryUrlSelect(url: string) {
-  inputUrl.value = url
-}
 </script>
 
 <style scoped>
 .settings-card {
-  background: var(--color-bg-surface);
+  position: relative;
+  padding: 24px;
   border-radius: var(--radius-lg, 14px);
+  background: var(--color-bg-glass);
+  backdrop-filter: var(--glass-blur);
   border: 1px solid var(--color-border);
-  padding: 20px 24px;
 }
 
-.theme-mode-card {
-  width: 100%;
-  height: 56px;
-  border-radius: 8px;
-  border: 2px solid var(--color-border);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  font-size: 14px;
-  font-weight: 500;
+.settings-card:hover {
+  box-shadow: 0 0 20px var(--color-primary-glow);
+}
+
+.settings-input {
+  height: 40px;
+}
+
+.settings-color-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
   cursor: pointer;
-  transition: all 0.2s ease;
-  background: transparent;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.settings-color-dot:hover {
+  transform: scale(1.15);
+}
+
+.settings-color-dot.active {
+  border-color: var(--color-text-primary);
+  box-shadow: 0 0 0 3px var(--color-bg-base), 0 0 0 5px var(--color-text-tertiary);
+}
+
+.settings-swatch {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.settings-swatch:hover {
+  transform: scale(1.15);
+}
+
+.settings-swatch.active {
+  border-color: white;
+  box-shadow: 0 0 0 3px var(--color-bg-base), 0 0 12px var(--color-primary-glow);
+}
+
+.settings-radio {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.settings-radio input {
+  display: none;
+}
+
+.radio-label {
+  font-size: 13px;
   color: var(--color-text-secondary);
-  user-select: none;
+  white-space: nowrap;
 }
 
-.theme-mode-card:hover {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
+.settings-radio:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
 }
 
-.theme-mode-card.active {
-  border-color: var(--color-primary);
+.settings-radio.active {
   background: var(--color-primary-soft);
+  border-color: var(--color-primary-border);
+}
+
+.settings-radio.active .radio-label {
   color: var(--color-primary);
+  font-weight: 500;
 }
 
 .hex-input {
   width: 120px;
 }
 
-.preset-swatch {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  border: 2px solid transparent;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  padding: 0;
-}
-
-.preset-swatch:hover {
-  transform: scale(1.1);
-}
-
-.preset-swatch.active {
-  border-color: var(--color-primary);
-}
-
-.custom-theme-section {
-  padding-top: 4px;
-  border-top: 1px solid var(--color-border);
-  margin-top: 4px;
+a:hover {
+  color: var(--color-text-primary) !important;
 }
 </style>
