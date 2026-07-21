@@ -464,8 +464,37 @@ const remoteHandler: RemoteControlHandler = {
   },
 }
 
+// Docker status tracking
+const dockerStatus = ref({
+  installed: false,
+  running: false,
+  containerRunning: false,
+  message: ''
+});
+const showDockerInstallGuide = ref(false);
+
 onMounted(async () => {
   console.log('[App] Starting initialization...')
+  
+  // Listen for Docker status updates from main process
+  window.electron.ipcRenderer.on('docker:status', (event: any, data: any) => {
+    console.log('[Renderer] Docker status received:', data);
+    dockerStatus.value = data;
+    
+    // Show appropriate message
+    if (!data.installed) {
+      showDockerInstallGuide.value = true;
+    } else if (!data.running) {
+      ElMessage.warning(data.message || 'Docker未运行，请启动Docker Desktop');
+      showDockerInstallGuide.value = false;
+    } else if (!data.containerRunning && data.error) {
+      ElMessage.error(data.message || 'Spider服务启动失败');
+      showDockerInstallGuide.value = false;
+    } else if (data.containerRunning) {
+      ElMessage.success(data.message || 'Docker服务运行正常');
+      showDockerInstallGuide.value = false;
+    }
+  });
 
   // Restore config from file BEFORE any other initialization.
   // This ensures configUrl, pan login info, and settings are available
