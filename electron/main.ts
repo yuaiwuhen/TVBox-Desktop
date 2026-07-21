@@ -14,7 +14,7 @@ import https from 'https';
 import http from 'http';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { registerJarLoaderIPC, jarLoader } from './JarLoader';
+// import { registerJarLoaderIPC, jarLoader } from './JarLoader'; // Removed: migrated to Docker
 import { QuarkPanService } from './QuarkPanService';
 import { UCPanService } from './UCPanService';
 import { AliyunPanService } from './AliyunPanService';
@@ -607,7 +607,11 @@ ipcMain.handle(
   'http:fetchHtml',
   async (
     _event,
-    { url, headers, timeout }: { url: string; headers: Record<string, string>; timeout?: number },
+    {
+      url,
+      headers,
+      timeout,
+    }: { url: string; headers: Record<string, string>; timeout?: number },
   ) => {
     try {
       const controller = new AbortController();
@@ -678,8 +682,8 @@ app.whenReady().then(async () => {
     ],
   });
 
-  // Register JarLoader IPC handlers
-  registerJarLoaderIPC();
+  // Register Docker IPC handlers
+  // registerJarLoaderIPC(); // Removed: migrated to Docker
   QuarkPanService.init();
   UCPanService.init();
   AliyunPanService.init();
