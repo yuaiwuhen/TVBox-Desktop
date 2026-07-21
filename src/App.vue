@@ -192,6 +192,9 @@
         </div>
       </div>
     </transition>
+
+    <!-- Docker Installation Guide Dialog -->
+    <DockerInstallGuide v-if="showDockerInstallGuide" @close="showDockerInstallGuide = false" />
   </div>
 </template>
 
