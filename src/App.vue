@@ -197,6 +197,7 @@
 
 <script setup lang="ts">
 import LoadingToast from './components/LoadingToast.vue'
+import DockerInstallGuide from './components/DockerInstallGuide.vue'
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
