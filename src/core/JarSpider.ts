@@ -1,46 +1,22 @@
 /**
  * JarSpider - JAR Spider implementation for renderer process
  *
- * Implements ISpider interface by communicating with main process via IPC.
- * Main process uses JarLoader to load JAR files and invoke Spider methods.
+ * 使用HTTP与Docker容器中的Spider服务器通信
+ * 替代原有的IPC + java-bridge方式
  */
 
 import type { ISpider } from './models';
 import { useLoading } from '../composables/useLoading';
+import axios from 'axios';
 
-// Electron IPC bridge - available in renderer with contextIsolation=false
-declare global {
-  interface Window {
-    electronIPC?: {
-      invoke: (channel: string, ...args: any[]) => Promise<any>;
-      on: (channel: string, listener: (...args: any[]) => void) => () => void;
-    };
-  }
-}
-
-// Get IPC interface
-function getIPC(): Window['electronIPC'] {
-  if (window.electronIPC) {
-    return window.electronIPC;
-  }
-
-  try {
-    const { ipcRenderer } = require('electron');
-    return {
-      invoke: (channel: string, ...args: any[]) =>
-        ipcRenderer.invoke(channel, ...args),
-      on: (channel: string, listener: (...args: any[]) => void) => {
-        const wrappedListener = (_event: any, ...args: any[]) =>
-          listener(...args);
-        ipcRenderer.on(channel, wrappedListener);
-        return () => ipcRenderer.removeListener(channel, wrappedListener);
-      },
-    };
-  } catch {
-    console.warn('[JarSpider] Electron IPC not available');
-    return undefined;
-  }
-}
+// HTTP客户端实例
+const httpClient = axios.create({
+  baseURL: 'http://localhost:9978',
+  timeout: 30000,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
 
 export class JarSpider implements ISpider {
   private key: string;
@@ -48,7 +24,6 @@ export class JarSpider implements ISpider {
   private ext: string;
   private jarUrl: string;
   private initialized: boolean = false;
-  private progressUnsub: (() => void) | null = null;
   private abortController: AbortController | null = null;
 
   constructor(key: string, className: string, jarUrl: string, ext?: string) {
@@ -79,32 +54,18 @@ export class JarSpider implements ISpider {
       extPreview: this.ext.substring(0, 80),
     });
 
-    const ipc = getIPC();
-    console.log('[JarSpider] IPC available:', !!ipc);
-    if (!ipc) {
-      throw new Error('[JarSpider] IPC not available');
-    }
-
     // Show loading progress
     const loading = useLoading();
     const taskId = `jar-${this.key}`;
     loading.start(taskId, `加载爬虫: ${this.className}`);
 
-    // Listen for progress events
-    if (ipc.on) {
-      this.progressUnsub = ipc.on('jar:progress', (data: any) => {
-        if (data && typeof data === 'object') {
-          loading.update(taskId, data.stage, data.message, data.percent);
-        }
-      });
-    }
-
     try {
       // Step 1: Load JAR
       console.log('[JarSpider] Step 1: Loading JAR...');
-      console.log('[JarSpider] jarUrl:', this.jarUrl);
-      const loadResult = await ipc.invoke('jar:load', this.jarUrl, '', false);
-      console.log('[JarSpider] jar:load result:', loadResult);
+      const loadResult = await this.postRequest('/spider/load', {
+        jarUrl: this.jarUrl,
+      });
+
       if (!loadResult?.success) {
         const errorMsg =
           loadResult?.error || `Failed to load JAR: ${this.jarUrl}`;
@@ -113,60 +74,55 @@ export class JarSpider implements ISpider {
         throw new Error(`[JarSpider] ${errorMsg}`);
       }
 
-      // Step 2: Get Spider instance
-      console.log('[JarSpider] Step 2: Getting spider:', this.className);
-      const spiderResult = await ipc.invoke(
-        'jar:getSpider',
-        this.key,
-        this.className,
-        this.ext,
-        this.jarUrl,
-      );
-      console.log('[JarSpider] jar:getSpider result:', spiderResult);
-      if (!spiderResult?.success) {
+      // Step 2: Initialize spider
+      console.log('[JarSpider] Step 2: Initializing spider:', this.className);
+      const initResult = await this.postRequest('/spider/init', {
+        key: this.key,
+        className: this.className,
+        ext: this.ext,
+        jarUrl: this.jarUrl,
+      });
+
+      if (!initResult?.success) {
         const errorMsg =
-          spiderResult?.error || `Failed to get spider: ${this.className}`;
-        console.error('[JarSpider] Spider get failed:', errorMsg);
+          initResult?.error || `Failed to init spider: ${this.className}`;
+        console.error('[JarSpider] Spider init failed:', errorMsg);
         loading.fail(taskId, errorMsg);
         throw new Error(`[JarSpider] ${errorMsg}`);
       }
 
-      // Step 3: Initialize spider with ext config
-      console.log(
-        '[JarSpider] Step 3: Initializing spider with ext:',
-        this.ext.substring(0, 80),
-      );
-      await ipc.invoke('jar:initSpider', this.key, this.ext);
-
       this.initialized = true;
       console.log('[JarSpider] Initialized successfully:', this.key);
-
-      // Debug: list all methods
-      try {
-        const methods = await this.listMethods();
-        console.log(
-          `[JarSpider] ${this.key} methods (${methods.length}):`,
-          methods.join(', '),
-        );
-      } catch (e) {
-        console.warn('[JarSpider] Failed to list methods:', e);
-      }
 
       loading.finish(taskId, true);
     } catch (e) {
       console.error('[JarSpider] Init failed:', this.key, e);
       loading.fail(taskId, e instanceof Error ? e.message : String(e));
       throw e;
-    } finally {
-      if (this.progressUnsub) {
-        this.progressUnsub();
-        this.progressUnsub = null;
-      }
     }
   }
 
   /**
-   * Call spider method via IPC
+   * HTTP POST request helper
+   */
+  private async postRequest(endpoint: string, data: any): Promise<any> {
+    try {
+      const response = await httpClient.post(endpoint, data);
+      return response.data;
+    } catch (error: any) {
+      console.error(
+        `[JarSpider] POST ${endpoint} failed:`,
+        error.message || error,
+      );
+      return {
+        success: false,
+        error: error.message || 'Request failed',
+      };
+    }
+  }
+
+  /**
+   * Call spider method via HTTP
    */
   private async callMethod(method: string, args: any[]): Promise<string> {
     if (method === 'playerContent') {
@@ -178,16 +134,11 @@ export class JarSpider implements ISpider {
         ),
       });
     }
+
     if (!this.initialized) {
       console.warn(
         `[JarSpider] callMethod ${method}: not initialized, returning {}`,
       );
-      return '{}';
-    }
-
-    const ipc = getIPC();
-    if (!ipc) {
-      console.warn(`[JarSpider] callMethod ${method}: no IPC, returning {}`);
       return '{}';
     }
 
@@ -197,57 +148,96 @@ export class JarSpider implements ISpider {
     this.abortController = new AbortController();
 
     try {
-      let extraCookies: Record<string, string> | undefined;
-      if (method === 'playerContent' && args.length > 0) {
-        const panTypes = ['quark', 'uc', 'aliyun', 'baidu', 'bili'];
-        extraCookies = {};
-        for (const pt of panTypes) {
-          try {
-            const saved = localStorage.getItem(`pan_login_${pt}`);
-            if (saved) {
-              const parsed = JSON.parse(saved);
-              if (parsed.cookie) {
-                extraCookies[pt] = parsed.cookie;
-              }
-            }
-          } catch {}
-        }
-        console.log(
-          '[JarSpider] playerContent extraCookies keys:',
-          Object.keys(extraCookies),
-        );
-      }
+      let endpoint = '';
+      let requestData: any = { key: this.key };
 
-      const timeoutPromise = new Promise<string>((_, reject) => {
-        setTimeout(() => {
-          if (this.abortController) {
-            this.abortController.abort();
+      // 映射方法名到端点
+      switch (method) {
+        case 'homeContent':
+          endpoint = '/spider/homeContent';
+          requestData.filter = args[0] || false;
+          break;
+
+        case 'homeVideoContent':
+          endpoint = '/spider/homeContent';
+          requestData.filter = false;
+          break;
+
+        case 'categoryContent':
+          endpoint = '/spider/categoryContent';
+          requestData.tid = args[0] || '';
+          requestData.pg = args[1] || '1';
+          requestData.filter = args[2] || false;
+          requestData.extend = args[3] || {};
+          break;
+
+        case 'detailContent':
+          endpoint = '/spider/detailContent';
+          requestData.ids = args[0] || [];
+          break;
+
+        case 'searchContent':
+          endpoint = '/spider/searchContent';
+          requestData.keyword = args[0] || '';
+          requestData.quick = args[1] || false;
+          if (args.length > 2) {
+            requestData.pg = args[2];
           }
-          reject(new Error(`${method} timed out`));
-        }, 30000);
-      });
+          break;
 
-      if (method === 'playerContent') {
-        console.log('[JarSpider] invoking jar:callMethod for playerContent...');
+        case 'playerContent':
+          endpoint = '/spider/playerContent';
+          requestData.flag = args[0] || '';
+          requestData.id = args[1] || '';
+          requestData.vipFlags = args[2] || [];
+
+          // 添加额外的cookies（如果需要）
+          const extraCookies: Record<string, string> = {};
+          const panTypes = ['quark', 'uc', 'aliyun', 'baidu', 'bili'];
+          for (const pt of panTypes) {
+            try {
+              const saved = localStorage.getItem(`pan_login_${pt}`);
+              if (saved) {
+                const parsed = JSON.parse(saved);
+                if (parsed.cookie) {
+                  extraCookies[pt] = parsed.cookie;
+                }
+              }
+            } catch {}
+          }
+          if (Object.keys(extraCookies).length > 0) {
+            requestData.extraCookies = extraCookies;
+          }
+          break;
+
+        default:
+          console.warn(`[JarSpider] Unknown method: ${method}`);
+          return '{}';
       }
-      const resultPromise = ipc.invoke(
-        'jar:callMethod',
-        this.key,
-        method,
-        args,
-        extraCookies,
-      );
 
-      const result = await Promise.race([resultPromise, timeoutPromise]);
-      const resultStr = result || '{}';
       if (method === 'playerContent') {
-        console.log('[JarSpider] playerContent result:', {
-          resultLength: resultStr.length,
-          resultPreview: resultStr.substring(0, 200),
-          isEmpty: resultStr === '{}',
+        console.log('[JarSpider] Calling HTTP API:', endpoint);
+      }
+
+      const response = await this.postRequest(endpoint, requestData);
+
+      if (method === 'playerContent') {
+        console.log('[JarSpider] playerContent response:', {
+          success: response.success,
+          hasData: !!response.data,
         });
       }
-      return resultStr;
+
+      if (!response.success) {
+        console.warn(
+          `[JarSpider] ${method} failed:`,
+          response.error || 'Unknown error',
+        );
+        return '{}';
+      }
+
+      // data字段已经是JSON字符串
+      return response.data || '{}';
     } catch (e: any) {
       if (e.name !== 'AbortError') {
         console.warn(`[JarSpider] callMethod ${method} failed:`, e.message);
@@ -299,16 +289,18 @@ export class JarSpider implements ISpider {
   }
 
   async listMethods(): Promise<string[]> {
-    try {
-      const ipc = getIPC();
-      if (!ipc) return [];
-      const result = await ipc.invoke('jar:listSpiderMethods', this.key);
-      const parsed = JSON.parse(result);
-      return parsed.methods || [];
-    } catch (e) {
-      console.error('[JarSpider] listMethods failed:', e);
-      return [];
-    }
+    // Spider接口的标准方法
+    return [
+      'homeContent',
+      'homeVideoContent',
+      'categoryContent',
+      'detailContent',
+      'searchContent',
+      'playerContent',
+      'isVideoFormat',
+      'manualVideoCheck',
+      'action',
+    ];
   }
 
   async isVideoFormat(url: string): Promise<boolean> {
@@ -337,10 +329,12 @@ export class JarSpider implements ISpider {
 
   destroy(): void {
     this.initialized = false;
-    if (this.progressUnsub) {
-      this.progressUnsub();
-      this.progressUnsub = null;
-    }
+
+    // 通知服务器销毁Spider实例
+    this.postRequest('/spider/destroy', { key: this.key }).catch((error) => {
+      console.warn('[JarSpider] Failed to destroy spider on server:', error);
+    });
+
     console.log('[JarSpider] Destroyed:', this.key);
   }
 }

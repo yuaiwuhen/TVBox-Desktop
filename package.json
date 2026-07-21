@@ -12,14 +12,16 @@
     "dev": "node scripts/run-dev.mjs",
     "build": "vite build && electron-builder --publish never",
     "build:dir": "vite build && electron-builder --dir --publish never",
-    "build:jre": "node scripts/download-jre.mjs",
-    "build:win": "node scripts/download-jre.mjs --target=win && vite build && electron-builder --win --publish never",
-    "build:linux": "node scripts/download-jre.mjs --target=linux && vite build && electron-builder --linux --publish never",
-    "build:mac": "node scripts/download-jre.mjs --target=mac && vite build && electron-builder --mac --publish never",
+    "build:win": "vite build && electron-builder --win --publish never",
+    "build:linux": "vite build && electron-builder --linux --publish never",
+    "build:mac": "vite build && electron-builder --mac --publish never",
     "build:installer": "vite build && electron-builder --publish never",
     "icon": "node scripts/generate-icon.mjs",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "docker:build": "cd docker && docker-compose build",
+    "docker:up": "cd docker && docker-compose up -d",
+    "docker:down": "cd docker && docker-compose down"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
@@ -69,18 +71,7 @@
     "appId": "com.github.tvbox.pc",
     "productName": "TVBox-PC",
     "asar": true,
-    "asarUnpack": [
-      "**/node_modules/java-bridge*/**/*"
-    ],
-    "afterPack": "./scripts/after-pack.mjs",
     "extraResources": [
-      {
-        "from": "tools/runtime",
-        "to": "tools",
-        "filter": [
-          "**/*"
-        ]
-      },
       {
         "from": "fatcat",
         "to": "fatcat",
@@ -88,20 +79,6 @@
           ".gitkeep",
           "token.txt",
           "kk.txt"
-        ]
-      },
-      {
-        "from": "jre",
-        "to": "jre",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "tools/dex-tools-v2.4",
-        "to": "tools/dex-tools-v2.4",
-        "filter": [
-          "**/*"
         ]
       }
     ],

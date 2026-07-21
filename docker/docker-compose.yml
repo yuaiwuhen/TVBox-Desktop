@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  spider-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tvbox-spider-server:latest
+    container_name: tvbox-spider
+    privileged: true
+    ports:
+      - '9978:9978' # HTTP API端口
+      - '5555:5555' # ADB端口（可选，用于调试）
+    volumes:
+      - ./data:/data # 持久化数据
+      - ./jars:/jars # JAR文件目录
+    environment:
+      - REDROID_PROP_ro.debuggable=1
+      - REDROID_PROP_service.adb.tcp.port=5555
+      - ANDROIDBOOT_REDROID_WIDTH=1080
+      - ANDROIDBOOT_REDROID_HEIGHT=1920
+      - ANDROIDBOOT_REDROID_DPI=480
+      - ANDROIDBOOT_REDROID_GPU_MODE=guest
+    restart: unless-stopped
+    networks:
+      - spider-network
+
+networks:
+  spider-network:
+    driver: bridge
