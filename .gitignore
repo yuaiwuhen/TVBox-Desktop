@@ -74,3 +74,4 @@ test-playback*.mjs
 test-playback*.js
 pnpm-workspace.yaml
 tvbox-pc-redesign/
+_tmp_addctor/
