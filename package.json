@@ -21,7 +21,8 @@
     "test": "vitest run",
     "docker:build": "cd docker && docker-compose build",
     "docker:up": "cd docker && docker-compose up -d",
-    "docker:down": "cd docker && docker-compose down"
+    "docker:down": "cd docker && docker-compose down",
+    "docker:logs": "docker logs tvbox-spider",
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
