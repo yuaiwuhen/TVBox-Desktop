@@ -15,6 +15,7 @@ import http from 'http';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { registerJarLoaderIPC, jarLoader } from './JarLoader';
+import { registerDockerIPC, dockerManager } from './DockerIPC';
 import { QuarkPanService } from './QuarkPanService';
 import { UCPanService } from './UCPanService';
 import { AliyunPanService } from './AliyunPanService';
@@ -126,6 +127,95 @@ function isVcredistInstalled(): boolean {
     path.join(sysRoot, 'SysWOW64', 'vcruntime140.dll'),
   ];
   return targets.some((p) => fs.existsSync(p));
+}
+
+// Check Docker environment on startup
+async function checkDockerEnvironment(): Promise<void> {
+  try {
+    console.log('[Main] Checking Docker environment...');
+
+    // Import DockerManager
+    const { dockerManager } = await import('./DockerIPC');
+
+    // Check if Docker is installed and running
+    const status = await dockerManager.checkDockerRunning();
+
+    if (!status.installed) {
+      console.log('[Main] Docker not installed');
+      // Notify renderer to show Docker install guide
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win) {
+        win.webContents.send('docker:status', {
+          installed: false,
+          running: false,
+          message: 'Docker未安装，请先安装Docker Desktop',
+        });
+      }
+      return;
+    }
+
+    if (!status.running) {
+      console.log('[Main] Docker installed but not running');
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win) {
+        win.webContents.send('docker:status', {
+          installed: true,
+          running: false,
+          message: 'Docker已安装但未运行，请启动Docker Desktop',
+        });
+      }
+      return;
+    }
+
+    console.log('[Main] Docker is running, version:', status.version);
+
+    // Check if Spider container is running
+    const containerStatus = await dockerManager.getContainerStatus();
+    if (!containerStatus.running) {
+      console.log('[Main] Spider container not running, starting...');
+
+      // Try to start the container
+      try {
+        await dockerManager.startContainer();
+        console.log('[Main] Spider container started successfully');
+
+        const win = BrowserWindow.getAllWindows()[0];
+        if (win) {
+          win.webContents.send('docker:status', {
+            installed: true,
+            running: true,
+            containerRunning: true,
+            message: 'Spider服务已启动',
+          });
+        }
+      } catch (error: any) {
+        console.error('[Main] Failed to start Spider container:', error);
+        const win = BrowserWindow.getAllWindows()[0];
+        if (win) {
+          win.webContents.send('docker:status', {
+            installed: true,
+            running: true,
+            containerRunning: false,
+            error: error.message,
+            message: 'Spider服务启动失败: ' + error.message,
+          });
+        }
+      }
+    } else {
+      console.log('[Main] Spider container is running');
+      const win = BrowserWindow.getAllWindows()[0];
+      if (win) {
+        win.webContents.send('docker:status', {
+          installed: true,
+          running: true,
+          containerRunning: true,
+          message: 'Spider服务运行正常',
+        });
+      }
+    }
+  } catch (error: any) {
+    console.error('[Main] Docker check failed:', error);
+  }
 }
 
 function createWindow() {
@@ -684,6 +774,13 @@ app.whenReady().then(async () => {
 
   // Register JarLoader IPC handlers
   registerJarLoaderIPC();
+
+  // Register Docker IPC handlers
+  registerDockerIPC();
+
+  // Check Docker environment on startup
+  checkDockerEnvironment();
+
   QuarkPanService.init();
   UCPanService.init();
   AliyunPanService.init();
