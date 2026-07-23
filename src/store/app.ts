@@ -710,88 +710,113 @@ export const useAppStore = defineStore('app', () => {
     detailLoading.value = true;
     detailError.value = '';
     currentVod.value = null;
-    try {
-      const spider = await spiderEngine.getSpider(activeSite.value);
-      if (!spider) {
-        detailLoading.value = false;
-        detailError.value = '无法加载源，请稍后重试';
-        return;
-      }
 
-      const rawResult = await spider.detailContent([vodId]);
-      console.log(
-        '[Store] loadDetail rawResult:',
-        rawResult?.substring?.(0, 1000),
-      );
-      if (!rawResult || !rawResult.trim()) {
-        detailError.value =
-          '该资源无法解析（源未返回数据），可能已下线或分享链接已失效';
-        return;
-      }
-      let result: any;
+    const maxRetries = 2;
+    let lastError = '';
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        result = JSON.parse(rawResult);
-      } catch {
-        detailError.value = '源返回的数据格式异常，可能资源已下线';
-        return;
-      }
-      if (!result.list || result.list.length === 0) {
-        detailError.value = '未找到该资源的详情信息，可能已下线';
-        return;
-      }
+        const spider = await spiderEngine.getSpider(activeSite.value);
+        if (!spider) {
+          lastError = '无法加载源，请稍后重试';
+          break;
+        }
 
-      const vod = result.list[0];
-      console.log('[Store] loadDetail vod:', {
-        vod_id: vod.vod_id,
-        vod_name: vod.vod_name,
-        vod_play_from: vod.vod_play_from,
-        vod_play_url: vod.vod_play_url,
-        vod_play_url_length: vod.vod_play_url?.length,
-        vod_keys: Object.keys(vod),
-      });
-      currentVod.value = {
-        ...vod,
-        sourceKey: activeSite.value.key,
-      };
-      // 若返回了 vod 但没有播放源，给出更具体的提示
-      if (!vod.vod_play_from || !vod.vod_play_url) {
-        // Prioritize URL/domain detection from the site's api URL.
-        // Falls back to key/name matching for sites without a URL-style api.
-        const apiLower = (activeSite.value.api || '').toLowerCase();
-        const keyLower = (activeSite.value.key || '').toLowerCase();
-        const nameLower = (activeSite.value.name || '').toLowerCase();
-        const isPan =
-          apiLower.includes('quark.cn') ||
-          apiLower.includes('drive.uc.cn') ||
-          apiLower.includes('pan.baidu.com') ||
-          apiLower.includes('alipan.com') ||
-          apiLower.includes('aliyundrive.com') ||
-          apiLower.includes('bilibili.com') ||
-          keyLower.includes('quark') ||
-          keyLower.includes('uc') ||
-          keyLower.includes('baidu') ||
-          keyLower.includes('ali') ||
-          nameLower.includes('夸克') ||
-          nameLower.includes('百度') ||
-          nameLower.includes('阿里') ||
-          (vod as any).needPanLogin;
-        if (isPan) {
-          // 触发 needPanLogin UI 分支
-          (currentVod.value as any).needPanLogin = true;
-        } else {
-          detailError.value =
-            '该资源暂无可播放的源，可能分享链接已失效或资源已下线';
+        const rawResult = await spider.detailContent([vodId]);
+        console.log(
+          `[Store] loadDetail rawResult (attempt ${attempt + 1}/${maxRetries + 1}):`,
+          rawResult?.substring?.(0, 1000),
+        );
+        if (!rawResult || !rawResult.trim()) {
+          lastError = '该资源无法解析（源未返回数据），可能已下线或分享链接已失效';
+          if (attempt < maxRetries) {
+            console.log(`[Store] loadDetail empty result, retrying in ${1500 + attempt * 1000}ms...`);
+            await new Promise(resolve => setTimeout(resolve, 1500 + attempt * 1000));
+            continue;
+          }
+          break;
+        }
+        let result: any;
+        try {
+          result = JSON.parse(rawResult);
+        } catch {
+          lastError = '源返回的数据格式异常，可能资源已下线';
+          break;
+        }
+        if (!result.list || result.list.length === 0) {
+          lastError = '未找到该资源的详情信息，可能已下线';
+          if (attempt < maxRetries) {
+            console.log(`[Store] loadDetail empty list, retrying in ${1500 + attempt * 1000}ms...`);
+            await new Promise(resolve => setTimeout(resolve, 1500 + attempt * 1000));
+            continue;
+          }
+          break;
+        }
+
+        const vod = result.list[0];
+        console.log('[Store] loadDetail vod:', {
+          vod_id: vod.vod_id,
+          vod_name: vod.vod_name,
+          vod_play_from: vod.vod_play_from,
+          vod_play_url: vod.vod_play_url,
+          vod_play_url_length: vod.vod_play_url?.length,
+          vod_keys: Object.keys(vod),
+        });
+        currentVod.value = {
+          ...vod,
+          sourceKey: activeSite.value.key,
+        };
+        // 若返回了 vod 但没有播放源，给出更具体的提示
+        if (!vod.vod_play_from || !vod.vod_play_url) {
+          // Prioritize URL/domain detection from the site's api URL.
+          // Falls back to key/name matching for sites without a URL-style api.
+          const apiLower = (activeSite.value.api || '').toLowerCase();
+          const keyLower = (activeSite.value.key || '').toLowerCase();
+          const nameLower = (activeSite.value.name || '').toLowerCase();
+          const isPan =
+            apiLower.includes('quark.cn') ||
+            apiLower.includes('drive.uc.cn') ||
+            apiLower.includes('pan.baidu.com') ||
+            apiLower.includes('alipan.com') ||
+            apiLower.includes('aliyundrive.com') ||
+            apiLower.includes('bilibili.com') ||
+            keyLower.includes('quark') ||
+            keyLower.includes('uc') ||
+            keyLower.includes('baidu') ||
+            keyLower.includes('ali') ||
+            nameLower.includes('夸克') ||
+            nameLower.includes('百度') ||
+            nameLower.includes('阿里') ||
+            (vod as any).needPanLogin;
+          if (isPan) {
+            // 触发 needPanLogin UI 分支
+            (currentVod.value as any).needPanLogin = true;
+          } else {
+            detailError.value =
+              '该资源暂无可播放的源，可能分享链接已失效或资源已下线';
+          }
+        }
+        // Success - clear error and break out of retry loop
+        detailError.value = '';
+        break;
+      } catch (e: any) {
+        if (e.name === 'AbortError') break;
+        console.warn(`loadDetail failed (attempt ${attempt + 1}):`, e.message);
+        lastError = `加载详情失败: ${e.message || '未知错误'}`;
+        if (attempt < maxRetries) {
+          console.log(`[Store] loadDetail error, retrying in ${1500 + attempt * 1000}ms...`);
+          await new Promise(resolve => setTimeout(resolve, 1500 + attempt * 1000));
         }
       }
-    } catch (e: any) {
-      if (e.name !== 'AbortError') {
-        console.warn('loadDetail failed:', e.message);
-        detailError.value = `加载详情失败: ${e.message || '未知错误'}`;
-      }
-    } finally {
-      detailLoading.value = false;
-      detailAbortController = null;
     }
+
+    // If we exited the loop with an error and no vod was loaded
+    if (!currentVod.value && lastError) {
+      detailError.value = lastError;
+    }
+
+    detailLoading.value = false;
+    detailAbortController = null;
   }
 
   async function loadPlay(
