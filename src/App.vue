@@ -73,6 +73,32 @@
       <header class="h-[52px] shrink-0 flex items-center justify-between px-5"
         style="background: var(--color-bg-glass); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border-bottom: var(--color-border);">
         <div class="flex items-center gap-3">
+          <!-- Config Switcher (多仓配置切换) - 按钮风格 -->
+          <el-popover v-if="store.subConfigs.length > 0" placement="bottom-start" trigger="click" :width="200" :disabled="store.mergeSubConfigs">
+            <template #reference>
+              <button 
+                class="flex items-center gap-2 px-3 py-1.5 transition-colors duration-150"
+                :class="{ 'opacity-50 cursor-not-allowed': store.mergeSubConfigs }"
+                :style="{
+                  color: store.mergeSubConfigs ? 'var(--color-text-tertiary)' : 'var(--color-text-secondary)',
+                  borderRadius: 'var(--radius-sm, 6px)',
+                  border: '1px solid var(--color-border)',
+                  background: store.mergeSubConfigs ? 'var(--color-bg-elevated)' : 'transparent'
+                }">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                <span class="text-[13px] font-medium whitespace-nowrap">{{ store.mergeSubConfigs ? '已合并' : (activeSubConfigName || '选择配置') }}</span>
+                <svg v-if="!store.mergeSubConfigs" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+              </button>
+            </template>
+            <div class="max-h-64 overflow-auto">
+              <div v-for="(sub, idx) in store.subConfigs" :key="sub.url"
+                class="flex items-center gap-2 px-3 py-2 cursor-pointer text-[13px] rounded transition-colors duration-150"
+                :style="{ color: idx === store.activeSubConfigIndex ? 'var(--color-primary)' : 'var(--color-text-secondary)', background: idx === store.activeSubConfigIndex ? 'var(--color-primary-soft)' : 'transparent' }"
+                @click="onSubConfigChange(idx)">
+                {{ sub.name }}
+              </div>
+            </div>
+          </el-popover>
           <!-- Source Selector -->
           <el-popover placement="bottom-start" trigger="click" :width="240">
             <template #reference>
@@ -228,6 +254,14 @@ function isNavActive(item: { path: string }) {
 
 // Active site name for source selector
 const activeSiteName = computed(() => store.activeSite?.name || '')
+
+// Active sub-config name for config switcher
+const activeSubConfigName = computed(() => {
+  if (store.activeSubConfigIndex >= 0 && store.subConfigs[store.activeSubConfigIndex]) {
+    return store.subConfigs[store.activeSubConfigIndex].name
+  }
+  return ''
+})
 
 // Unsupported format dialog state
 const formatDialog = reactive({
@@ -548,6 +582,20 @@ const onSiteChange = (val: string) => {
   if (wasSameSite) {
     console.log(`[App] wasSameSite=true, calling loadHome(true)`)
     store.loadHome(true)
+  }
+}
+
+// 多仓配置切换
+const onSubConfigChange = async (index: number) => {
+  console.log(`[App] onSubConfigChange: index=${index}`)
+  const success = await store.loadSubConfig(index)
+  if (success) {
+    ElMessage.success(`已切换到: ${store.subConfigs[index].name}`)
+    if (route.name === 'detail') {
+      router.push('/')
+    }
+  } else {
+    ElMessage.error('配置切换失败')
   }
 }
 </script>

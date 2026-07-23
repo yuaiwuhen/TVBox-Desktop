@@ -119,6 +119,12 @@ function formatProgress(progress: number, duration: number): string {
 }
 
 function goToPlay(item: HistoryRecord) {
+  // msearch: 前缀表示发现类源，重定向到快速搜索
+  if (typeof item.vod_id === 'string' && item.vod_id.startsWith('msearch:')) {
+    router.push({ name: 'search', query: { keyword: item.vod_name, fast: '1' } })
+    store.doSearch(item.vod_name, undefined, true)
+    return
+  }
   router.push({ name: 'detail', params: { sourceKey: item.sourceKey, vodId: item.vod_id } })
 }
 

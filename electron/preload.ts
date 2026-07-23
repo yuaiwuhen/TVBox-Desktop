@@ -3,7 +3,12 @@
 
 import { contextBridge, ipcRenderer } from 'electron';
 
-console.log('[Preload] Preload script loaded');
+console.log(
+  '[Preload] Preload script loaded, contextBridge:',
+  typeof contextBridge,
+  'ipcRenderer:',
+  typeof ipcRenderer,
+);
 
 const electronIPC = {
   invoke: (channel: string, ...args: any[]) =>
@@ -15,14 +20,38 @@ const electronIPC = {
   },
 };
 
-// Expose via contextBridge (works with or without contextIsolation)
+// Strategy 1: contextBridge.exposeInMainWorld (works with contextIsolation: true)
+let exposed = false;
 try {
-  contextBridge.exposeInMainWorld('electronIPC', electronIPC);
-} catch (_) {
-  // contextIsolation may be disabled, fallback to direct window assignment
+  if (contextBridge && typeof contextBridge.exposeInMainWorld === 'function') {
+    contextBridge.exposeInMainWorld('electronIPC', electronIPC);
+    exposed = true;
+    console.log('[Preload] contextBridge.exposeInMainWorld succeeded');
+  }
+} catch (e: any) {
+  console.warn(
+    '[Preload] contextBridge.exposeInMainWorld failed:',
+    e?.message || e,
+  );
 }
 
-// Also expose directly on window for contextIsolation: false mode
+// Strategy 2: direct window assignment (works with contextIsolation: false)
+if (!exposed && typeof window !== 'undefined') {
+  try {
+    (window as any).electronIPC = electronIPC;
+    console.log('[Preload] window.electronIPC assigned directly');
+  } catch (e: any) {
+    console.error(
+      '[Preload] window.electronIPC assignment failed:',
+      e?.message || e,
+    );
+  }
+}
+
+// Final verification
 if (typeof window !== 'undefined') {
-  (window as any).electronIPC = electronIPC;
+  console.log(
+    '[Preload] Final check - window.electronIPC:',
+    typeof (window as any).electronIPC,
+  );
 }

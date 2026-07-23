@@ -1,18 +1,37 @@
 /**
  * DexConverter - DEX to JAR conversion module
  *
- * Converts Android DEX files to standard JAR format using dex2jar tool.
- * The tool is bundled in the project's tools/ directory.
+ * Converts Android DEX files to standard JAR format.
+ *
+ * Strategy:
+ *   1. enjarify (preferred) — Google's Python DEX→JAR translator. More
+ *      accurate than dex2jar: does NOT produce the "new AbstractSelf" bug
+ *      in merge classes' <clinit> that breaks InstantiationError on Guard
+ *      spiders. Requires Python 3 on PATH (dev) or bundled with the app.
+ *   2. dex2jar (fallback) — used when Python is unavailable (e.g. fresh
+ *      production install without Python). Has known conversion bugs but
+ *      covers the majority of non-Guard spider JARs.
+ *
+ * The converter probes Python availability at initialize() time and picks
+ * the strategy. convertDexToJar() always tries enjarify first when Python
+ * is available, then falls back to dex2jar with 3 retries on failure.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
+
+const MIN_VALID_JAR_SIZE = 1024; // 1KB threshold — empty ZIP is 22 bytes
 
 export class DexConverter {
-  private toolsDir: string;
-  private dex2jarPath: string = '';
+  private toolsDir: string = '';
   private initialized: boolean = false;
+  private pythonExe: string | null = null;
+  private enjarifyDir: string | null = null;
+  private dex2jarLibDir: string | null = null;
 
   constructor() {
     // Look for tools directory relative to app root
@@ -29,14 +48,21 @@ export class DexConverter {
 
     this.toolsDir = '';
     for (const root of possibleRoots) {
-      const candidate = path.join(root, 'tools', 'dex-tools-v2.4', 'lib');
-      if (fs.existsSync(candidate)) {
-        this.toolsDir = path.join(root, 'tools');
+      if (!root) continue;
+      const candidate = path.join(root, 'tools');
+      const enjarifyMain = path.join(
+        candidate,
+        'enjarify',
+        'enjarify',
+        'main.py',
+      );
+      const dexToolsLib = path.join(candidate, 'dex-tools-v2.4', 'lib');
+      if (fs.existsSync(enjarifyMain) || fs.existsSync(dexToolsLib)) {
+        this.toolsDir = candidate;
         break;
       }
     }
 
-    // Fallback: use default
     if (!this.toolsDir) {
       this.toolsDir = path.join(appRoot, 'tools');
     }
@@ -45,38 +71,76 @@ export class DexConverter {
   }
 
   /**
-   * Initialize dex2jar tool
-   * Finds the bundled dex2jar jar file
+   * Initialize converter: probe for enjarify (Python) and dex2jar.
+   * Returns true if at least one strategy is available.
    */
   async initialize(): Promise<boolean> {
-    // Check bundled tool paths
-    const possiblePaths = [
-      path.join(this.toolsDir, 'dex-tools-v2.4', 'lib', 'dex-tools-v2.4.jar'),
-      path.join(
-        this.toolsDir,
-        'dex-tools-v2.4',
-        'lib',
-        'dex-translator-v2.4.jar',
-      ),
-      path.join(this.toolsDir, 'dex-tools', 'lib', 'dex-tools-v2.4.jar'),
-    ];
-
-    for (const p of possiblePaths) {
-      if (fs.existsSync(p)) {
-        this.dex2jarPath = p;
-        this.initialized = true;
-        console.log('[DexConverter] Found bundled dex2jar:', p);
-        return true;
+    // 1. Probe enjarify (Python)
+    const enjarifyMain = path.join(
+      this.toolsDir,
+      'enjarify',
+      'enjarify',
+      'main.py',
+    );
+    if (fs.existsSync(enjarifyMain)) {
+      const python = await this.findPython();
+      if (python) {
+        this.pythonExe = python;
+        this.enjarifyDir = path.join(this.toolsDir, 'enjarify');
+        console.log('[DexConverter] enjarify available (Python:', python, ')');
+      } else {
+        console.warn(
+          '[DexConverter] enjarify found but Python 3 not available on PATH',
+        );
       }
     }
 
-    // Not found
-    this.initialized = false;
-    console.error('[DexConverter] dex2jar tool not found in:', this.toolsDir);
-    console.error(
-      '[DexConverter] Expected: tools/dex-tools-v2.4/lib/dex-tools-v2.4.jar',
-    );
-    return false;
+    // 2. Probe dex2jar (always available in bundled tools/)
+    const dexToolsLib = path.join(this.toolsDir, 'dex-tools-v2.4', 'lib');
+    if (fs.existsSync(dexToolsLib)) {
+      this.dex2jarLibDir = dexToolsLib;
+      console.log('[DexConverter] dex2jar available at:', dexToolsLib);
+    }
+
+    if (this.pythonExe && this.enjarifyDir) {
+      this.initialized = true;
+      console.log('[DexConverter] Primary strategy: enjarify');
+    } else if (this.dex2jarLibDir) {
+      this.initialized = true;
+      console.log('[DexConverter] Primary strategy: dex2jar (fallback)');
+    } else {
+      this.initialized = false;
+      console.error(
+        '[DexConverter] No DEX→JAR converter available. Expected tools/enjarify/ or tools/dex-tools-v2.4/',
+      );
+    }
+
+    return this.initialized;
+  }
+
+  /**
+   * Find a Python 3 interpreter on PATH.
+   * Tries python, python3, py (Windows) / python3, python, pypy3 (Unix).
+   */
+  private async findPython(): Promise<string | null> {
+    const candidates =
+      process.platform === 'win32'
+        ? ['python.exe', 'python3.exe', 'py.exe']
+        : ['python3', 'python', 'pypy3'];
+
+    for (const cmd of candidates) {
+      try {
+        // Use `--version` — Python 3 prints "Python 3.x.y" to stdout
+        const { stdout, stderr } = await execAsync(`"${cmd}" --version`);
+        const out = (stdout + stderr).trim();
+        if (/Python 3\./.test(out)) {
+          return cmd;
+        }
+      } catch {
+        // not found or wrong version — try next
+      }
+    }
+    return null;
   }
 
   /**
@@ -92,46 +156,88 @@ export class DexConverter {
       exeName,
     );
     if (fs.existsSync(bundledJava)) {
-      console.log('[DexConverter] Using bundled JRE:', bundledJava);
       return bundledJava;
     }
-    console.log('[DexConverter] Using system java (bundled JRE not found)');
     return exeName;
   }
 
   /**
-   * Execute shell command
+   * Convert DEX to JAR using enjarify (Python).
+   * Sets PYTHONPATH so `python -m enjarify.main` resolves the package.
    */
-  private execCommand(cmd: string): Promise<string> {
+  private convertWithEnjarify(dexPath: string, jarPath: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      exec(cmd, { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
-        if (error) {
-          reject(new Error(`Command failed: ${error.message}\n${stderr}`));
+      const args = ['-O', '-m', 'enjarify.main', dexPath, '-o', jarPath];
+      const env = { ...process.env, PYTHONPATH: this.enjarifyDir! };
+
+      const proc = spawn(this.pythonExe!, args, {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      let stderr = '';
+      proc.stdout.on('data', (d) => (stdout += d.toString()));
+      proc.stderr.on('data', (d) => (stderr += d.toString()));
+
+      proc.on('close', (code) => {
+        if (code === 0 && fs.existsSync(jarPath)) {
+          const stats = fs.statSync(jarPath);
+          if (stats.size >= MIN_VALID_JAR_SIZE) {
+            console.log(
+              '[DexConverter] enjarify output:',
+              jarPath,
+              `(${stats.size} bytes)`,
+            );
+            resolve();
+          } else {
+            reject(
+              new Error(
+                `enjarify produced too-small JAR (${stats.size} bytes). stderr: ${stderr}`,
+              ),
+            );
+          }
         } else {
-          resolve(stdout);
+          reject(
+            new Error(`enjarify exited with code ${code}. stderr: ${stderr}`),
+          );
         }
+      });
+
+      proc.on('error', (err) => {
+        reject(new Error(`Failed to spawn enjarify: ${err.message}`));
       });
     });
   }
 
   /**
-   * Convert DEX file to JAR
-   * Uses d2j-dex2jar.sh/bat or falls back to java -jar
+   * Convert DEX to JAR using dex2jar (Java).
+   */
+  private async convertWithDex2jar(
+    dexPath: string,
+    jarPath: string,
+  ): Promise<void> {
+    const javaExe = this.resolveJavaExe();
+    const cmd = `"${javaExe}" -Xms512m -Xmx2048m -cp "${this.dex2jarLibDir}/*" com.googlecode.dex2jar.tools.Dex2jarCmd "${dexPath}" -o "${jarPath}"`;
+    await execAsync(cmd, { maxBuffer: 1024 * 1024 * 10 });
+  }
+
+  /**
+   * Convert DEX file to JAR.
+   * Tries enjarify first (preferred, no conversion bugs), then falls back
+   * to dex2jar with up to 3 retries on transient failures.
    */
   async convertDexToJar(dexPath: string, jarPath: string): Promise<string> {
     if (!this.initialized) {
       const success = await this.initialize();
       if (!success) {
         throw new Error(
-          'dex2jar tool not found. Ensure tools/dex-tools-v2.4/ exists in the project.',
+          'No DEX→JAR converter available. Ensure tools/enjarify/ (with Python 3) or tools/dex-tools-v2.4/ exists.',
         );
       }
     }
 
-    // Check if already converted - validate it's a real JAR (not an empty
-    // 22-byte stub from a previously failed conversion). An empty ZIP file
-    // is exactly 22 bytes (End of Central Directory record only).
-    const MIN_VALID_JAR_SIZE = 1024; // 1KB threshold
+    // Reuse existing valid JAR
     if (fs.existsSync(jarPath)) {
       const stats = fs.statSync(jarPath);
       if (stats.size >= MIN_VALID_JAR_SIZE) {
@@ -143,15 +249,12 @@ export class DexConverter {
         return jarPath;
       }
       console.warn(
-        `[DexConverter] Existing converted JAR is too small (${stats.size} bytes), likely a failed conversion. Re-converting...`,
+        `[DexConverter] Existing JAR too small (${stats.size} bytes), re-converting...`,
       );
       try {
         fs.unlinkSync(jarPath);
-      } catch (unlinkErr: any) {
-        console.warn(
-          '[DexConverter] Failed to delete stale JAR:',
-          unlinkErr.message,
-        );
+      } catch {
+        /* ignore */
       }
     }
 
@@ -159,61 +262,70 @@ export class DexConverter {
     console.log('[DexConverter] Input:', dexPath);
     console.log('[DexConverter] Output:', jarPath);
 
-    // Use bundled JRE's java.exe directly (bypass d2j-dex2jar.bat which
-    // depends on system PATH for java). Falls back to system java in dev.
-    const javaExe = this.resolveJavaExe();
-    const libDir = path.join(this.toolsDir, 'dex-tools-v2.4', 'lib');
-    const cmd = `"${javaExe}" -Xms512m -Xmx2048m -cp "${libDir}/*" com.googlecode.dex2jar.tools.Dex2jarCmd "${dexPath}" -o "${jarPath}"`;
+    // Try enjarify first
+    if (this.pythonExe && this.enjarifyDir) {
+      try {
+        console.log('[DexConverter] Trying enjarify...');
+        await this.convertWithEnjarify(dexPath, jarPath);
+        return jarPath;
+      } catch (e: any) {
+        console.warn(
+          '[DexConverter] enjarify failed:',
+          e.message,
+          '— falling back to dex2jar',
+        );
+        // Clean partial output
+        if (fs.existsSync(jarPath)) {
+          try {
+            fs.unlinkSync(jarPath);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
 
-    // Retry conversion up to 3 times. The dex2jar process occasionally exits
-    // cleanly without producing output (transient Windows file-lock / antivirus
-    // interference during JVM startup or DEX parsing). Empirically, a second
-    // or third attempt succeeds. Without retry, the first spider of a fresh
-    // config fails permanently with "JAR file not created after conversion"
-    // even though subsequent spiders using the same JAR convert fine.
+    // Fall back to dex2jar with retries
+    if (!this.dex2jarLibDir) {
+      throw new Error(
+        'enjarify failed and dex2jar not available. Cannot convert DEX to JAR.',
+      );
+    }
+
     const maxAttempts = 3;
     let lastError: Error | null = null;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      // Clean up any partial / empty output from a previous attempt so
-      // execCommand starts from a clean slate.
       if (fs.existsSync(jarPath)) {
         try {
           fs.unlinkSync(jarPath);
         } catch {
-          /* ignore — will be overwritten by dex2jar */
+          /* ignore */
         }
       }
-
       try {
         console.log(
-          `[DexConverter] Running (attempt ${attempt}/${maxAttempts}):`,
-          cmd,
+          `[DexConverter] Running dex2jar (attempt ${attempt}/${maxAttempts})...`,
         );
-        const output = await this.execCommand(cmd);
-        console.log(
-          `[DexConverter] Conversion output (attempt ${attempt}):`,
-          output,
-        );
-
+        await this.convertWithDex2jar(dexPath, jarPath);
         if (fs.existsSync(jarPath)) {
           const stats = fs.statSync(jarPath);
-          console.log(
-            '[DexConverter] Converted JAR size:',
-            stats.size,
-            'bytes',
-          );
           if (stats.size >= MIN_VALID_JAR_SIZE) {
+            console.log(
+              '[DexConverter] dex2jar output:',
+              jarPath,
+              `(${stats.size} bytes)`,
+            );
             return jarPath;
           }
           lastError = new Error(
-            `Conversion produced an empty or too-small JAR (${stats.size} bytes). The DEX file may be corrupted or in an unsupported format.`,
+            `dex2jar produced too-small JAR (${stats.size} bytes)`,
           );
         } else {
-          lastError = new Error('JAR file not created after conversion');
+          lastError = new Error('dex2jar did not produce a JAR file');
         }
       } catch (e: any) {
-        console.error(
-          `[DexConverter] Conversion command failed (attempt ${attempt}):`,
+        console.warn(
+          `[DexConverter] dex2jar attempt ${attempt} failed:`,
           e.message,
         );
         lastError = e;
@@ -221,20 +333,111 @@ export class DexConverter {
 
       if (attempt < maxAttempts) {
         const delayMs = 1000 * attempt; // 1s, 2s
-        console.log(
-          `[DexConverter] Conversion failed, retrying in ${delayMs}ms...`,
-        );
         await new Promise((r) => setTimeout(r, delayMs));
       }
     }
 
-    console.error(
-      `[DexConverter] Conversion failed after ${maxAttempts} attempts:`,
-      lastError?.message,
-    );
     throw (
       lastError ||
-      new Error(`JAR file not created after ${maxAttempts} conversion attempts`)
+      new Error(`DEX to JAR conversion failed after ${maxAttempts} attempts`)
+    );
+  }
+
+  /**
+   * Convert DEX to JAR using dex2jar ONLY (no enjarify).
+   *
+   * Use this for DEX files that contain Gson TypeToken subclasses,
+   * because enjarify does NOT preserve generic Signature attributes,
+   * causing "TypeToken must be created with a type argument" at runtime.
+   * dex2jar preserves Signature attributes correctly.
+   */
+  async convertDexToJarWithDex2jar(
+    dexPath: string,
+    jarPath: string,
+  ): Promise<string> {
+    if (!this.initialized) {
+      const success = await this.initialize();
+      if (!success) {
+        throw new Error(
+          'DexConverter not available. Ensure tools/dex-tools-v2.4/ exists.',
+        );
+      }
+    }
+
+    if (!this.dex2jarLibDir) {
+      throw new Error(
+        'dex2jar not available. Cannot convert DEX with signature preservation.',
+      );
+    }
+
+    // Reuse existing valid JAR
+    if (fs.existsSync(jarPath)) {
+      const stats = fs.statSync(jarPath);
+      if (stats.size >= MIN_VALID_JAR_SIZE) {
+        console.log(
+          '[DexConverter] JAR already exists (dex2jar):',
+          jarPath,
+          `(${stats.size} bytes)`,
+        );
+        return jarPath;
+      }
+      try {
+        fs.unlinkSync(jarPath);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    console.log(
+      '[DexConverter] Converting DEX to JAR (dex2jar, preserves signatures)...',
+    );
+    console.log('[DexConverter] Input:', dexPath);
+    console.log('[DexConverter] Output:', jarPath);
+
+    const maxAttempts = 3;
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (fs.existsSync(jarPath)) {
+        try {
+          fs.unlinkSync(jarPath);
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        await this.convertWithDex2jar(dexPath, jarPath);
+        if (fs.existsSync(jarPath)) {
+          const stats = fs.statSync(jarPath);
+          if (stats.size >= MIN_VALID_JAR_SIZE) {
+            console.log(
+              '[DexConverter] dex2jar output:',
+              jarPath,
+              `(${stats.size} bytes)`,
+            );
+            return jarPath;
+          }
+          lastError = new Error(
+            `dex2jar produced too-small JAR (${stats.size} bytes)`,
+          );
+        } else {
+          lastError = new Error('dex2jar did not produce a JAR file');
+        }
+      } catch (e: any) {
+        console.warn(
+          `[DexConverter] dex2jar attempt ${attempt} failed:`,
+          e.message,
+        );
+        lastError = e;
+      }
+
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
+    }
+
+    throw (
+      lastError ||
+      new Error(`dex2jar conversion failed after ${maxAttempts} attempts`)
     );
   }
 

@@ -494,7 +494,7 @@ export class LocalProxyServer {
     pathname: string,
     res: ServerResponse,
   ): Promise<void> {
-    // /file/path/to/file → serve from dataDir
+    // /file/path/to/file → serve from dataDir, with fallback to project fatcat/
     const relativePath = pathname.replace(/^\/file\//, '');
     if (!relativePath) {
       this.sendError(res, 400, 'No file path specified');
@@ -511,19 +511,32 @@ export class LocalProxyServer {
       return;
     }
 
+    // Fallback: spiders like csp_PanSearch/csp_MiSou fetch
+    // /file/fatcat/token.txt and /file/fatcat/kk.txt. The main process
+    // ProxyServer serves these from process.cwd()/fatcat/, but in dev mode
+    // the renderer's LocalProxyServer (on port 9978) wins the port race.
+    // Look in the project fatcat/ directory as a fallback.
+    let resolvedPath = filePath;
     if (!fs.existsSync(filePath)) {
-      this.sendError(res, 404, 'File not found');
-      return;
+      const cwd = process.cwd();
+      const fatcatPath = path.join(cwd, safePath);
+      // Ensure fatcatPath is inside cwd (no traversal escape)
+      if (fatcatPath.startsWith(cwd) && fs.existsSync(fatcatPath)) {
+        resolvedPath = fatcatPath;
+      } else {
+        this.sendError(res, 404, 'File not found');
+        return;
+      }
     }
 
     try {
-      const stat = fs.statSync(filePath);
+      const stat = fs.statSync(resolvedPath);
       if (stat.isDirectory()) {
         this.sendError(res, 400, 'Path is a directory');
         return;
       }
 
-      const ext = path.extname(filePath).toLowerCase();
+      const ext = path.extname(resolvedPath).toLowerCase();
       const contentType = getContentType(ext);
 
       res.writeHead(200, {
@@ -532,7 +545,7 @@ export class LocalProxyServer {
         'Access-Control-Allow-Origin': '*',
       });
 
-      const stream = fs.createReadStream(filePath);
+      const stream = fs.createReadStream(resolvedPath);
       stream.pipe(res);
     } catch (e) {
       console.error('[LocalProxyServer] File serve error:', e);

@@ -394,21 +394,32 @@ function removeTrailingCommas(text: string): string {
 
 /** Try to parse JSON with progressively more lenient preprocessing. */
 function lenientJsonParse(text: string): any | null {
+  // Stage 0: strip trailing non-JSON chars (e.g., AES decryption padding
+  // artifacts like EOT/ETX after the closing brace). This handles configs
+  // that end with control characters produced by AES decryption.
+  const trimmed = text.trim();
+  const lastBrace = Math.max(
+    trimmed.lastIndexOf('}'),
+    trimmed.lastIndexOf(']'),
+  );
+  const cleaned =
+    lastBrace >= 0 ? trimmed.substring(0, lastBrace + 1) : trimmed;
+
   // Stage 1: direct
   try {
-    return JSON.parse(text);
+    return JSON.parse(cleaned);
   } catch {
     /* try next */
   }
   // Stage 2: strip comments
   try {
-    return JSON.parse(stripJsonComments(text));
+    return JSON.parse(stripJsonComments(cleaned));
   } catch {
     /* try next */
   }
   // Stage 3: strip comments + escape control chars
   try {
-    return JSON.parse(escapeControlCharsInStrings(stripJsonComments(text)));
+    return JSON.parse(escapeControlCharsInStrings(stripJsonComments(cleaned)));
   } catch {
     /* try next */
   }
@@ -416,7 +427,7 @@ function lenientJsonParse(text: string): any | null {
   try {
     return JSON.parse(
       removeTrailingCommas(
-        escapeControlCharsInStrings(stripJsonComments(text)),
+        escapeControlCharsInStrings(stripJsonComments(cleaned)),
       ),
     );
   } catch {
@@ -677,8 +688,8 @@ export class ConfigParser {
 
       // Detect multi-config wrapper format {"urls":[{name,url},...]}.
       // This format (used by 及时雨 and similar aggregator configs) lists
-      // multiple sub-config URLs that must each be fetched and merged.
-      // Mirrors Android TVBox's MultiConfigLoader behavior.
+      // multiple sub-config URLs. We return the list for user selection
+      // instead of merging all sub-configs (which causes duplicate keys).
       const wrapper = lenientJsonParse(json);
       if (
         wrapper &&
@@ -690,11 +701,28 @@ export class ConfigParser {
         console.log(
           `[ConfigParser] detected multi-config wrapper with ${wrapper.urls.length} sub-URLs`,
         );
-        const mergedJson = await this.loadMultiConfig(wrapper.urls);
-        json = JSON.stringify(mergedJson);
+        // Return a special config with sub-config list for UI selection
+        const subConfigs = wrapper.urls
+          .filter((u: any) => u && u.url)
+          .map((u: any) => ({
+            name: String(u.name || '').trim() || u.url,
+            url: String(u.url).trim(),
+          }));
+        // Create a placeholder config that signals multi-config mode
+        const multiConfig = {
+          isMultiConfig: true,
+          subConfigs,
+          sites: [],
+          parses: [],
+          flags: [],
+          live: [],
+          ijkCodes: [],
+        };
+        this.config = multiConfig;
         console.log(
-          `[ConfigParser] merged multi-config: ${mergedJson.sites?.length || 0} sites total`,
+          `[ConfigParser] multi-config mode: ${subConfigs.length} sub-configs available for selection`,
         );
+        return multiConfig;
       }
 
       // Parse the JSON into internal state

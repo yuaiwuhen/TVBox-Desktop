@@ -78,3 +78,11 @@ _tmp_addctor/
 _tmp_enjarify_scan/
 _tmp_merge_scan/
 com/
+
+# Temporary test scripts in root directory
+test-*.mjs
+test-*.json
+test-*.txt
+
+# Android stub classes (temporary)
+android/

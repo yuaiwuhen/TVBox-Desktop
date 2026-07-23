@@ -797,19 +797,50 @@ export class JsonRuleParser implements ISpider {
       headers['User-Agent'] = this.rules.ua;
     }
 
-    const resp = await axios.get(url, {
-      headers,
-      responseType: 'text',
-      timeout: 15000,
-    });
+    try {
+      const resp = await axios.get(url, {
+        headers,
+        responseType: 'text',
+        timeout: 15000,
+      });
 
-    const content =
-      typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-    console.log(
-      `[JsonRuleParser] fetchPage: status=${resp.status}, length=${content.length}`,
-    );
+      const content =
+        typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      console.log(
+        `[JsonRuleParser] fetchPage: status=${resp.status}, length=${content.length}`,
+      );
 
-    return content;
+      return content;
+    } catch (e: any) {
+      // Try GitHub mirror fallback for known proxy domains
+      const GITHUB_MIRRORS: Record<string, string[]> = {
+        'git.yylx.win': ['gh-proxy.com', 'fastgit.cc'],
+      };
+      for (const [fromMirror, alts] of Object.entries(GITHUB_MIRRORS)) {
+        const prefix = `https://${fromMirror}/`;
+        if (url.startsWith(prefix)) {
+          for (const altMirror of alts) {
+            const altUrl = `https://${altMirror}/` + url.slice(prefix.length);
+            try {
+              const resp = await axios.get(altUrl, {
+                headers,
+                responseType: 'text',
+                timeout: 15000,
+              });
+              const content =
+                typeof resp.data === 'string'
+                  ? resp.data
+                  : JSON.stringify(resp.data);
+              console.log(
+                `[JsonRuleParser] fetchPage mirror ${altMirror}: status=${resp.status}, length=${content.length}`,
+              );
+              return content;
+            } catch {}
+          }
+        }
+      }
+      throw e; // Re-throw original error if all mirrors fail
+    }
   }
 
   /**

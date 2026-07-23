@@ -35,50 +35,204 @@ try {
   forge = null;
 }
 
+// ─── Jinja2 template stub for cheerio.jinja2 ───────────────────────────────
+// drpy2.min.js calls cheerio.jinja2(url, {fl: fl}) and
+// cheerio.jinja2(rule.homeUrl, {rule: rule}) to render URL templates with
+// Jinja2-style {{ var.prop }} syntax. The real implementation comes from
+// drpy2's side-effect import modules (cLFE.js/kOUW.js/ucoN.js) which are
+// stubbed as `void 0;` because down.nigx.cn is Cloudflare-blocked. This
+// minimal stub handles variable substitution with dot notation, covering
+// the common URL template use case.
+function drpyJinja2(template: string, vars: any): string {
+  if (!template || typeof template !== 'string') return template || '';
+  vars = vars || {};
+  return template.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_match, expr) => {
+    const parts = expr.trim().split('.');
+    let val: any = vars;
+    for (const p of parts) {
+      if (val == null) return '';
+      val = val[p];
+    }
+    return val == null ? '' : String(val);
+  });
+}
+
+// Wrap cheerio to add jinja2 method. `import * as cheerio` yields a namespace
+// object with own enumerable properties; Object.assign copies them into a new
+// mutable object so we can attach jinja2. This wrapper is used for both the
+// sandbox global and __require__('cheerio') so drpy2 sees the same object.
+const cheerioWithJinja: any = Object.assign({}, cheerio as any, {
+  jinja2: drpyJinja2,
+});
+
+// ─── GitHub mirror fallback ────────────────────────────────────────────────
+// Some GitHub acceleration proxies (e.g., git.yylx.win) may fail from the
+// browser due to CORS, SSL, or network issues. When a fetch to a known proxy
+// domain fails, we retry with alternative mirrors.
+const GITHUB_MIRROR_CHAINS: string[][] = [
+  // Each chain is a list of proxy domains that serve the same URL pattern:
+  // https://{proxy}/{original-url}
+  // We try them in order until one succeeds.
+  ['git.yylx.win', 'gh-proxy.com', 'fastgit.cc'],
+];
+
+function rewriteUrlWithMirror(
+  url: string,
+  fromMirror: string,
+  toMirror: string,
+): string {
+  // Replace the proxy domain in the URL
+  const prefix = `https://${fromMirror}/`;
+  if (url.startsWith(prefix)) {
+    return `https://${toMirror}/` + url.slice(prefix.length);
+  }
+  return url;
+}
+
+async function fetchWithMirrorFallback(
+  url: string,
+  options: { responseType?: string; timeout?: number } = {},
+): Promise<string> {
+  // Try the original URL first
+  try {
+    const resp = await axios.get(url, {
+      responseType: options.responseType || 'text',
+      timeout: options.timeout || 15000,
+    });
+    const body =
+      typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+    if (body && body.length > 0) return body;
+  } catch (e: any) {
+    // Fall through to mirror retry
+    const errMsg = e.message || '';
+    console.warn(
+      `[JsSpider] fetch failed for ${url}: ${errMsg.substring(0, 100)}, trying mirrors`,
+    );
+  }
+
+  // Find which mirror chain this URL belongs to and try alternatives
+  for (const chain of GITHUB_MIRROR_CHAINS) {
+    const matchedMirror = chain.find((m) => url.startsWith(`https://${m}/`));
+    if (!matchedMirror) continue;
+
+    for (const altMirror of chain) {
+      if (altMirror === matchedMirror) continue;
+      const altUrl = rewriteUrlWithMirror(url, matchedMirror, altMirror);
+      try {
+        const resp = await axios.get(altUrl, {
+          responseType: options.responseType || 'text',
+          timeout: options.timeout || 15000,
+        });
+        const body =
+          typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+        if (body && body.length > 0) {
+          console.log(
+            `[JsSpider] mirror fallback: ${altMirror} succeeded for ${url.substring(0, 80)}...`,
+          );
+          return body;
+        }
+      } catch (e2: any) {
+        console.warn(
+          `[JsSpider] mirror ${altMirror} also failed: ${(e2.message || '').substring(0, 80)}`,
+        );
+      }
+    }
+  }
+
+  throw new Error(`All mirrors failed for ${url}`);
+}
+
+// Like fetchWithMirrorFallback but skips the original URL (already known to fail)
+async function fetchMirrorOnly(
+  url: string,
+  options: { responseType?: string; timeout?: number } = {},
+): Promise<string> {
+  for (const chain of GITHUB_MIRROR_CHAINS) {
+    const matchedMirror = chain.find((m) => url.startsWith(`https://${m}/`));
+    if (!matchedMirror) continue;
+
+    for (const altMirror of chain) {
+      if (altMirror === matchedMirror) continue;
+      const altUrl = rewriteUrlWithMirror(url, matchedMirror, altMirror);
+      try {
+        const resp = await axios.get(altUrl, {
+          responseType: options.responseType || 'text',
+          timeout: options.timeout || 15000,
+        });
+        const body =
+          typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+        if (body && body.length > 0) {
+          console.log(
+            `[JsSpider] mirror retry: ${altMirror} succeeded for ${url.substring(0, 80)}...`,
+          );
+          return body;
+        }
+      } catch (e2: any) {
+        console.warn(
+          `[JsSpider] mirror ${altMirror} also failed: ${(e2.message || '').substring(0, 80)}`,
+        );
+      }
+    }
+  }
+
+  throw new Error(`All mirrors failed for ${url}`);
+}
+
 // ─── Module source cache (URL → transpiled source) ─────────────────────────
 const moduleSourceCache: Map<string, string> = new Map();
+
+// ─── Prototype defineProperty neutralization ───────────────────────────────
+// drpy2.min.js calls Object.defineProperty(Object.prototype, "myValues", {value:...,enumerable:false})
+// without configurable:true. Since vm contexts share Object/Array/String with the
+// host, the first call defines a non-configurable property; subsequent inits in
+// different vm contexts fail with "Cannot redefine property". We rewrite these
+// calls to __safeDP__, which forces configurable:true and swallows redefine errors.
+function neutralizeProtoDefineProperty(code: string): string {
+  return code.replace(
+    /Object\.defineProperty\(\s*(Object\.prototype|String\.prototype|Array\.prototype|Number\.prototype|Boolean\.prototype|Function\.prototype)\s*,/g,
+    '__safeDP__($1,',
+  );
+}
 
 // ─── ESM → CJS transpilation ───────────────────────────────────────────────
 
 function transpileESM(code: string): string {
   let out = code;
 
-  // 1. import * as X from 'Y'
+  // 1. import * as X from 'Y' (X can be unicode identifier)
   out = out.replace(
-    /import\s+\*\s+as\s+(\w+)\s+from\s+['"]([^'"]+)['"]\s*;?/g,
+    /import\s+\*\s+as\s+([\w$]+)\s*from\s*['"]([^'"]+)['"]\s*;?/g,
     "const $1 = __require__('$2');",
   );
 
   // 2. import { X, Y } from 'Z'
   out = out.replace(
-    /import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]\s*;?/g,
+    /import\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"]\s*;?/g,
     (_match, names: string, mod: string) => {
       return `const { ${names.trim()} } = __require__('${mod}');`;
     },
   );
 
-  // 3. import X from 'Y'
+  // 3b. import X, { Y } from 'Z'  (combined default + named, before plain default)
   out = out.replace(
-    /import\s+(\w+)\s+from\s+['"]([^'"]+)['"]\s*;?/g,
-    "const $1 = __require__('$2');",
-  );
-
-  // 3b. import X, { Y } from 'Z'  (combined default + named)
-  out = out.replace(
-    /import\s+(\w+)\s*,\s*\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]\s*;?/g,
+    /import\s+([\w$]+)\s*,\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"]\s*;?/g,
     (_match, defName: string, names: string, mod: string) => {
       return `const ${defName} = __require__('${mod}'); const { ${names.trim()} } = __require__('${mod}');`;
     },
   );
 
-  // 3c. import 'Y' (side-effect import)
+  // 3. import X from 'Y' (X can be unicode identifier like 模板, 模 etc.)
+  // Use [^\s{,*]+ to match any non-whitespace, non-brace, non-comma, non-star identifier
   out = out.replace(
-    /import\s+['"]([^'"]+)['"]\s*;?/g,
-    "__require__('$1');",
+    /import\s+([^\s{,*][^\s{,]*)\s*from\s*['"]([^'"]+)['"]\s*;?/g,
+    "const $1 = __require__('$2');",
   );
 
+  // 3c. import 'Y' (side-effect import, also matches import"Y" without space)
+  out = out.replace(/import\s*['"]([^'"]+)['"]\s*;?/g, "__require__('$1');");
+
   // 4. export default { ... } — replace with assignment to __exports__
-  out = out.replace(/export\s+default\s+/g, '__exports_default__ = ');
+  out = out.replace(/export\s+default\s*/g, '__exports_default__ = ');
 
   // 5. export function X() — replace with function + assignment
   out = out.replace(/export\s+function\s+(\w+)/g, 'function $1');
@@ -123,6 +277,342 @@ if (typeof __exports_default__ !== 'undefined') {
 `;
 
   return out + suffix;
+}
+
+// ─── Local stubs for known drpy2 URL modules ───────────────────────────────
+// down.nigx.cn is frequently blocked by Cloudflare. These stubs provide
+// minimal implementations of the drpy2 helper modules so spiders can still
+// initialize and run when the real modules cannot be fetched.
+
+const DRPY_MUBAN_STUB = `
+var muban = {
+  mxpro: {
+    title: '',
+    host: '',
+    url: '/vodshow/fyclass--------fypage---.html',
+    searchUrl: '/vodsearch/**----------fypage---.html',
+    searchable: 2,
+    quickSearch: 0,
+    filterable: 1,
+    class_parse: '.navbar-items li:gt(0):lt(10);a&&Text;a&&href;/(\\\\d+)',
+    一级: '.module-items .module-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href',
+    二级: {
+      title: 'h1&&Text;.module-info-tag&&Text',
+      img: '.module-item-pic&&img&&data-src',
+      desc: '.module-info-item:eq(4)&&Text;;;.module-info-item-content:eq(1)&&Text;.module-info-item-content:eq(0)&&Text',
+      content: '.module-info-introduction&&Text',
+      tabs: '.module-tab-item',
+      lists: '.module-play-list:eq(#id) a',
+      tab_text: 'body&&Text',
+      list_text: 'body&&Text',
+      list_url: 'a&&href'
+    },
+    搜索: '.module-items .module-search-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href'
+  },
+  mxone: {
+    title: '',
+    host: '',
+    url: '/vodshow/fyclass--------fypage---.html',
+    searchUrl: '/vodsearch/**----------fypage---.html',
+    searchable: 2,
+    quickSearch: 0,
+    filterable: 1,
+    class_parse: '.nav-menu-items li:gt(0):lt(10);a&&Text;a&&href;/(\\\\d+)',
+    一级: '.module-list .module-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href',
+    二级: {
+      title: 'h1&&Text;.tag-link&&Text',
+      img: '.module-item-pic&&img&&data-src',
+      desc: '.video-info-items:eq(3)&&Text;;;.video-info-items:eq(1)&&Text;.video-info-items:eq(0)&&Text',
+      content: '.video-info-content&&Text',
+      tabs: '.module-tab-item',
+      lists: '.module-player-list:eq(#id) a',
+      tab_text: 'body&&Text',
+      list_text: 'body&&Text',
+      list_url: 'a&&href'
+    },
+    搜索: '.module-list .module-search-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href'
+  },
+  首图: {
+    title: '',
+    host: '',
+    url: '/list/fyclass-fypage.html',
+    searchUrl: '/search.php?q=**',
+    searchable: 2,
+    quickSearch: 0,
+    filterable: 0,
+    class_parse: '.stui-header__menu li:gt(0):lt(10);a&&Text;a&&href;/(\\\\d+)',
+    一级: '.stui-vodlist li;a&&title;a&&data-original;.pic-text&&Text;a&&href',
+    二级: {
+      title: 'h1&&Text;.stui-content__detail .data:eq(4)&&Text',
+      img: '.stui-content__thumb .thumb&&data-original',
+      desc: '.stui-content__detail .data:eq(1)&&Text;;;.stui-content__detail .data:eq(2)&&Text;.stui-content__detail .data:eq(0)&&Text',
+      content: '.stui-content__desc&&Text',
+      tabs: '.stui-pannel__head h3',
+      lists: '.stui-content__playlist:eq(#id) li',
+      tab_text: 'body&&Text',
+      list_text: 'body&&Text',
+      list_url: 'a&&href'
+    },
+    搜索: '.stui-vodlist li;a&&title;a&&data-original;.pic-text&&Text;a&&href'
+  },
+  海螺: {
+    title: '',
+    host: '',
+    url: '/vodshow/fyclass--------fypage---.html',
+    searchUrl: '/vodsearch/**----------fypage---.html',
+    searchable: 2,
+    quickSearch: 0,
+    filterable: 1,
+    class_parse: '.nav-menu-items li:gt(0):lt(10);a&&Text;a&&href;/(\\\\d+)',
+    一级: '.module-list .module-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href',
+    二级: {
+      title: 'h1&&Text;.tag-link&&Text',
+      img: '.module-item-pic&&img&&data-src',
+      desc: '.video-info-items:eq(3)&&Text;;;.video-info-items:eq(1)&&Text;.video-info-items:eq(0)&&Text',
+      content: '.video-info-content&&Text',
+      tabs: '.module-tab-item',
+      lists: '.module-player-list:eq(#id) a',
+      tab_text: 'body&&Text',
+      list_text: 'body&&Text',
+      list_url: 'a&&href'
+    },
+    搜索: '.module-list .module-search-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href'
+  },
+  短视: {
+    title: '',
+    host: '',
+    url: '/api.php/provide/vod/?ac=list&class=fyclass&page=fypage',
+    searchUrl: '/api.php/provide/vod/?ac=list&wd=**&pg=fypage',
+    searchable: 2,
+    quickSearch: 0,
+    filterable: 0,
+    class_parse: 'js:var classes=[];input=JSON.parse(request(input)).class;input.forEach(it=>{classes.push({type_id:it.type_id,type_name:it.type_name})});input=classes',
+    一级: 'js:var d=[];var input=JSON.parse(request(input)).list;d.forEach(function(it){d.push({title:it.vod_name,img:it.vod_pic,url:it.vod_id,desc:it.vod_remarks})});input=d',
+    二级: 'js:var input=JSON.parse(request("https://v1.hhzy.com/api.php/provide/vod/?ac=detail&ids="+input)).list[0];input={title:input.vod_name,img:input.vod_pic,desc:input.vod_year+" "+input.vod_area+" "+input.vod_remarks,content:input.vod_content,category:input.vod_class}',
+    搜索: 'js:var d=[];var input=JSON.parse(request(input)).list;d.forEach(function(it){d.push({title:it.vod_name,img:it.vod_pic,url:it.vod_id,desc:it.vod_remarks})});input=d'
+  },
+  vfed: {
+    title: '',
+    host: '',
+    url: '/vodshow/fyclass--------fypage---.html',
+    searchUrl: '/vodsearch/**----------fypage---.html',
+    searchable: 2,
+    quickSearch: 0,
+    filterable: 1,
+    class_parse: '.fed-pops-list li:gt(0):lt(10);a&&Text;a&&href;/(\\\\d+)',
+    一级: '.fed-list-item;a&&title;a&&data-original;.fed-list-remarks&&Text;a&&href',
+    二级: {
+      title: 'h1&&Text;.fed-part-rows a:eq(3)&&Text',
+      img: '.fed-list-item&&a&&data-original',
+      desc: '.fed-part-rows:eq(3)&&Text;;;.fed-part-rows:eq(1)&&Text;.fed-part-rows:eq(0)&&Text',
+      content: '.fed-part-es&&Text',
+      tabs: '.fed-drop-boxs li',
+      lists: '.fed-play-item:eq(#id) a',
+      tab_text: 'body&&Text',
+      list_text: 'body&&Text',
+      list_url: 'a&&href'
+    },
+    搜索: '.fed-list-item;a&&title;a&&data-original;.fed-list-remarks&&Text;a&&href'
+  },
+  默认: {
+    title: '',
+    host: '',
+    url: '',
+    searchUrl: '',
+    searchable: 2,
+    quickSearch: 0,
+    filterable: 1,
+    class_parse: '',
+    一级: '',
+    二级: '',
+    搜索: ''
+  }
+};
+
+var 模板 = {
+  getMubans: function() { return muban; },
+  getMuban: function(key) { return muban[key] || muban['默认']; }
+};
+
+// CJS-style export (loadUrlModule runs raw code without transpileESM)
+// Expose both as default and as direct properties so 'import 模板 from'
+// (which becomes 'const 模板 = __require__(...)') yields an object with
+// getMubans() - Android drpy2 calls 模板.getMubans() directly.
+__exports__.default = 模板;
+Object.assign(__exports__, 模板);
+`;
+
+const DRPY_GBK_TOOL_STUB = `
+function gbkTool() {
+  return {
+    encode: function(s) { return s; },
+    decode: function(s) { return s; }
+  };
+}
+// CJS-style export
+__exports__.gbkTool = gbkTool;
+__exports__.default = { gbkTool: gbkTool };
+`;
+
+// ─── Stub for drpy-core-lite.min.js (drpy2 v3.9.52+) ──────────────────────
+// Newer drpy2 versions (3.9.52+) bundle all dependencies into a single
+// drpy-core-lite.min.js file and import them as:
+//   import { cheerio, 妯℃澘 } from "./drpy-core-lite.min.js";
+// 妯℃澘 is 模板 with GBK encoding corruption. This stub provides cheerio
+// (the host-side cheerioWithJinja), 模板 (muban templates), and 妯℃澘
+// (alias for 模板 so both names resolve correctly after ESM transpilation).
+const DRPY_CORE_LITE_STUB = `
+var muban = {
+  mxpro: {
+    title: '', host: '',
+    url: '/vodshow/fyclass--------fypage---.html',
+    searchUrl: '/vodsearch/**----------fypage---.html',
+    searchable: 2, quickSearch: 0, filterable: 1,
+    class_parse: '.navbar-items li:gt(0):lt(10);a&&Text;a&&href;/(\\\\d+)',
+    一级: '.module-items .module-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href',
+    二级: {
+      title: 'h1&&Text;.module-info-tag&&Text',
+      img: '.module-item-pic&&img&&data-src',
+      desc: '.module-info-item:eq(4)&&Text;;;.module-info-item-content:eq(1)&&Text;.module-info-item-content:eq(0)&&Text',
+      content: '.module-info-introduction&&Text',
+      tabs: '.module-tab-item', lists: '.module-play-list:eq(#id) a',
+      tab_text: 'body&&Text', list_text: 'body&&Text', list_url: 'a&&href'
+    },
+    搜索: '.module-items .module-search-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href'
+  },
+  mxone: {
+    title: '', host: '',
+    url: '/vodshow/fyclass--------fypage---.html',
+    searchUrl: '/vodsearch/**----------fypage---.html',
+    searchable: 2, quickSearch: 0, filterable: 1,
+    class_parse: '.nav-menu-items li:gt(0):lt(10);a&&Text;a&&href;/(\\\\d+)',
+    一级: '.module-list .module-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href',
+    二级: {
+      title: 'h1&&Text;.tag-link&&Text',
+      img: '.module-item-pic&&img&&data-src',
+      desc: '.video-info-items:eq(3)&&Text;;;.video-info-items:eq(1)&&Text;.video-info-items:eq(0)&&Text',
+      content: '.video-info-content&&Text',
+      tabs: '.module-tab-item', lists: '.module-player-list:eq(#id) a',
+      tab_text: 'body&&Text', list_text: 'body&&Text', list_url: 'a&&href'
+    },
+    搜索: '.module-list .module-search-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href'
+  },
+  首图: {
+    title: '', host: '',
+    url: '/list/fyclass-fypage.html', searchUrl: '/search.php?q=**',
+    searchable: 2, quickSearch: 0, filterable: 0,
+    class_parse: '.stui-header__menu li:gt(0):lt(10);a&&Text;a&&href;/(\\\\d+)',
+    一级: '.stui-vodlist li;a&&title;a&&data-original;.pic-text&&Text;a&&href',
+    二级: {
+      title: 'h1&&Text;.stui-content__detail .data:eq(4)&&Text',
+      img: '.stui-content__thumb .thumb&&data-original',
+      desc: '.stui-content__detail .data:eq(1)&&Text;;;.stui-content__detail .data:eq(2)&&Text;.stui-content__detail .data:eq(0)&&Text',
+      content: '.stui-content__desc&&Text',
+      tabs: '.stui-pannel__head h3', lists: '.stui-content__playlist:eq(#id) li',
+      tab_text: 'body&&Text', list_text: 'body&&Text', list_url: 'a&&href'
+    },
+    搜索: '.stui-vodlist li;a&&title;a&&data-original;.pic-text&&Text;a&&href'
+  },
+  海螺: {
+    title: '', host: '',
+    url: '/vodshow/fyclass--------fypage---.html',
+    searchUrl: '/vodsearch/**----------fypage---.html',
+    searchable: 2, quickSearch: 0, filterable: 1,
+    class_parse: '.nav-menu-items li:gt(0):lt(10);a&&Text;a&&href;/(\\\\d+)',
+    一级: '.module-list .module-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href',
+    二级: {
+      title: 'h1&&Text;.tag-link&&Text',
+      img: '.module-item-pic&&img&&data-src',
+      desc: '.video-info-items:eq(3)&&Text;;;.video-info-items:eq(1)&&Text;.video-info-items:eq(0)&&Text',
+      content: '.video-info-content&&Text',
+      tabs: '.module-tab-item', lists: '.module-player-list:eq(#id) a',
+      tab_text: 'body&&Text', list_text: 'body&&Text', list_url: 'a&&href'
+    },
+    搜索: '.module-list .module-search-item;a&&title;img&&data-src;.module-item-text&&Text;a&&href'
+  },
+  短视: {
+    title: '', host: '',
+    url: '/api.php/provide/vod/?ac=list&class=fyclass&page=fypage',
+    searchUrl: '/api.php/provide/vod/?ac=list&wd=**&pg=fypage',
+    searchable: 2, quickSearch: 0, filterable: 0,
+    class_parse: 'js:var classes=[];input=JSON.parse(request(input)).class;input.forEach(it=>{classes.push({type_id:it.type_id,type_name:it.type_name})});input=classes',
+    一级: 'js:var d=[];var input=JSON.parse(request(input)).list;d.forEach(function(it){d.push({title:it.vod_name,img:it.vod_pic,url:it.vod_id,desc:it.vod_remarks})});input=d',
+    二级: 'js:var input=JSON.parse(request("https://v1.hhzy.com/api.php/provide/vod/?ac=detail&ids="+input)).list[0];input={title:input.vod_name,img:input.vod_pic,desc:input.vod_year+" "+input.vod_area+" "+input.vod_remarks,content:input.vod_content,category:input.vod_class}',
+    搜索: 'js:var d=[];var input=JSON.parse(request(input)).list;d.forEach(function(it){d.push({title:it.vod_name,img:it.vod_pic,url:it.vod_id,desc:it.vod_remarks})});input=d'
+  },
+  vfed: {
+    title: '', host: '',
+    url: '/vodshow/fyclass--------fypage---.html',
+    searchUrl: '/vodsearch/**----------fypage---.html',
+    searchable: 2, quickSearch: 0, filterable: 1,
+    class_parse: '.fed-pops-list li:gt(0):lt(10);a&&Text;a&&href;/(\\\\d+)',
+    一级: '.fed-list-item;a&&title;a&&data-original;.fed-list-remarks&&Text;a&&href',
+    二级: {
+      title: 'h1&&Text;.fed-part-rows a:eq(3)&&Text',
+      img: '.fed-list-item&&a&&data-original',
+      desc: '.fed-part-rows:eq(3)&&Text;;;.fed-part-rows:eq(1)&&Text;.fed-part-rows:eq(0)&&Text',
+      content: '.fed-part-es&&Text',
+      tabs: '.fed-drop-boxs li', lists: '.fed-play-item:eq(#id) a',
+      tab_text: 'body&&Text', list_text: 'body&&Text', list_url: 'a&&href'
+    },
+    搜索: '.fed-list-item;a&&title;a&&data-original;.fed-list-remarks&&Text;a&&href'
+  },
+  默认: {
+    title: '', host: '', url: '', searchUrl: '',
+    searchable: 2, quickSearch: 0, filterable: 1,
+    class_parse: '', 一级: '', 二级: '', 搜索: ''
+  }
+};
+
+var 模板 = {
+  getMubans: function() { return muban; },
+  getMuban: function(key) { return muban[key] || muban['默认']; }
+};
+
+// drpy2 v3.9.52+ imports 模板 under a GBK-corrupted name.
+// We export it via bracket notation with Unicode escapes to avoid
+// encoding issues. The corrupted name is U+592F U+2103 U+6FA0.
+var _mubanAlias = 模板;
+
+// Export cheerio (host-side), 模板, and the GBK-corrupted alias
+__exports__.cheerio = __cheerio__;
+__exports__.模板 = 模板;
+__exports__['\\u592f\\u2103\\u6fa0'] = _mubanAlias;
+__exports__.default = { cheerio: __cheerio__, 模板: 模板 };
+`;
+
+/**
+ * Return a local stub source string for known drpy2 URL modules.
+ * Returns null if no stub is available for the URL.
+ */
+function getLocalStubForUrl(url: string): string | null {
+  // Match by filename to be robust against host changes
+  if (url.includes('/XUKQ.js') || url.endsWith('XUKQ.js')) {
+    return DRPY_MUBAN_STUB;
+  }
+  if (url.includes('/wYCz.js') || url.endsWith('wYCz.js')) {
+    return DRPY_GBK_TOOL_STUB;
+  }
+  // drpy2 v3.9.52+ bundles all deps into drpy-core-lite.min.js
+  // import { cheerio, 妯℃澘 } from "./drpy-core-lite.min.js"
+  if (
+    url.includes('drpy-core-lite.min.js') ||
+    url.endsWith('drpy-core-lite.min.js')
+  ) {
+    return DRPY_CORE_LITE_STUB;
+  }
+  // Side-effect imports (cLFE.js, kOUW.js, ucoN.js) — empty stub is fine.
+  // Use `void 0;` (not a `//` comment) because the stub is wrapped as
+  // `(function() { ... ${stub} })();` — a `//` comment would swallow the
+  // closing `})();` and cause "Unexpected end of input".
+  if (
+    url.includes('/cLFE.js') ||
+    url.includes('/kOUW.js') ||
+    url.includes('/ucoN.js')
+  ) {
+    return 'void 0;';
+  }
+  return null;
 }
 
 // ─── Bytecode decode ────────────────────────────────────────────────────────
@@ -1307,6 +1797,12 @@ export class JsSpider implements ISpider {
   private sandbox: Record<string, any> = {};
   private spiderObj: any = null;
   private baseUrl: string;
+  // For drpy spiders: stores the transpiled rules code so we can pass it
+  // directly to drpy2's init() instead of the URL. drpy2's init() re-fetches
+  // the rules via request(), but our req() is async and drpy2 calls it
+  // synchronously, so the fetch returns empty and rule stays {}. Passing the
+  // code directly bypasses the re-fetch.
+  private drpyRulesCode: string = '';
 
   constructor(key: string, api: string, ext?: string) {
     this.key = key;
@@ -1323,6 +1819,11 @@ export class JsSpider implements ISpider {
     console.log(
       `[JsSpider] init: key=${this.key}, api=${this.api}, ext=${this.ext.substring(0, 80)}, isDrpy=${isDrpy}`,
     );
+
+    // Reset spider state before re-initialization (init may be called multiple
+    // times). buildContext() creates a fresh vm context, so any prior
+    // __spider__/spiderObj reference is stale and must be cleared.
+    this.spiderObj = null;
 
     // Build vm context with all global injections
     this.buildContext();
@@ -1352,8 +1853,13 @@ export class JsSpider implements ISpider {
     // Call the spider's init if it exists
     if (this.spiderObj && typeof this.spiderObj.init === 'function') {
       try {
+        // For drpy spiders, pass the transpiled rules code directly instead
+        // of the URL. drpy2's init() re-fetches rules via request() which is
+        // async, but drpy2 calls it synchronously, causing empty rule. By
+        // passing the code, drpy2 evals it directly without re-fetching.
+        const initArg = this.drpyRulesCode || this.ext;
         const result = vm.runInContext(
-          `__spider__.init(${JSON.stringify(this.ext)})`,
+          `__spider__.init(${JSON.stringify(initArg)})`,
           this.context!,
           { timeout: 10000 },
         );
@@ -1392,6 +1898,9 @@ export class JsSpider implements ISpider {
     // Decode bytecode if needed
     code = decodeBytecode(code);
 
+    // Neutralize prototype Object.defineProperty calls
+    code = neutralizeProtoDefineProperty(code);
+
     // Transpile ESM → CJS
     code = transpileESM(code);
 
@@ -1416,37 +1925,35 @@ export class JsSpider implements ISpider {
     const rulesUrl = this.resolveUrl(this.ext);
     const libUrl = this.resolveUrl(this.api);
 
-    console.log(
-      `[JsSpider] drpy init: rulesUrl=${rulesUrl}, libUrl=${libUrl}`,
-    );
+    console.log(`[JsSpider] drpy init: rulesUrl=${rulesUrl}, libUrl=${libUrl}`);
 
-    // 1. Fetch spider rules JS
-    let rulesCode: string;
-    try {
-      const resp = await axios.get(rulesUrl, {
-        responseType: 'text',
-        timeout: 15000,
-      });
-      rulesCode =
-        typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-      console.log(
-        `[JsSpider] drpy rules fetched: ${rulesCode.length} bytes from ${rulesUrl}`,
-      );
-    } catch (e) {
-      throw new Error(
-        `[JsSpider] Failed to fetch drpy rules ${rulesUrl}: ${e}`,
-      );
+    // 1. Fetch spider rules JS (skip if no rules URL — the library may be self-contained)
+    let rulesCode = '';
+    if (rulesUrl) {
+      try {
+        rulesCode = await fetchWithMirrorFallback(rulesUrl, {
+          responseType: 'text',
+          timeout: 15000,
+        });
+        console.log(
+          `[JsSpider] drpy rules fetched: ${rulesCode.length} bytes from ${rulesUrl}`,
+        );
+      } catch (e) {
+        throw new Error(
+          `[JsSpider] Failed to fetch drpy rules ${rulesUrl}: ${e}`,
+        );
+      }
+    } else {
+      console.log(`[JsSpider] drpy: no rules URL, using library only`);
     }
 
     // 2. Fetch drpy library JS
     let libCode: string;
     try {
-      const resp = await axios.get(libUrl, {
+      libCode = await fetchWithMirrorFallback(libUrl, {
         responseType: 'text',
         timeout: 15000,
       });
-      libCode =
-        typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
       console.log(
         `[JsSpider] drpy library fetched: ${libCode.length} bytes from ${libUrl}`,
       );
@@ -1461,43 +1968,212 @@ export class JsSpider implements ISpider {
     rulesCode = decodeBytecode(rulesCode);
     libCode = decodeBytecode(libCode);
 
-    // 4. Transpile both
-    rulesCode = transpileESM(rulesCode);
-    if (libCode) {
-      libCode = transpileESM(libCode);
+    // 3b. Detect encrypted rulesCode (AES-CBC, gzip, etc.)
+    //     drpy2's getOriginalJs() handles decryption, but we must NOT
+    //     eval the encrypted content directly. If rulesCode doesn't look
+    //     like valid JS, store it for init() but skip it in combined eval.
+    const jsPattern =
+      /var rule|[\u4E00-\u9FA5]+|function|let |var |const |\(|\)|"|'/;
+    const rulesCodeIsEncrypted =
+      rulesCode.length > 0 && !jsPattern.test(rulesCode);
+    if (rulesCodeIsEncrypted) {
+      console.log(
+        `[JsSpider] drpy rulesCode appears encrypted (${rulesCode.length} bytes), will pass to init() for decryption`,
+      );
     }
 
-    // 5. Update baseUrl to the rules URL for resolving relative imports
+    // 4. Pre-load URL modules referenced in import statements
+    //    drpy2.min.js imports modules from URLs like https://down.nigx.cn/...
+    //    These need to be fetched and cached before evaluation, because
+    //    __require() is synchronous and cannot download at runtime.
+    const allCodeForScan = `${rulesCode}\n${libCode}`;
+    const urlImports = this.extractUrlImports(allCodeForScan);
+    if (urlImports.length > 0) {
+      console.log(
+        `[JsSpider] drpy pre-loading ${urlImports.length} URL modules: ${urlImports.join(', ')}`,
+      );
+      await Promise.all(urlImports.map((url) => this.preloadUrlModule(url)));
+    }
+
+    // 5. Transpile both (neutralize prototype defineProperty first)
+    //    Skip transpile for encrypted rulesCode — drpy2's init() will
+    //    decrypt via getOriginalJs() and eval the decrypted code itself.
+    if (!rulesCodeIsEncrypted) {
+      rulesCode = neutralizeProtoDefineProperty(rulesCode);
+      rulesCode = transpileESM(rulesCode);
+      // Convert `var rule = {` to `globalThis.rule = {` so that `rule` is a
+      // globalThis property, not an IIFE-scoped variable. This ensures all
+      // `rule` references (drpy2 functions, init(), __hostEval, init_test)
+      // resolve to the same globalThis.rule. Without this, the wrapCode IIFE
+      // would have its own `rule` shadowing globalThis.rule, causing the
+      // eval'd code (run at VM top-level via __hostEval) to set a different
+      // globalThis.rule while drpy2 functions see the empty IIFE-scoped rule.
+      rulesCode = rulesCode.replace(
+        /\bvar\s+rule\s*=\s*\{/,
+        'globalThis.rule = {',
+      );
+    }
+    // Store the rules code so we can pass it directly to drpy2's init()
+    // instead of the URL. drpy2's init() re-fetches rules via request()
+    // which is async, but drpy2 calls it synchronously, causing empty rule.
+    // For encrypted rulesCode, init() will call getOriginalJs() to decrypt.
+    this.drpyRulesCode = rulesCode;
+    if (libCode) {
+      libCode = neutralizeProtoDefineProperty(libCode);
+      libCode = transpileESM(libCode);
+      // drpy2.min.js declares `let rule={}` at its top level. Since we wrap
+      // the code in an IIFE (wrapCode), this `let` creates a lexical binding
+      // local to the IIFE, NOT a globalThis property. drpy2's init() calls
+      // `__hostEval(...)` (replacing eval) which runs at the VM context
+      // top-level — a DIFFERENT scope from the IIFE. So `rule = {...}` inside
+      // the eval'd code creates a separate globalThis.rule, leaving the
+      // IIFE-scoped `rule` empty. init_test() sees the empty IIFE-scoped rule.
+      //
+      // Fix: replace `let rule={}` with `globalThis.rule = globalThis.rule || {}`
+      // so `rule` is a globalThis property. Then all references to `rule`
+      // (in drpy2 functions, init(), __hostEval, init_test) resolve to the
+      // same globalThis.rule via scope chain lookup.
+      libCode = libCode.replace(
+        /\blet\s+rule\s*=\s*\{\s*\}\s*;?/g,
+        'globalThis.rule = globalThis.rule || {};',
+      );
+      // Remove `var rule = ...` only if it's a re-declaration (not the first
+      // one in the library which initializes the framework). We keep `var rule`
+      // because in non-strict mode, re-declaring with var is allowed.
+
+      // Replace eval() with __hostEval(). Electron's renderer CSP blocks
+      // eval() inside VM contexts, but vm.runInContext (which __hostEval
+      // uses) is not blocked. drpy2.min.js uses eval() to execute:
+      //   - rules code (in init())
+      //   - hostJs (in init())
+      //   - 预处理 / pre-processing code (in pre())
+      //   - js:-prefixed rule fields (lazy, 一级, 二级, etc.)
+      //   - 模板修改 code
+      // All these only need access to the VM's global scope, which
+      // vm.runInContext provides.
+      libCode = libCode.replace(/\beval\(/g, '__hostEval(');
+
+      // __hostEval runs at VM context top-level, but drpy2 sets variables
+      // like `var input = MY_URL` in the IIFE scope before calling eval().
+      // Since __hostEval can't see IIFE-scoped vars, replace `var X =`
+      // with `globalThis.X =` for all variables that drpy2 uses across
+      // eval boundaries. This includes: input, MY_URL, HOST, VODS,
+      // MY_CATE, MY_PAGE, MY_FLAG, RKEY, fetch_params, rule_fetch_params,
+      // and other drpy2 execution-context variables.
+      const evalScopedVars = [
+        'input',
+        'MY_URL',
+        'HOST',
+        'VODS',
+        'MY_CATE',
+        'MY_PAGE',
+        'MY_FLAG',
+        'RKEY',
+        'fetch_params',
+        'rule_fetch_params',
+        'oheaders',
+        'detailUrl',
+        'play_url',
+        'flag',
+        'current',
+      ];
+      for (const v of evalScopedVars) {
+        // Replace `var X =` (but not `var X = {}` initializers at top-level
+        // which should stay local). We target assignments before eval calls.
+        libCode = libCode.replace(
+          new RegExp(`\\bvar\\s+${v}\\s*=`, 'g'),
+          `globalThis.${v} =`,
+        );
+      }
+
+      // After transpilation, relative __require__ calls (e.g., __require__('./drpy-core-lite.min.js'))
+      // would resolve against this.baseUrl (rules URL directory) at runtime. But the imports are
+      // in the library code, so they should resolve against the library URL's directory.
+      // Fix: replace relative __require__ paths in libCode with fully resolved absolute URLs.
+      if (libUrl) {
+        const libBaseUrl = libUrl.substring(0, libUrl.lastIndexOf('/') + 1);
+        libCode = libCode.replace(
+          /__require__\(\s*['"](\.\/[^'"]+)['"]\s*\)/g,
+          (_match, relPath: string) => {
+            const resolved = joinUrl(libBaseUrl, relPath);
+            return `__require__('${resolved}')`;
+          },
+        );
+      }
+    }
+
+    // 6. Update baseUrl to the rules URL for resolving relative imports
     this.baseUrl = rulesUrl.substring(0, rulesUrl.lastIndexOf('/') + 1);
 
     // 6. Evaluate: spider rules first (defines `var rule`), then drpy library
     // The drpy library processes the `rule` object to create spider methods
+    // Use noIIFE=true so drpy2's top-level functions (request, fetch, pdfh,
+    // etc.) become globalThis properties, accessible from __hostEval which
+    // runs at VM context top-level.
+    // If rulesCode is encrypted (AES-CBC, gzip, etc.), don't include it in
+    // the combined eval — drpy2's init() will call getOriginalJs() to decrypt.
+    const evalRulesCode = rulesCodeIsEncrypted ? '' : rulesCode;
     const combinedCode = libCode
-      ? `${rulesCode}\n// --- drpy library ---\n${libCode}`
-      : rulesCode;
+      ? `${evalRulesCode}\n// --- drpy library ---\n${libCode}`
+      : evalRulesCode;
 
-    const wrapped = this.wrapCode(combinedCode);
+    const wrapped = this.wrapCode(combinedCode, true);
     try {
       vm.runInContext(wrapped, this.context!, { timeout: 15000 });
-      console.log(`[JsSpider] drpy code evaluated successfully for ${this.key}`);
+      console.log(
+        `[JsSpider] drpy code evaluated successfully for ${this.key}`,
+      );
     } catch (e) {
       // If combined evaluation fails, try rules-only (the rules might already
       // implement the spider methods directly without needing the drpy library)
+      // Skip rules-only for encrypted rulesCode — it can't be eval'd directly.
+      if (rulesCodeIsEncrypted) {
+        throw new Error(
+          `[JsSpider] drpy lib eval failed for ${this.key} (rulesCode is encrypted): ${e}`,
+        );
+      }
       console.warn(
         `[JsSpider] drpy combined eval failed for ${this.key}: ${e}, trying rules-only`,
       );
-      const rulesOnlyWrapped = this.wrapCode(rulesCode);
+      const rulesOnlyWrapped = this.wrapCode(rulesCode, true);
       try {
         vm.runInContext(rulesOnlyWrapped, this.context!, { timeout: 10000 });
-        console.log(
-          `[JsSpider] drpy rules-only evaluated for ${this.key}`,
-        );
+        console.log(`[JsSpider] drpy rules-only evaluated for ${this.key}`);
       } catch (e2) {
         throw new Error(
           `[JsSpider] Failed to evaluate drpy spider ${this.key}: ${e2}`,
         );
       }
     }
+  }
+
+  /**
+   * Extract URL imports from JS code.
+   * Matches: import X from "https://...", import "https://...", import {X} from "https://..."
+   * Returns list of unique URLs.
+   */
+  private extractUrlImports(code: string): string[] {
+    const urls = new Set<string>();
+    // Match import statements with URL string literals (http:// or https://)
+    // or relative paths (./xxx, ../xxx) which need resolution against baseUrl
+    // Identifier part uses [^\s{,]+ to support unicode identifiers like 模板
+    // Use \s* (not \s+) to support import"..." without space
+    const importRegex =
+      /import\s*(?:[^\s{,]+\s*from\s*|\{[^}]+\}\s*from\s*)?['"]([^'"]+)['"]/g;
+    let match;
+    while ((match = importRegex.exec(code)) !== null) {
+      const url = match[1];
+      if (url.startsWith('http://') || url.startsWith('https://')) {
+        urls.add(url);
+      } else if (url.startsWith('./') || url.startsWith('../')) {
+        // Resolve relative URL against baseUrl
+        const resolved = joinUrl(this.baseUrl, url);
+        if (resolved && resolved.startsWith('http')) {
+          urls.add(resolved);
+        }
+      }
+    }
+    return Array.from(urls);
   }
 
   /**
@@ -1617,22 +2293,107 @@ export class JsSpider implements ISpider {
       __spider__: null as any,
       __require__: (moduleName: string) => self.__require(moduleName),
 
-      // HTTP request
-      req: async (url: string, options: any = {}) => {
+      // Note: __safeDP__ is intentionally NOT defined here. It is injected
+      // as a VM-side function after createContext so that it uses the VM's
+      // own Object.defineProperty and operates on VM built-in prototypes.
+      // Defining it here (host closure) would modify host prototypes, which
+      // VM primitive literals cannot see.
+
+      // HTTP request — SYNCHRONOUS. drpy2's request() function calls
+      // `let res = req(url, obj)` WITHOUT await, so async req would return
+      // a Promise (whose .content is undefined). We must use sync XHR.
+      // Sync XHR does NOT support responseType='arraybuffer', so for binary
+      // requests we use overrideMimeType with x-user-defined and convert to
+      // Buffer on the host side.
+      req: (url: string, options: any = {}) => {
+        // Helper: perform a synchronous XHR and return the result
+        const doXhr = (xhrUrl: string) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open(options.method || 'GET', xhrUrl, false); // false = synchronous
+          const isBin =
+            options.buffer ||
+            options.responseType === 'arraybuffer' ||
+            options.responseType === 'arraybuffer';
+          if (isBin) {
+            try {
+              xhr.overrideMimeType('text/plain; charset=x-user-defined');
+            } catch {}
+          }
+          if (options.headers) {
+            for (const [k, v] of Object.entries(options.headers)) {
+              try {
+                xhr.setRequestHeader(k, String(v));
+              } catch {}
+            }
+          }
+          xhr.send(options.body || options.data || null);
+          return xhr;
+        };
+
         try {
-          const resp = await axios({
-            url,
-            method: options.method || 'GET',
-            headers: options.headers || {},
-            data: options.body || options.data || undefined,
-            responseType:
-              options.responseType || (options.buffer ? 'arraybuffer' : 'text'),
-            timeout: options.timeout || 15000,
-          });
+          const isBinary =
+            options.buffer ||
+            options.responseType === 'arraybuffer' ||
+            options.responseType === 'arraybuffer';
+          let xhr = doXhr(url);
+
+          // If the request failed (status 0 = network error, or 403/502) and
+          // the URL uses a known GitHub mirror proxy, try alternatives synchronously
+          if (
+            (xhr.status === 0 || xhr.status >= 400) &&
+            url.startsWith('https://')
+          ) {
+            for (const chain of GITHUB_MIRROR_CHAINS) {
+              const matchedMirror = chain.find((m) =>
+                url.startsWith(`https://${m}/`),
+              );
+              if (!matchedMirror) continue;
+              for (const altMirror of chain) {
+                if (altMirror === matchedMirror) continue;
+                const altUrl = rewriteUrlWithMirror(
+                  url,
+                  matchedMirror,
+                  altMirror,
+                );
+                try {
+                  const altXhr = doXhr(altUrl);
+                  if (altXhr.status > 0 && altXhr.status < 400) {
+                    xhr = altXhr;
+                    break;
+                  }
+                } catch {}
+              }
+              if (xhr.status > 0 && xhr.status < 400) break;
+            }
+          }
+
+          let content: any = xhr.responseText;
+          if (isBinary && content) {
+            // Convert binary string to Buffer for compatibility with code
+            // that expects Node Buffer (e.g., res.content.toString('utf8')).
+            const buf = Buffer.alloc(content.length);
+            for (let i = 0; i < content.length; i++) {
+              buf[i] = content.charCodeAt(i) & 0xff;
+            }
+            content = buf;
+          }
+          // Parse response headers into a plain object
+          const headers: Record<string, string> = {};
+          const allHeaders = xhr.getAllResponseHeaders();
+          if (allHeaders) {
+            for (const line of allHeaders.split(/\r?\n/)) {
+              const idx = line.indexOf(':');
+              if (idx > 0) {
+                headers[line.slice(0, idx).trim().toLowerCase()] = line
+                  .slice(idx + 1)
+                  .trim();
+              }
+            }
+          }
           return {
-            content: resp.data,
-            headers: resp.headers as Record<string, string>,
-            code: resp.status,
+            content,
+            headers,
+            code: xhr.status,
           };
         } catch (e: any) {
           return { content: '', headers: {}, code: 500, error: e.message };
@@ -1644,6 +2405,51 @@ export class JsSpider implements ISpider {
       pdfa,
       pd,
       pdfla,
+
+      // Eval replacement: drpy2.min.js uses eval() to execute dynamic code
+      // (rules, hostJs, 预处理, etc.). Electron's renderer CSP blocks eval
+      // inside VM contexts even with codeGeneration.strings=true. We replace
+      // `eval(` with `__hostEval(` in drpy2 code, and __hostEval uses
+      // vm.runInContext which is NOT blocked. The code runs in the same VM
+      // context, so it has access to all globals (rule, request, pdfh, etc.).
+      __hostEval: (code: string) => {
+        const codePreview = (code || '').substring(0, 200);
+        console.log(
+          `[JsSpider] __hostEval called, code length: ${(code || '').length}, preview: ${codePreview.replace(/\n/g, '\\n')}`,
+        );
+        try {
+          // Replace `let` and `const` with `var` in the eval'd code.
+          // drpy2's dynamic code (e.g., `let d = []` in category/home
+          // methods) uses `let` which cannot be re-declared in the same
+          // VM context scope. `var` allows re-declaration, which is safe
+          // here because the code runs at context top-level where `var`
+          // simply overwrites the existing binding.
+          // We do NOT use IIFE because drpy2 eval code may set `input`
+          // (e.g., `input = classes`) which needs to be visible to the
+          // caller (drpy2 reads `input` after eval returns).
+          let patchedCode = code
+            .replace(/\blet\s+/g, 'var ')
+            .replace(/\bconst\s+/g, 'var ');
+          const result = vm.runInContext(patchedCode, self.context!, {
+            timeout: 30000,
+          });
+          // Check if rule was set (for debugging init issue)
+          try {
+            const ruleJson = vm.runInContext(
+              'typeof rule !== "undefined" ? JSON.stringify({title: rule.title, host: rule.host, homeUrl: rule.homeUrl}) : "rule undefined"',
+              self.context!,
+              { timeout: 1000 },
+            );
+            console.log(
+              `[JsSpider] __hostEval result: rule after eval = ${ruleJson}`,
+            );
+          } catch {}
+          return result;
+        } catch (e: any) {
+          console.error(`[JsSpider] __hostEval error: ${e.message}`);
+          throw e;
+        }
+      },
 
       // URL helper
       joinUrl,
@@ -1684,7 +2490,20 @@ export class JsSpider implements ISpider {
         },
       },
 
-      // Standard globals
+      atob: (s: string) => Buffer.from(s, 'base64').toString('binary'),
+      btoa: (s: string) => Buffer.from(s, 'binary').toString('base64'),
+      Buffer,
+      ArrayBuffer,
+      Uint8Array,
+      // Note: do NOT pass Object/Array/String/Number/Boolean/RegExp/Error/etc.
+      // to the sandbox. VM has its own built-in prototypes, and primitive
+      // literals (e.g. "") use the VM's String.prototype, NOT the host's.
+      // If we shadow with host builtins, drpy2's
+      //   Object.defineProperty(String.prototype, "rstrip", ...)
+      // would define on the host's String.prototype, but VM primitive strings
+      // would still look up methods on the VM's String.prototype and fail
+      // with "X is not a function". Letting the VM use its own builtins
+      // ensures prototype modifications affect VM primitive values.
       JSON,
       Math,
       Date,
@@ -1696,33 +2515,139 @@ export class JsSpider implements ISpider {
       decodeURIComponent,
       encodeURI,
       decodeURI,
-      atob: (s: string) => Buffer.from(s, 'base64').toString('binary'),
-      btoa: (s: string) => Buffer.from(s, 'binary').toString('base64'),
-      Buffer,
-      ArrayBuffer,
-      Uint8Array,
-      Object,
-      Array,
-      String,
-      Number,
-      Boolean,
-      RegExp,
-      Error,
-      TypeError,
-      RangeError,
-      Promise,
-      Map,
-      Set,
-      Symbol,
 
-      // cheerio available as global for spiders that need it
-      cheerio,
+      // cheerio available as global for spiders that need it.
+      // Use cheerioWithJinja so drpy2's cheerio.jinja2() calls work.
+      cheerio: cheerioWithJinja,
+      // Alias __cheerio__ for DRPY_CORE_LITE_STUB which exports it as named export
+      __cheerio__: cheerioWithJinja,
+
+      // CryptoJS as global: drpy2's getOriginalJs() uses CryptoJS directly
+      // for AES decryption of encrypted rule files (e.g., 酷我听书).
+      CryptoJS,
     };
 
-    this.context = vm.createContext(this.sandbox);
+    // Browser-compatible globals: some spiders reference `window`, `document`,
+    // `navigator`, or `self`. Provide minimal mocks so they don't throw
+    // ReferenceError. `window`/`self`/`globalThis` point to the sandbox itself
+    // so global var assignments (e.g. `window.foo = 1`) persist.
+    this.sandbox.window = this.sandbox;
+    this.sandbox.self = this.sandbox;
+    this.sandbox.globalThis = this.sandbox;
+    this.sandbox.navigator = {
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      platform: 'Win32',
+      language: 'zh-CN',
+    };
+    this.sandbox.document = {
+      cookie: '',
+      title: '',
+      URL: '',
+      referrer: '',
+      createElement: () => ({
+        style: {},
+        setAttribute: () => {},
+        appendChild: () => {},
+        href: '',
+        src: '',
+      }),
+      getElementById: () => null,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    this.sandbox.location = {
+      href: '',
+      protocol: 'https:',
+      host: '',
+      hostname: '',
+      port: '',
+      pathname: '/',
+      search: '',
+      hash: '',
+    };
+
+    // Note: codeGeneration.strings=true is set, but Electron's renderer
+    // process CSP still blocks eval() inside VM contexts. We work around
+    // this by replacing drpy2's eval() calls with __hostEval, which uses
+    // vm.runInContext to execute code (vm.runInContext is NOT blocked).
+    this.context = vm.createContext(this.sandbox, {
+      codeGeneration: { strings: true },
+    });
+    console.log('[JsSpider] createContext with codeGeneration.strings=true');
+
+    // Pre-evaluate the muban stub so `muban` is available as a global
+    // variable. Some drpy spiders reference `muban` directly (e.g.
+    // `var rule = {...muban.mxpro}`) without importing it, which throws
+    // "ReferenceError: muban is not defined" during init.
+    //
+    // We wrap in an IIFE so `var muban` and `var 模板` are scoped to the
+    // IIFE and NOT leaked to the global scope. We then expose only
+    // `globalThis.muban` — this way, when spider code does
+    // `import 模板 from "..."` (transpiled to `const 模板 = __require__(...)`),
+    // there is no `var 模板` at global scope to conflict with the const
+    // declaration (which would throw SyntaxError "Identifier '模板' has
+    // already been declared").
+    try {
+      vm.runInContext(
+        `(function(){${DRPY_MUBAN_STUB}\nglobalThis.muban = muban;})();`,
+        this.context,
+        { timeout: 5000 },
+      );
+    } catch (e) {
+      console.warn('[JsSpider] Failed to pre-evaluate muban stub:', e);
+    }
+
+    // Inject __safeDP__ as a VM-side function. This must run inside the VM
+    // so that it uses the VM's own Object.defineProperty and operates on
+    // the VM's built-in prototypes (which are distinct from host prototypes).
+    // drpy2.min.js calls Object.defineProperty(Object.prototype, "myValues", ...)
+    // without configurable:true; the first call makes the property
+    // non-configurable, and subsequent inits fail with "Cannot redefine
+    // property". __safeDP__ forces configurable:true and swallows errors.
+    // We replace these calls via neutralizeProtoDefineProperty() so they go
+    // through this helper.
+    vm.runInContext(
+      `globalThis.__safeDP__ = function(obj, prop, desc) {
+         try {
+           return Object.defineProperty(obj, prop, Object.assign({}, desc, { configurable: true }));
+         } catch (e) {
+           return obj;
+         }
+       };
+       globalThis.__safeDP__;`,
+      this.context,
+      { timeout: 5000 },
+    );
   }
 
-  private wrapCode(code: string): string {
+  private wrapCode(code: string, noIIFE: boolean = false): string {
+    if (noIIFE) {
+      // For drpy2: don't wrap in IIFE. drpy2's eval() calls (replaced with
+      // __hostEval) run at VM context top-level. If we wrap in IIFE, drpy2's
+      // top-level functions (request, fetch, pdfh, pdfa, pd, log, print,
+      // cheerio, CryptoJS, HOST, etc.) become IIFE-scoped and __hostEval
+      // can't access them. Without IIFE, all `var`/`function` declarations
+      // become globalThis properties, accessible from __hostEval.
+      return `var exports = __exports__;
+            var module = { exports: __exports__ };
+            ${code}
+            // Format 1: __jsEvalReturn function (set cat=true)
+            if (typeof __jsEvalReturn === 'function') {
+                __spider__ = __jsEvalReturn(true);
+            }
+            // Format 3: __JS_SPIDER__ global assignment
+            if (!__spider__ && typeof __JS_SPIDER__ !== 'undefined') {
+                __spider__ = __JS_SPIDER__;
+            }
+            // If __spider__ was not set by transpilation or above formats,
+            // check if module.exports has spider methods
+            if (!__spider__ && module.exports && Object.keys(module.exports).length > 0) {
+                __spider__ = module.exports;
+            }`;
+    }
     return `(function() {
             var exports = __exports__;
             var module = { exports: __exports__ };
@@ -1770,7 +2695,7 @@ export class JsSpider implements ISpider {
   private __require(moduleName: string): any {
     // Built-in module mappings
     const builtinMap: Record<string, any> = {
-      cheerio: cheerio,
+      cheerio: cheerioWithJinja,
       'crypto-js': CryptoJS,
     };
 
@@ -1778,8 +2703,29 @@ export class JsSpider implements ISpider {
       return builtinMap[moduleName];
     }
 
+    // assets:// protocol — Android TVBox maps these to bundled JS files.
+    // We map common assets:// paths to our built-in modules.
+    if (moduleName.startsWith('assets://')) {
+      const assetPath = moduleName.substring('assets://'.length);
+      if (assetPath.includes('cheerio')) {
+        return cheerioWithJinja;
+      }
+      if (assetPath.includes('crypto-js') || assetPath.includes('crypto')) {
+        return CryptoJS;
+      }
+      // Other assets:// modules are not available, return empty object
+      console.warn(`[JsSpider] assets:// module not available: ${moduleName}`);
+      return {};
+    }
+
     // URL-based import
     if (moduleName.startsWith('http://') || moduleName.startsWith('https://')) {
+      // Intercept cheerio URLs — the remote cheerio.min.js throws
+      // "Illegal break statement" when re-evaluated in vm context.
+      // Use the host-side cheerio (with jinja2) instead.
+      if (moduleName.includes('cheerio')) {
+        return cheerioWithJinja;
+      }
       return this.loadUrlModule(moduleName);
     }
 
@@ -1803,12 +2749,19 @@ export class JsSpider implements ISpider {
     const cached = moduleSourceCache.get(url);
     if (cached) {
       // Re-evaluate cached transpiled source in our context
+      // Save and restore __exports__ to avoid pollution
+      const savedExports = this.sandbox.__exports__;
+      this.sandbox.__exports__ = {};
       try {
         vm.runInContext(cached, this.context!, { timeout: 10000 });
-      } catch {
-        /* ignore */
+        const result = this.sandbox.__exports__ || {};
+        this.sandbox.__exports__ = savedExports;
+        return result;
+      } catch (e) {
+        console.warn(`[JsSpider] Failed to evaluate cached module ${url}:`, e);
+        this.sandbox.__exports__ = savedExports;
+        return {};
       }
-      return this.sandbox.__exports__ || {};
     }
 
     // Synchronous fetch is not possible; we do a best-effort with a cached approach.
@@ -1822,22 +2775,118 @@ export class JsSpider implements ISpider {
   /**
    * Pre-load a URL module and cache its transpiled source.
    * Call this before evaluating the spider if it has known URL dependencies.
+   * On fetch failure, fall back to a built-in stub for known drpy2 modules
+   * (down.nigx.cn is frequently blocked by Cloudflare).
    */
   async preloadUrlModule(url: string): Promise<void> {
     if (moduleSourceCache.has(url)) return;
+
+    // For URLs with local stubs, prefer the stub over remote fetch.
+    // Remote files like drpy-core-lite.min.js have complex ESM patterns
+    // (export { ... }, export *) that our transpiler can't fully handle.
+    // Local stubs are simpler and provide the essential exports.
+    const stub = getLocalStubForUrl(url);
+    if (stub) {
+      const wrapped = `(function() { var exports = __exports__; var module = { exports: __exports__ }; ${stub} })();`;
+      moduleSourceCache.set(url, wrapped);
+      console.log(
+        `[JsSpider] using local stub for ${url} (${stub.length} bytes)`,
+      );
+      return;
+    }
+
     try {
-      const resp = await axios.get(url, {
-        responseType: 'text',
-        timeout: 15000,
-      });
-      let code =
-        typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      // Route through main process IPC: browsers refuse to set User-Agent
+      // and Referer headers on fetch/XHR, but hosts like down.nigx.cn
+      // return 403 without a browser-like UA.
+      // Try multiple sources for electronIPC since preload exposure is unreliable.
+      let electronIPC: any = (globalThis as any).electronIPC;
+      if (!electronIPC && typeof (globalThis as any).window !== 'undefined') {
+        electronIPC = (globalThis as any).window.electronIPC;
+      }
+      if (!electronIPC) {
+        // Fallback: with nodeIntegration:true, we can require('electron') directly
+        try {
+          const { ipcRenderer } = (globalThis as any).require('electron');
+          electronIPC = {
+            invoke: (channel: string, ...args: any[]) =>
+              ipcRenderer.invoke(channel, ...args),
+          };
+        } catch {
+          // No electron available
+        }
+      }
+      let body = '';
+      let fetchFailed = false;
+      if (electronIPC && typeof electronIPC.invoke === 'function') {
+        const res = await electronIPC.invoke('js:fetchModule', url);
+        if (!res || !res.ok) {
+          fetchFailed = true;
+          console.warn(
+            `[JsSpider] IPC fetch failed for ${url}: ${res?.status || 0} ${res?.error || ''}, will try stub`,
+          );
+        } else {
+          body = res.body;
+        }
+      } else {
+        // Fallback to axios (may fail with 403 on strict hosts)
+        try {
+          const resp = await axios.get(url, {
+            responseType: 'text',
+            timeout: 15000,
+          });
+          body =
+            typeof resp.data === 'string'
+              ? resp.data
+              : JSON.stringify(resp.data);
+        } catch (e: any) {
+          fetchFailed = true;
+          console.warn(
+            `[JsSpider] axios fetch failed for ${url}: ${e.message}, will try stub`,
+          );
+        }
+      }
+
+      if (fetchFailed && !body) {
+        // Try GitHub mirror fallback before giving up
+        try {
+          body = await fetchMirrorOnly(url, {
+            responseType: 'text',
+            timeout: 15000,
+          });
+          fetchFailed = false;
+        } catch (mirrorErr: any) {
+          // Mirrors also failed, fall through to stub
+        }
+      }
+
+      if (fetchFailed && !body) {
+        // Use a local stub for known drpy2 URL modules
+        const stub = getLocalStubForUrl(url);
+        if (stub) {
+          const wrapped = `(function() { var exports = __exports__; var module = { exports: __exports__ }; ${stub} })();`;
+          moduleSourceCache.set(url, wrapped);
+          console.log(
+            `[JsSpider] using local stub for ${url} (${stub.length} bytes)`,
+          );
+          return;
+        }
+        // No stub available, return empty
+        console.error(`[JsSpider] No stub available for ${url}`);
+        return;
+      }
+
+      let code = body;
       code = decodeBytecode(code);
       code = transpileESM(code);
       const wrapped = `(function() { var exports = __exports__; var module = { exports: __exports__ }; ${code} })();`;
       moduleSourceCache.set(url, wrapped);
-    } catch (e) {
-      console.error(`[JsSpider] Failed to preload module ${url}:`, e);
+      console.log(`[JsSpider] preloaded module ${url} (${body.length} bytes)`);
+    } catch (e: any) {
+      console.error(
+        `[JsSpider] Failed to preload module ${url}:`,
+        e.message || e,
+      );
     }
   }
 

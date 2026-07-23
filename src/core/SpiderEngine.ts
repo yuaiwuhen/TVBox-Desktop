@@ -21,9 +21,26 @@ export class SpiderEngine {
     if (!url) return;
     try {
       const parsed = new URL(url);
-      this.configBaseUrl = parsed.origin + parsed.pathname.substring(0, parsed.pathname.lastIndexOf('/') + 1);
+      this.configBaseUrl =
+        parsed.origin +
+        parsed.pathname.substring(0, parsed.pathname.lastIndexOf('/') + 1);
     } catch {
       // Not a valid URL, ignore
+    }
+  }
+
+  /** Resolve a possibly-relative URL against the config base URL.
+   * Handles "./xxx", "xxx", "/xxx" patterns. Absolute http(s) URLs are returned as-is.
+   * Returns '' if input is empty or unresolvable.
+   */
+  private resolveRelative(url: string): string {
+    if (!url) return '';
+    if (/^https?:\/\//i.test(url)) return url;
+    if (!this.configBaseUrl) return url;
+    try {
+      return new URL(url, this.configBaseUrl).toString();
+    } catch {
+      return url;
     }
   }
 
@@ -33,9 +50,12 @@ export class SpiderEngine {
    * But we store it for reference and for JS spider URL resolution.
    */
   setSpiderBaseUrl(url: string): void {
-    this.spiderUrl = url;
+    // Resolve relative URLs (e.g. "./jar/fan.txt;md5;hash") against configBaseUrl.
+    // Must be done AFTER setConfigUrl() so configBaseUrl is current.
+    const resolved = this.resolveRelative(url);
+    this.spiderUrl = resolved;
     // Extract the base URL part (before ;md5;)
-    const parts = url.split(';md5;');
+    const parts = resolved.split(';md5;');
     if (parts.length > 0) {
       // For PNG/JAR URLs, the base is the file URL
       // For JS-based configs, the spider URL might be a directory
@@ -50,7 +70,7 @@ export class SpiderEngine {
       }
     }
     console.log(
-      `[SpiderEngine] spider URL: ${url}, base URL: ${this.spiderBaseUrl}`,
+      `[SpiderEngine] spider URL: ${url} -> resolved: ${resolved}, base URL: ${this.spiderBaseUrl}`,
     );
   }
 
@@ -69,13 +89,14 @@ export class SpiderEngine {
 
     // Case 1: api field contains spider URL format (like "https://xxx.png;md5;hash")
     if (api.includes(';md5;')) {
-      return api.split(';md5;')[0];
+      return this.resolveRelative(api.split(';md5;')[0]);
     }
 
     // Case 2: source has jar field (highest priority for this source)
     // Box Android: jarUrl = source.getJar().isEmpty() ? spider : source.getJar()
     if (jar) {
-      return jar.includes(';md5;') ? jar.split(';md5;')[0] : jar;
+      const jarUrl = jar.includes(';md5;') ? jar.split(';md5;')[0] : jar;
+      return this.resolveRelative(jarUrl);
     }
 
     // Case 3: use global spiderUrl from config
@@ -188,22 +209,9 @@ export class SpiderEngine {
     const hasJarUrl = !!this.resolveJarUrl(source);
     const apiStr = source.api || '';
 
-    // Check for drpy spider (api contains drpy library URL or key starts with drpy_js_)
-    // drpy spiders are JS-based — route to JsSpider which has full VM + pdfh/pdfa/cheerio
-    if (
-      apiStr.includes('drpy') ||
-      key.startsWith('drpy_js_')
-    ) {
-      console.log(
-        `[SpiderEngine] Creating JsSpider for drpy: key=${uniqueKey}, api=${api}`,
-      );
-      // For drpy spiders, api is the drpy library URL, ext is the spider rules URL
-      // JsSpider will load both files
-      spider = new JsSpider(key, api, source.ext);
-    }
-    // Check for JAR spider (csp_ prefix) — this includes csp_XBPQ, csp_XYQHiker, etc.
-    // When a JAR URL is available, JarSpider loads the actual Java class which is more reliable
-    else if (apiStr.startsWith('csp_')) {
+    // Check for JAR spider (csp_ prefix) FIRST — csp_ is the definitive indicator
+    // of a JAR spider regardless of key prefix (e.g., key=drpy_js_豆瓣 + api=csp_Douban)
+    if (apiStr.startsWith('csp_')) {
       const jarUrl = api; // api is now the spiderUrl from resolveApiUrl
       if (!jarUrl && !hasJarUrl) {
         // No JAR URL — try custom implementations as fallback
@@ -230,6 +238,16 @@ export class SpiderEngine {
         );
         spider = new JarSpider(uniqueKey, apiStr, jarUrl, source.ext);
       }
+    }
+    // Check for drpy spider (api contains drpy library URL or key starts with drpy_js_)
+    // drpy spiders are JS-based — route to JsSpider which has full VM + pdfh/pdfa/cheerio
+    else if (apiStr.includes('drpy') || key.startsWith('drpy_js_')) {
+      console.log(
+        `[SpiderEngine] Creating JsSpider for drpy: key=${uniqueKey}, api=${api}`,
+      );
+      // For drpy spiders, api is the drpy library URL, ext is the spider rules URL
+      // JsSpider will load both files
+      spider = new JsSpider(key, api, source.ext);
     } else if (api && /\.js(\?|$)/i.test(api)) {
       spider = new JsSpider(key, api, source.ext);
     } else if ((api && /\.py(\?|$)/i.test(api)) || key.startsWith('py_')) {

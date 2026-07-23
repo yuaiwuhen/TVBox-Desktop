@@ -358,6 +358,14 @@ async function handleVodClick(vod: Movie) {
       ElMessage.error('操作失败: ' + (e instanceof Error ? e.message : String(e)))
     }
   } else {
+    // msearch: 前缀表示发现类源（如豆瓣），无 detailContent 方法，重定向到快速搜索
+    if (typeof vod.vod_id === 'string' && vod.vod_id.startsWith('msearch:')) {
+      console.log('[Home] msearch vod clicked, redirecting to quick search:', vod.vod_name)
+      router.push({ name: 'search', query: { keyword: vod.vod_name, fast: '1' } })
+      // 直接触发搜索（Search.vue 被 keep-alive 缓存，watch/onActivated 在重新激活时不可靠）
+      store.doSearch(vod.vod_name, undefined, true)
+      return
+    }
     router.push({ name: 'detail', params: { sourceKey: store.activeSiteKey, vodId: vod.vod_id } })
   }
 }

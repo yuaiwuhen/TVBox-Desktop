@@ -45,6 +45,7 @@
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.6",
+    "@playwright/test": "^1.61.1",
     "@rollup/rollup-win32-x64-msvc": "^4.62.2",
     "@tailwindcss/vite": "^4.3.2",
     "@types/crypto-js": "^4.2.2",
@@ -63,7 +64,8 @@
     "vite": "^6.4.3",
     "vite-plugin-electron": "^0.29.1",
     "vitest": "^4.1.9",
-    "vue-tsc": "^3.3.5"
+    "vue-tsc": "^3.3.5",
+    "ws": "^8.21.1"
   },
   "build": {
     "appId": "com.github.tvbox.pc",
@@ -102,6 +104,16 @@
         "to": "tools/dex-tools-v2.4",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "tools/enjarify",
+        "to": "tools/enjarify",
+        "filter": [
+          "**/*",
+          "!tests/**",
+          "!.gitattributes",
+          "!.gitignore"
         ]
       }
     ],
@@ -142,5 +154,6 @@
       "icon": "build/icon.png",
       "category": "Video"
     }
-  }
+  },
+  "packageManager": "pnpm@11.13.0+sha512.88d94724d8f2e6c186744a5584c6e59ecac869ec7ba15e9cb4cd628e8dc7066820b2481d8ee3b51ea8da323a7378068aa58c556a3720d32b7c20a051d088363a"
 }

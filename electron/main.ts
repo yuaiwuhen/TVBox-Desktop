@@ -407,6 +407,77 @@ ipcMain.handle(
   },
 );
 
+// Fetch a JS module source for spider loading.
+// Browsers refuse to set User-Agent/Referer headers on fetch/XHR, but some
+// hosts (down.nigx.cn, etc.) return 403 without a browser-like UA. This runs
+// in the main process with full header control. Returns { ok, status, body, error? }.
+ipcMain.handle(
+  'js:fetchModule',
+  async (
+    _event,
+    url: string,
+  ): Promise<{
+    ok: boolean;
+    status: number;
+    body: string;
+    error?: string;
+  }> => {
+    return new Promise((resolve) => {
+      const fetchWithRedirect = (u: string, depth = 0) => {
+        if (depth > 5) {
+          resolve({ ok: false, status: 0, body: '', error: 'too many redirects' });
+          return;
+        }
+        let urlObj: URL;
+        try {
+          urlObj = new URL(u);
+        } catch (e: any) {
+          resolve({ ok: false, status: 0, body: '', error: `invalid URL: ${e.message}` });
+          return;
+        }
+        const lib = urlObj.protocol === 'https:' ? https : http;
+        const req = lib.request(
+          {
+            hostname: urlObj.hostname,
+            port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+            path: urlObj.pathname + urlObj.search,
+            method: 'GET',
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              Accept: '*/*',
+              Referer: 'https://www.baidu.com/',
+            },
+          },
+          (res: any) => {
+            const status = res.statusCode || 0;
+            if (status >= 300 && status < 400 && res.headers.location) {
+              const next = new URL(res.headers.location, u).href;
+              res.resume();
+              fetchWithRedirect(next, depth + 1);
+              return;
+            }
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer) => chunks.push(c));
+            res.on('end', () => {
+              const body = Buffer.concat(chunks).toString('utf-8');
+              resolve({ ok: status >= 200 && status < 300, status, body });
+            });
+            res.on('error', (e: any) =>
+              resolve({ ok: false, status: 0, body: '', error: e.message }),
+            );
+          },
+        );
+        req.on('error', (e: any) =>
+          resolve({ ok: false, status: 0, body: '', error: e.message }),
+        );
+        req.end();
+      };
+      fetchWithRedirect(url);
+    });
+  },
+);
+
 // Check video format before opening player.
 // Sends a GET (Range bytes=0-65535) so we can sniff magic + Content-Type.
 // Returns: { status, contentType, unsupported, format?, directUrl?, invalid?, error? }
