@@ -295,7 +295,45 @@ export class JarSpider implements ISpider {
     id: string,
     vipFlags: string[],
   ): Promise<string> {
-    return this.callMethod('playerContent', [flag, id, vipFlags]);
+    const raw = await this.callMethod('playerContent', [flag, id, vipFlags]);
+    // Post-process: if the spider failed to extract a URL but the input id
+    // already contains a playable URL with a parser-suffix (e.g. "...m3u8|lzm3u8"),
+    // strip the suffix and return the URL directly. This fixes csp_Wwys and
+    // similar sources where the upstream parser page format changed and the
+    // JAR regex no longer extracts a stream URL.
+    try {
+      const parsed = JSON.parse(raw);
+      const url: string = parsed?.url || '';
+      if (!url && id && id.includes('|')) {
+        const [realUrl, suffix] = id.split('|');
+        // Only treat as playable URL if it ends with a known media format
+        // and the suffix is a known parser tag (lzm3u8, lzmp4, etc.).
+        if (
+          realUrl &&
+          /\.(m3u8|mp4|flv|ts)(\?|$)/i.test(realUrl) &&
+          /^(lz)?m3u8$|^(lz)?mp4$|^flv$/i.test(suffix || '')
+        ) {
+          console.log(
+            '[JarSpider] playerContent fallback: spider returned empty url, using id directly:',
+            { suffix, urlPreview: realUrl.substring(0, 100) },
+          );
+          const fallback = {
+            ...parsed,
+            url: realUrl,
+            parse: 0,
+            jx: 0,
+            header: parsed.header || JSON.stringify({
+              'User-Agent':
+                'Mozilla/5.0 (Linux; Android 13; SM-A037U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36  uacq',
+            }),
+          };
+          return JSON.stringify(fallback);
+        }
+      }
+    } catch {
+      // Not JSON or no url field — return raw result as-is.
+    }
+    return raw;
   }
 
   async listMethods(): Promise<string[]> {
