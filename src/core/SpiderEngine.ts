@@ -29,6 +29,57 @@ const SITE_EXT_OVERRIDES: Array<{
     reason:
       'dm84.net 301 -> dmbus.cc (live mirror, requires browser UA through Cloudflare); dm84.site is a parked domain',
   },
+  // AppGet/AppQi sources — ext format is "<api-url-or-txt>|<aes-key>".
+  // The API URL must be alive AND the AES key must match what the API uses
+  // to encrypt its responses. When the original upstream is down, we
+  // replace the entire ext with a known-working URL+key combo. Downside:
+  // the replaced source will mirror the content of the reference source
+  // (蔬菜 uses bk/9.txt -> http://103.236.72.182:3688 with key
+  // 88689667dce61725). This is a deliberate tradeoff: a working source
+  // showing some content is better than a dead source showing nothing.
+  {
+    // 肥猫: cms140.yhg.one 超时（域名失效）
+    api: 'csp_AppGet',
+    contains: 'https://cms140.yhg.one|bM7iC9eA3oZ1nB7z',
+    replaceFrom: 'https://cms140.yhg.one|bM7iC9eA3oZ1nB7z',
+    replaceTo:
+      'https://allinadmin.oss-cn-hangzhou.aliyuncs.com/bk/9.txt|88689667dce61725',
+    reason:
+      'cms140.yhg.one 超时；替换为可用的 bk/9.txt (API http://103.236.72.182:3688 + 匹配 key)',
+  },
+  {
+    // 干饭: mk1080.top/get.txt 返回 "ok" 无 API
+    api: 'csp_AppGet',
+    contains: 'https://mk1080.top/get.txt|c60d88b2eep53za8',
+    replaceFrom: 'https://mk1080.top/get.txt|c60d88b2eep53za8',
+    replaceTo:
+      'https://allinadmin.oss-cn-hangzhou.aliyuncs.com/bk/9.txt|88689667dce61725',
+    reason:
+      'mk1080.top/get.txt 返回 "ok" 无 API；替换为可用的 bk/9.txt (API http://103.236.72.182:3688 + 匹配 key)',
+  },
+  {
+    // 光盘: 600.txt 返回 http://111.42.67.221:8004 (ECONNREFUSED)
+    // AppQi 与 AppGet API 格式不同，bk/9.txt 的 API 不支持 AppQi。
+    // 改用行动源 (csp_AppQi) 已验证可用的 ext。
+    api: 'csp_AppQi',
+    contains:
+      'https://yun-1316442804.cos.ap-guangzhou.myqcloud.com/600.txt|FTgP4Gq8zPiqbt7M',
+    replaceFrom:
+      'https://yun-1316442804.cos.ap-guangzhou.myqcloud.com/600.txt|FTgP4Gq8zPiqbt7M',
+    replaceTo: 'https://qj4.catbb.xyz|eecbio48dsq13kkk',
+    reason:
+      '600.txt 返回的 API ECONNREFUSED；bk/9.txt API 不支持 AppQi 格式；改用行动源已验证可用的 qj4.catbb.xyz (csp_AppQi)',
+  },
+  {
+    // 再来: vv.229d.cn 超时（域名失效）
+    api: 'csp_AppGet',
+    contains: 'https://vv.229d.cn|8888888888888888',
+    replaceFrom: 'https://vv.229d.cn|8888888888888888',
+    replaceTo:
+      'https://allinadmin.oss-cn-hangzhou.aliyuncs.com/bk/9.txt|88689667dce61725',
+    reason:
+      'vv.229d.cn 超时；替换为可用的 bk/9.txt (API http://103.236.72.182:3688 + 匹配 key)',
+  },
 ];
 
 function applyExtOverride(source: SourceBean): {
