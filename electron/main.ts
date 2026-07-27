@@ -50,6 +50,14 @@ process.env.VITE_PUBLIC = app.isPackaged
 
 let win: BrowserWindow;
 
+// Per-origin header overrides for drpy JS spiders.
+// drpy2's `request()` uses sync XHR, and browsers silently ignore the
+// `User-Agent` header set via XHR.setRequestHeader(). Some hosts (e.g.,
+// tuxiaobei.com) return 404 for desktop UAs, so we need to override the
+// UA at the network layer. JsSpider calls `js:registerSpiderOriginHeaders`
+// when applying drpy rule patches to register the origin → headers mapping.
+const spiderOriginHeaders = new Map<string, Record<string, string>>();
+
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'];
 
 // Diagnostic: ring buffer for main-process console output so the renderer
@@ -135,10 +143,11 @@ function createWindow() {
     minWidth: 960,
     minHeight: 600,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: true,
       contextIsolation: false,
       webSecurity: false,
+      backgroundThrottling: false,
     },
     show: false,
     menu: null,
@@ -169,7 +178,10 @@ function createWindow() {
   }
 
   if (VITE_DEV_SERVER_URL) {
-    win.loadURL(VITE_DEV_SERVER_URL);
+    // Windows may resolve localhost to ::1 (IPv6) while Vite is bound to
+    // 127.0.0.1 (IPv4) only, causing ERR_INVALID_ARGUMENT. Force IPv4.
+    const url = VITE_DEV_SERVER_URL.replace('localhost', '127.0.0.1');
+    win.loadURL(url);
   } else {
     win.loadFile(path.join(process.env.DIST, 'index.html'));
   }
@@ -216,9 +228,18 @@ function createWindow() {
     (details, callback) => {
       const { requestHeaders } = details;
       const videoHeaders = jarLoader.getVideoHeadersForUrl(details.url);
-      if (videoHeaders) {
+      // Also check spider origin headers (per-origin UA/Referer overrides
+      // registered by JsSpider for drpy spiders that need a mobile UA).
+      let spiderHeaders: Record<string, string> | null = null;
+      try {
+        const parsed = new URL(details.url);
+        const origin = `${parsed.protocol}//${parsed.host}`;
+        spiderHeaders = spiderOriginHeaders.get(origin) || null;
+      } catch {}
+      const headersToInject = videoHeaders || spiderHeaders;
+      if (headersToInject) {
         // Inject spider-provided headers (User-Agent, Referer, etc.)
-        for (const [hk, hv] of Object.entries(videoHeaders)) {
+        for (const [hk, hv] of Object.entries(headersToInject)) {
           requestHeaders[hk] = hv;
         }
         // Strip browser-specific headers that betray a browser origin.
@@ -229,12 +250,14 @@ function createWindow() {
           // Also handle case-sensitive variants
           delete requestHeaders[h.charAt(0).toUpperCase() + h.slice(1)];
         }
-        console.log(
-          '[webRequest] Injected video headers for',
-          details.url.substring(0, 80),
-          '— keys:',
-          Object.keys(requestHeaders).join(','),
-        );
+        if (videoHeaders) {
+          console.log(
+            '[webRequest] Injected video headers for',
+            details.url.substring(0, 80),
+            '— keys:',
+            Object.keys(requestHeaders).join(','),
+          );
+        }
       } else if (details.url.includes('.m3u8') || details.url.includes('.ts')) {
         // No custom headers registered — apply default anti-leech bypass
         delete requestHeaders['Referer'];
@@ -246,11 +269,19 @@ function createWindow() {
   // CORS bypass for direct video URLs. CDNs often don't send
   // Access-Control-Allow-Origin, which makes hls.js fail to fetch the
   // m3u8/TS segments. Add permissive CORS headers to the response.
+  // Also applied to spider origin header URLs (e.g., tuxiaobei.com API)
+  // so drpy2's sync XHR can read the response cross-origin.
   win.webContents.session.webRequest.onHeadersReceived(
     filter,
     (details, callback) => {
       const videoHeaders = jarLoader.getVideoHeadersForUrl(details.url);
-      if (videoHeaders) {
+      let spiderHeaders: Record<string, string> | null = null;
+      try {
+        const parsed = new URL(details.url);
+        const origin = `${parsed.protocol}//${parsed.host}`;
+        spiderHeaders = spiderOriginHeaders.get(origin) || null;
+      } catch {}
+      if (videoHeaders || spiderHeaders) {
         const responseHeaders = { ...details.responseHeaders };
         responseHeaders['access-control-allow-origin'] = ['*'];
         responseHeaders['access-control-allow-headers'] = ['*'];
@@ -284,6 +315,14 @@ ipcMain.handle('window-toggle-maximize', () => {
 
 ipcMain.handle('window-is-maximized', () => {
   return win ? win.isMaximized() : false;
+});
+
+// Expose local proxy server port to renderer.
+// Used by WexConfigDialog to build the wexconfig iframe URL
+// (http://127.0.0.1:<port>/proxy?do=wexconfig). Port is usually 9978 but
+// may differ if occupied.
+ipcMain.handle('proxy:getPort', () => {
+  return proxyServer.getPort();
 });
 
 // Config persistence IPC handlers
@@ -475,6 +514,31 @@ ipcMain.handle(
       };
       fetchWithRedirect(url);
     });
+  },
+);
+
+// Register per-origin header overrides for drpy JS spiders.
+// drpy2's `request()` uses sync XHR, and browsers silently ignore the
+// `User-Agent` header set via XHR.setRequestHeader(). Some hosts (e.g.,
+// tuxiaobei.com) return 404 for desktop UAs. JsSpider calls this to
+// register origin → headers mapping; the onBeforeSendHeaders filter
+// above injects these headers on matching requests.
+ipcMain.handle(
+  'js:registerSpiderOriginHeaders',
+  (_event, origin: string, headers: Record<string, string>): boolean => {
+    if (!origin || typeof origin !== 'string') return false;
+    try {
+      const parsed = new URL(origin);
+      const normalized = `${parsed.protocol}//${parsed.host}`;
+      spiderOriginHeaders.set(normalized, headers || {});
+      console.log(
+        `[Main] Registered spider origin headers for ${normalized}:`,
+        Object.keys(headers || {}),
+      );
+      return true;
+    } catch {
+      return false;
+    }
   },
 );
 
@@ -768,6 +832,18 @@ app.whenReady().then(async () => {
   try {
     const port = await proxyServer.start();
     console.log(`[Main] ProxyServer started on port ${port}`);
+    // NewGuanYing spider hardcodes http://127.0.0.1:8096/gying for PoW
+    // solving (see NewGuanYing.init(Context)). Without this listener,
+    // the spider's init() fails to obtain the auth cookie and all
+    // homeContent/detailContent requests return empty.
+    const gyingPort = await proxyServer.startGyingListener();
+    if (gyingPort > 0) {
+      console.log(`[Main] /gying PoW listener on port ${gyingPort}`);
+    } else {
+      console.warn(
+        '[Main] /gying listener failed to start — NewGuanYing will not work',
+      );
+    }
   } catch (e: any) {
     console.error('[Main] ProxyServer failed to start:', e.message);
   }

@@ -74,6 +74,10 @@ const GITHUB_MIRROR_CHAINS: string[][] = [
   // https://{proxy}/{original-url}
   // We try them in order until one succeeds.
   ['git.yylx.win', 'gh-proxy.com', 'fastgit.cc'],
+  // gh-proxy.net returns an HTML interstitial ("Loading...") instead of the
+  // raw file content for some URLs. ghproxy.net serves the same URL pattern
+  // and returns the actual file directly.
+  ['gh-proxy.net', 'ghproxy.net'],
 ];
 
 function rewriteUrlWithMirror(
@@ -89,6 +93,16 @@ function rewriteUrlWithMirror(
   return url;
 }
 
+// Detect HTML interstitial responses (e.g., gh-proxy.net's "Loading..." page).
+// These return HTTP 200 but contain HTML, not the requested JS/JSON content.
+// Treating them as failures lets fetchWithMirrorFallback try alternative mirrors.
+function isHtmlInterstitial(body: string): boolean {
+  if (!body || body.length === 0) return false;
+  const trimmed = body.trimStart();
+  // JS/JSON content never starts with <!DOCTYPE or <html
+  return trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html');
+}
+
 async function fetchWithMirrorFallback(
   url: string,
   options: { responseType?: string; timeout?: number } = {},
@@ -101,7 +115,12 @@ async function fetchWithMirrorFallback(
     });
     const body =
       typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-    if (body && body.length > 0) return body;
+    if (body && body.length > 0 && !isHtmlInterstitial(body)) return body;
+    if (isHtmlInterstitial(body)) {
+      console.warn(
+        `[JsSpider] ${url.substring(0, 80)} returned HTML interstitial, trying mirrors`,
+      );
+    }
   } catch (e: any) {
     // Fall through to mirror retry
     const errMsg = e.message || '';
@@ -125,7 +144,7 @@ async function fetchWithMirrorFallback(
         });
         const body =
           typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-        if (body && body.length > 0) {
+        if (body && body.length > 0 && !isHtmlInterstitial(body)) {
           console.log(
             `[JsSpider] mirror fallback: ${altMirror} succeeded for ${url.substring(0, 80)}...`,
           );
@@ -161,7 +180,7 @@ async function fetchMirrorOnly(
         });
         const body =
           typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-        if (body && body.length > 0) {
+        if (body && body.length > 0 && !isHtmlInterstitial(body)) {
           console.log(
             `[JsSpider] mirror retry: ${altMirror} succeeded for ${url.substring(0, 80)}...`,
           );
@@ -180,6 +199,127 @@ async function fetchMirrorOnly(
 
 // ─── Module source cache (URL → transpiled source) ─────────────────────────
 const moduleSourceCache: Map<string, string> = new Map();
+
+// ─── drpy rule patches for broken upstream spiders ─────────────────────────
+// Some drpy spiders reference sites that have changed their HTML structure
+// since the spider was last updated. The `推荐` (recommendation) selectors
+// no longer match, so homeContent returns classes but no videos.
+// Each patch is applied AFTER drpy2's init() completes, overriding specific
+// rule fields. Matching is by spider key (drpy_js_ prefix stripped).
+//
+// The optional `originHeaders` field registers per-origin header overrides
+// via the `js:registerSpiderOriginHeaders` IPC. Browsers silently ignore
+// `User-Agent` set via XHR.setRequestHeader() (forbidden header), so hosts
+// that require a mobile UA (e.g., tuxiaobei.com returns 404 for desktop UA)
+// need the override to be applied at the network layer in the main process.
+const DRPY_RULE_PATCHES: Record<
+  string,
+  {
+    reason: string;
+    fields: Record<string, string>;
+    originHeaders?: Record<string, Record<string, string>>;
+  }
+> = {
+  // 兔小贝 (儿童): tuxiaobei.com homepage was redesigned and no longer has
+  // `.pic-list.list-box .items` selectors. The /list/mip-data API still
+  // returns JSON with video items. Point homeUrl at the儿歌 category API
+  // and set 推荐 to `*` so drpy2 falls back to 一级 (json:data.items;...).
+  //
+  // Additionally, tuxiaobei.com returns 404 for desktop User-Agents, so we
+  // register a mobile UA override for the origin. The XHR in drpy2's
+  // `request()` cannot set User-Agent (browser forbidden header), so the
+  // override must be applied at the network layer.
+  儿童: {
+    reason:
+      'tuxiaobei.com 首页改版后 .pic-list.list-box 选择器失效；改用 /list/mip-data API + js 解析；tuxiaobei.com 对桌面 UA 返回 404，需注入移动端 UA；API 返回 JSONP 包裹 ({...})，需 strip 括号后 JSON.parse',
+    fields: {
+      homeUrl:
+        'https://www.tuxiaobei.com/list/mip-data?typeId=2&page=1&callback=',
+      推荐: '*',
+      // API 返回 JSONP 格式：({"status":0,"data":{"items":[...]}})
+      // json: 解析器无法处理前缀 ( 和后缀 )，改用 js: 手动 strip + JSON.parse
+      // drpy2 的 homeVodParse 和 categoryParse 都在 __hostEval 后读取 VODS，
+      // 所以 js: 代码必须显式设置 VODS（不仅设置 input）
+      一级:
+        'js:var d=[];var resp=request(input);var data=JSON.parse(resp.replace(/^\\(/,"").replace(/\\);?\\s*$/,""));data.data.items.forEach(function(it){d.push({title:it.name,img:it.image,url:String(it.video_id),desc:it.duration_string})});VODS=d;input=d',
+    },
+    originHeaders: {
+      'https://www.tuxiaobei.com': {
+        'User-Agent':
+          'Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36',
+        Referer: 'https://www.tuxiaobei.com/',
+      },
+    },
+  },
+};
+
+function applyDrpyRulePatch(
+  key: string,
+  context: import('vm').Context,
+): boolean {
+  // Strip drpy_js_ prefix if present
+  const bareKey = key.startsWith('drpy_js_') ? key.substring(8) : key;
+  const patch = DRPY_RULE_PATCHES[bareKey] || DRPY_RULE_PATCHES[key];
+  if (!patch) return false;
+  try {
+    const fieldsJson = JSON.stringify(patch.fields);
+    const vm = require('vm');
+    vm.runInContext(
+      `Object.assign(globalThis.rule, ${fieldsJson});`,
+      context,
+      { timeout: 2000 },
+    );
+    console.log(
+      `[JsSpider] applied drpy rule patch for ${key}: ${patch.reason}`,
+    );
+
+    // Register per-origin header overrides (e.g., mobile UA for hosts that
+    // 404 on desktop UA). The XHR in drpy2's request() cannot set
+    // User-Agent (browser forbidden header), so we route through the main
+    // process network layer.
+    if (patch.originHeaders) {
+      let electronIPC: any = (globalThis as any).electronIPC;
+      if (!electronIPC && typeof (globalThis as any).window !== 'undefined') {
+        electronIPC = (globalThis as any).window.electronIPC;
+      }
+      if (!electronIPC) {
+        try {
+          if ((globalThis as any).require) {
+            const { ipcRenderer } = (globalThis as any).require('electron');
+            electronIPC = {
+              invoke: (channel: string, ...args: any[]) =>
+                ipcRenderer.invoke(channel, ...args),
+            };
+          }
+        } catch {
+          // No electron available
+        }
+      }
+      if (electronIPC && typeof electronIPC.invoke === 'function') {
+        for (const [origin, headers] of Object.entries(patch.originHeaders)) {
+          electronIPC
+            .invoke('js:registerSpiderOriginHeaders', origin, headers)
+            .catch((e: any) => {
+              console.warn(
+                `[JsSpider] Failed to register origin headers for ${origin}: ${e.message}`,
+              );
+            });
+        }
+      } else {
+        console.warn(
+          `[JsSpider] electronIPC not available; cannot register origin headers for ${key}`,
+        );
+      }
+    }
+    return true;
+  } catch (e: any) {
+    console.warn(
+      `[JsSpider] failed to apply drpy rule patch for ${key}: ${e.message}`,
+    );
+    return false;
+  }
+}
+
 
 // ─── Prototype defineProperty neutralization ───────────────────────────────
 // drpy2.min.js calls Object.defineProperty(Object.prototype, "myValues", {value:...,enumerable:false})
@@ -1873,6 +2013,11 @@ export class JsSpider implements ISpider {
         console.error(`[JsSpider] init() error for ${this.key}:`, e);
       }
     }
+
+    // Apply drpy rule patches for broken upstream spiders (after init)
+    if (isDrpy && this.context) {
+      applyDrpyRulePatch(this.key, this.context);
+    }
   }
 
   /**
@@ -2757,8 +2902,23 @@ export class JsSpider implements ISpider {
         const result = this.sandbox.__exports__ || {};
         this.sandbox.__exports__ = savedExports;
         return result;
-      } catch (e) {
-        console.warn(`[JsSpider] Failed to evaluate cached module ${url}:`, e);
+      } catch (e: any) {
+        const errInfo = {
+          message: e?.message || String(e),
+          stack: (e?.stack || '').substring(0, 800),
+          name: e?.name,
+          code: e?.code,
+          typeof: typeof e,
+          keys: e && typeof e === 'object' ? Object.keys(e).slice(0, 10) : null,
+        };
+        console.warn(
+          `[JsSpider] Failed to evaluate cached module ${url}:`,
+          JSON.stringify(errInfo),
+        );
+        // Log the cached source preview for debugging
+        console.warn(
+          `[JsSpider] Cached source preview (first 300): ${(cached || '').substring(0, 300).replace(/\n/g, '\\n')}`,
+        );
         this.sandbox.__exports__ = savedExports;
         return {};
       }
@@ -2827,6 +2987,17 @@ export class JsSpider implements ISpider {
           );
         } else {
           body = res.body;
+          // gh-proxy.net returns HTTP 200 with an HTML interstitial
+          // ("Loading..." page with JWT redirect) instead of the actual JS
+          // content. Treat this as a failed fetch so we fall through to
+          // mirror fallback (ghproxy.net serves the real file directly).
+          if (isHtmlInterstitial(body)) {
+            console.warn(
+              `[JsSpider] IPC fetch returned HTML interstitial for ${url}, trying mirrors`,
+            );
+            body = '';
+            fetchFailed = true;
+          }
         }
       } else {
         // Fallback to axios (may fail with 403 on strict hosts)
@@ -2839,6 +3010,13 @@ export class JsSpider implements ISpider {
             typeof resp.data === 'string'
               ? resp.data
               : JSON.stringify(resp.data);
+          if (isHtmlInterstitial(body)) {
+            console.warn(
+              `[JsSpider] axios returned HTML interstitial for ${url}, trying mirrors`,
+            );
+            body = '';
+            fetchFailed = true;
+          }
         } catch (e: any) {
           fetchFailed = true;
           console.warn(
