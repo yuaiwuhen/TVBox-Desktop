@@ -7,6 +7,53 @@ import { XbpqSpider } from './XbpqSpider';
 import { XyqhikerSpider } from './XyqhikerSpider';
 // DrpySpider no longer used — drpy spiders are handled by JsSpider
 
+/**
+ * Site URL overrides for sources whose upstream `ext` URL has gone dark
+ * (522 / DNS fail / 404). Each rule matches by `api` class name and the
+ * broken upstream URL fragment, replacing it with a working mirror.
+ * This keeps the original config intact while letting the spider talk to
+ * a live host.
+ */
+const SITE_EXT_OVERRIDES: Array<{
+  api: string;
+  contains: string;
+  replaceFrom: string;
+  replaceTo: string;
+  reason: string;
+}> = [
+  {
+    api: 'csp_Dm84',
+    contains: 'https://dm84.net',
+    replaceFrom: 'https://dm84.net',
+    replaceTo: 'https://dmbus.cc',
+    reason:
+      'dm84.net 301 -> dmbus.cc (live mirror, requires browser UA through Cloudflare); dm84.site is a parked domain',
+  },
+];
+
+function applyExtOverride(source: SourceBean): {
+  ext: string;
+  overridden: boolean;
+  reason?: string;
+} {
+  const ext = source.ext || '';
+  if (!ext) return { ext, overridden: false };
+  for (const rule of SITE_EXT_OVERRIDES) {
+    if (source.api !== rule.api) continue;
+    if (!ext.includes(rule.contains)) continue;
+    const newExt = ext.replace(rule.replaceFrom, rule.replaceTo);
+    if (newExt !== ext) {
+      console.log(
+        `[SpiderEngine] ext override: ${source.key} (${source.api})`,
+        `${rule.replaceFrom} -> ${rule.replaceTo}`,
+        `(${rule.reason})`,
+      );
+      return { ext: newExt, overridden: true, reason: rule.reason };
+    }
+  }
+  return { ext, overridden: false };
+}
+
 export class SpiderEngine {
   private spiderCache: Map<string, ISpider> = new Map();
   private spiderBaseUrl: string = '';
@@ -186,6 +233,9 @@ export class SpiderEngine {
     const key = source.key || '';
     const type = source.type ?? 3;
 
+    // Apply ext URL override for known-broken upstream sites
+    const { ext: effectiveExt, overridden } = applyExtOverride(source);
+
     console.log(
       '[SpiderEngine] getSpider creating new:',
       JSON.stringify(
@@ -195,7 +245,8 @@ export class SpiderEngine {
           uniqueKey,
           type,
           api: api || '(empty)',
-          ext: (source.ext || '').substring(0, 150),
+          ext: effectiveExt.substring(0, 150),
+          extOverridden: overridden,
           jar: source.jar,
         },
         null,
@@ -236,7 +287,7 @@ export class SpiderEngine {
         console.log(
           `[SpiderEngine] Creating JarSpider: key=${uniqueKey}, api=${apiStr}, jarUrl=${jarUrl}`,
         );
-        spider = new JarSpider(uniqueKey, apiStr, jarUrl, source.ext);
+        spider = new JarSpider(uniqueKey, apiStr, jarUrl, effectiveExt);
       }
     }
     // Check for drpy spider (api contains drpy library URL or key starts with drpy_js_)
@@ -247,13 +298,15 @@ export class SpiderEngine {
       );
       // For drpy spiders, api is the drpy library URL, ext is the spider rules URL
       // JsSpider will load both files
-      spider = new JsSpider(key, api, source.ext);
+      spider = new JsSpider(key, api, effectiveExt);
     } else if (api && /\.js(\?|$)/i.test(api)) {
-      spider = new JsSpider(key, api, source.ext);
+      spider = new JsSpider(key, api, effectiveExt);
     } else if ((api && /\.py(\?|$)/i.test(api)) || key.startsWith('py_')) {
-      spider = new PySpider(key, api, source.ext);
+      spider = new PySpider(key, api, effectiveExt);
     } else if (type === 0 || type === 1 || type === 2) {
       // JSON/XML采集源 - use JsonRuleParser with ext field rules
+      // JsonRuleParser reads source.ext directly, so we must override on source
+      if (overridden) source.ext = effectiveExt;
       spider = new JsonRuleParser(source);
     } else if (type === 3 || type === 4) {
       // type=3: Spider mode - could be JS or JAR
@@ -262,14 +315,15 @@ export class SpiderEngine {
         console.log(
           `[SpiderEngine] type=${type}, trying JsSpider with URL: ${api}`,
         );
-        spider = new JsSpider(key, api, source.ext);
+        spider = new JsSpider(key, api, effectiveExt);
       } else if (api && /\.js(\?|$)/i.test(api)) {
-        spider = new JsSpider(key, api, source.ext);
-      } else if (source.ext) {
+        spider = new JsSpider(key, api, effectiveExt);
+      } else if (effectiveExt) {
         // If no api URL but has ext, try JsonRuleParser with ext rules
         console.log(
           `[SpiderEngine] type=${type} with ext rules, trying JsonRuleParser: ${key}`,
         );
+        if (overridden) source.ext = effectiveExt;
         spider = new JsonRuleParser(source);
       } else {
         console.warn(
@@ -283,18 +337,19 @@ export class SpiderEngine {
     }
 
     try {
-      await spider.init(source.ext || '');
+      await spider.init(effectiveExt || '');
       console.log(`[SpiderEngine] Spider initialized successfully: ${key}`);
     } catch (e) {
       console.error(`[SpiderEngine] Failed to init spider ${key}:`, e);
       // If JsSpider failed for type=3, try JsonRuleParser as fallback (if has ext)
-      if (type === 3 && spider instanceof JsSpider && source.ext) {
+      if (type === 3 && spider instanceof JsSpider && effectiveExt) {
         console.log(
           `[SpiderEngine] JsSpider failed, trying JsonRuleParser fallback for: ${key}`,
         );
         try {
+          if (overridden) source.ext = effectiveExt;
           spider = new JsonRuleParser(source);
-          await spider.init(source.ext || '');
+          await spider.init(effectiveExt || '');
           console.log(
             `[SpiderEngine] JsonRuleParser fallback succeeded: ${key}`,
           );
