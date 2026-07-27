@@ -1,6 +1,7 @@
 import axios from 'axios';
-import { ipcMain, BrowserWindow } from 'electron';
+import { app, ipcMain } from 'electron';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { jarLoader } from './JarLoader';
 
@@ -17,6 +18,11 @@ export class QuarkPanService {
   // ProxyServer can inject it into spider params, bypassing the spider's
   // SharedPreferences read path (which fails to send __puus to the CDN).
   private static syncedCookie: string | null = null;
+  // Last resolve failure reason. Set by resolveQuarkDownloadUrl so
+  // JarLoader.playerContent can return a precise error message instead of
+  // the generic "cookie may be expired" fallback.
+  private static lastResolveError: string | null = null;
+  private static lastSpaceError = 0;
 
   static init() {
     ipcMain.handle('quark:generateQRCode', async () => {
@@ -28,11 +34,28 @@ export class QuarkPanService {
     });
 
     ipcMain.handle('quark:isLoggedIn', async () => {
-      return { isLoggedIn: !!this.loginInfo?.cookie };
+      // Consider logged in if either loginInfo (from this session's QR
+      // login) OR syncedCookie (restored from disk on startup) is present.
+      // Without this, a cookie restored from disk wouldn't show as logged-in
+      // in the UI even though playerContent would work.
+      const hasCookie = !!this.loginInfo?.cookie || !!this.syncedCookie;
+      return { isLoggedIn: hasCookie };
     });
 
     ipcMain.handle('quark:getLoginInfo', async () => {
-      return this.loginInfo;
+      // If we have a syncedCookie from disk but no loginInfo (app restarted
+      // after a previous login), return a minimal loginInfo so the UI can
+      // show the logged-in state.
+      if (this.loginInfo) return this.loginInfo;
+      if (this.syncedCookie) {
+        return {
+          cookie: this.syncedCookie,
+          userId: '',
+          nickname: '已登录（从本地恢复）',
+          loginTime: 0,
+        } as QuarkLoginInfo;
+      }
+      return null;
     });
 
     ipcMain.handle('quark:logout', async () => {
@@ -55,7 +78,163 @@ export class QuarkPanService {
       },
     );
 
+    // Restore cookie from disk on startup. StubSharedPreferences is
+    // in-memory only, so JVM-synced cookies are lost when the app restarts.
+    // Without this restore, every restart requires re-login.
+    this.restoreCookieFromDisk();
+
     console.log('[QuarkPanService] Initialized');
+  }
+
+  /**
+   * Persistent cookie file path in userData.
+   *
+   * StubSharedPreferences is in-memory only, so cookies synced to JVM are
+   * lost when the app restarts. This file is the canonical persistent store
+   * for the Quark cookie. On startup, restoreCookieFromDisk() reads this
+   * file and re-syncs the cookie to JVM so spider/playerContent can use it.
+   */
+  private static getCookieFilePath(): string {
+    return path.join(app.getPath('userData'), 'quark_cookie.json');
+  }
+
+  /**
+   * Restore cookie from disk on app startup.
+   *
+   * Reads the persisted cookie file and re-syncs it to JVM SharedPreferences
+   * (which is in-memory only and lost on restart). Also populates
+   * this.syncedCookie so getSyncedCookie() returns the cookie without
+   * needing to call readQuarkCookieFromJVM() every time.
+   *
+   * If the cookie is expired, the file is deleted so we don't keep trying
+   * to use it. Token validity is checked lazily on the first playerContent
+   * call via refreshCookieForPlayback().
+   *
+   * Migration: if the userData cookie file doesn't exist but the legacy
+   * temp file (os.tmpdir()/quark_cookie_debug.txt) does, migrate it to
+   * userData. This handles the upgrade path for users who logged in
+   * before disk persistence was added.
+   */
+  private static restoreCookieFromDisk(): void {
+    try {
+      const cookiePath = this.getCookieFilePath();
+      let cookie = '';
+      if (fs.existsSync(cookiePath)) {
+        try {
+          const raw = fs.readFileSync(cookiePath, 'utf-8');
+          const data = JSON.parse(raw);
+          cookie = data?.cookie || '';
+        } catch (parseErr: any) {
+          console.warn(
+            '[QuarkPanService] restoreCookieFromDisk: failed to parse persisted file, ignoring:',
+            parseErr?.message,
+          );
+        }
+      }
+      // Migration: fall back to legacy temp file if userData file is missing
+      // or empty. This handles users who logged in before persistence was
+      // added — their cookie exists in temp but not in userData.
+      if (!cookie) {
+        try {
+          const tmpPath = path.join(os.tmpdir(), 'quark_cookie_debug.txt');
+          if (fs.existsSync(tmpPath)) {
+            const tmpCookie = fs.readFileSync(tmpPath, 'utf-8').trim();
+            if (tmpCookie && tmpCookie.length > 50) {
+              console.log(
+                '[QuarkPanService] restoreCookieFromDisk: migrating cookie from legacy temp file (len=',
+                tmpCookie.length,
+                ')',
+              );
+              cookie = tmpCookie;
+            }
+          }
+        } catch (tmpErr: any) {
+          // ignore temp file read errors
+        }
+      }
+      if (!cookie || cookie.length < 50) {
+        console.log(
+          '[QuarkPanService] restoreCookieFromDisk: no persisted cookie found',
+        );
+        return;
+      }
+      console.log(
+        '[QuarkPanService] restoreCookieFromDisk: found cookie len=',
+        cookie.length,
+        'has __puus=',
+        cookie.includes('__puus'),
+      );
+      // Cache in-memory so getSyncedCookie() returns immediately
+      this.syncedCookie = cookie;
+      // Persist to userData (no-op if already there, but ensures migration
+      // from temp file is captured).
+      this.persistCookieToDisk(cookie);
+      // Re-sync to JVM so spider's SharedPreferences read path also works
+      // (spider calls Init.context().getSharedPreferences(...).getString(...))
+      void this.syncCookieToJVM(cookie);
+    } catch (e: any) {
+      console.warn(
+        '[QuarkPanService] restoreCookieFromDisk failed:',
+        e?.message || e,
+      );
+    }
+  }
+
+  /**
+   * Persist cookie to disk so it survives app restarts.
+   *
+   * Called by syncCookieToJVM() every time the cookie is updated (login,
+   * refresh, etc.). The file is written atomically (tmp + rename) to avoid
+   * corruption if the app crashes mid-write.
+   */
+  private static persistCookieToDisk(cookie: string): void {
+    try {
+      const cookiePath = this.getCookieFilePath();
+      const dir = path.dirname(cookiePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const tmpPath = cookiePath + '.tmp';
+      const payload = JSON.stringify({
+        cookie,
+        savedAt: new Date().toISOString(),
+      });
+      fs.writeFileSync(tmpPath, payload, 'utf-8');
+      fs.renameSync(tmpPath, cookiePath);
+      console.log(
+        '[QuarkPanService] persistCookieToDisk: saved cookie len=',
+        cookie.length,
+        'to',
+        cookiePath,
+      );
+    } catch (e: any) {
+      console.warn(
+        '[QuarkPanService] persistCookieToDisk failed:',
+        e?.message || e,
+      );
+    }
+  }
+
+  /**
+   * Delete the persisted cookie file. Called by clearLoginState() so a
+   * logout properly clears all traces of the cookie.
+   */
+  private static deletePersistedCookieFile(): void {
+    try {
+      const cookiePath = this.getCookieFilePath();
+      if (fs.existsSync(cookiePath)) {
+        fs.unlinkSync(cookiePath);
+        console.log(
+          '[QuarkPanService] deletePersistedCookieFile: removed',
+          cookiePath,
+        );
+      }
+    } catch (e: any) {
+      console.warn(
+        '[QuarkPanService] deletePersistedCookieFile failed:',
+        e?.message || e,
+      );
+    }
   }
 
   /**
@@ -64,7 +243,7 @@ export class QuarkPanService {
    * Returns detailed status for each step.
    */
   static async diagnoseShareApi(shareUrl: string): Promise<any> {
-    const cookie = this.syncedCookie;
+    const cookie = this.getSyncedCookie();
     if (!cookie) {
       return { error: 'No synced cookie. Please login to Quark first.' };
     }
@@ -141,9 +320,27 @@ export class QuarkPanService {
    * Get the last cookie synced to JVM SharedPreferences.
    * Used by ProxyServer to inject into spider params, bypassing
    * the spider's SharedPreferences read path.
+   *
+   * If the in-memory syncedCookie is null (e.g., user logged in via wexconfig
+   * iframe during this session — that path writes to SharedPreferences but
+   * never calls syncCookieToJVM), fall back to reading directly from JVM
+   * SharedPreferences. This makes the config center the single source of
+   * truth for login state.
    */
   static getSyncedCookie(): string | null {
-    return this.syncedCookie;
+    if (this.syncedCookie) return this.syncedCookie;
+    // Fallback: read from JVM SharedPreferences (config center is source of truth)
+    const jvmCookie = jarLoader.readQuarkCookieFromJVM();
+    if (jvmCookie) {
+      // Cache it so subsequent calls don't re-read SharedPreferences
+      this.syncedCookie = jvmCookie;
+      console.log(
+        '[QuarkPanService] getSyncedCookie: syncedCookie was null, read from JVM SharedPreferences (len=',
+        jvmCookie.length,
+        ')',
+      );
+    }
+    return jvmCookie;
   }
 
   /**
@@ -160,6 +357,8 @@ export class QuarkPanService {
     console.log(
       '[QuarkPanService] clearLoginState: loginInfo, syncedCookie, caches cleared',
     );
+    // Delete persisted cookie file so a re-login starts clean
+    this.deletePersistedCookieFile();
     // Also clear JVM SharedPreferences so spider no longer thinks user is logged in
     this.clearJvmCookie().catch((e) =>
       console.warn(
@@ -178,7 +377,7 @@ export class QuarkPanService {
     valid: boolean;
     nickname?: string;
   }> {
-    const cookie = this.syncedCookie;
+    const cookie = this.getSyncedCookie();
     if (!cookie) {
       return { valid: false };
     }
@@ -326,7 +525,7 @@ export class QuarkPanService {
     }>;
     error?: string;
   }> {
-    const cookie = this.syncedCookie;
+    const cookie = this.getSyncedCookie();
     if (!cookie) {
       return {
         success: false,
@@ -490,14 +689,35 @@ export class QuarkPanService {
     }
   }
 
-  // Cache: (shareId:fid) → { playUrl, expiresAt, transferredFid }
+  // Cache: (shareId:fid) → { playUrl, expiresAt, transferredFid, puus }
   // The download URL returned by /file/download contains an auth_key valid
   // for ~6 hours. Within that window, replays can reuse the same URL without
   // re-resolving.
+  //
+  // IMPORTANT: The auth_key is bound to the __puus cookie value at the time
+  // the URL was generated. When refreshCookieForPlayback updates __puus, any
+  // previously cached URL becomes invalid and the CDN returns 412. To handle
+  // this, we store the __puus value alongside the URL and invalidate the
+  // cache entry when __puus changes.
   private static playUrlCache = new Map<
     string,
-    { playUrl: string; expiresAt: number; transferredFid: string }
+    {
+      playUrl: string;
+      expiresAt: number;
+      transferredFid: string;
+      puus: string;
+    }
   >();
+
+  /**
+   * Extract the __puus cookie value from a full cookie string.
+   * Returns '' if __puus is not present.
+   */
+  private static extractPuus(cookie: string): string {
+    if (!cookie) return '';
+    const match = cookie.match(/__puus=([^;]+)/);
+    return match ? match[1] : '';
+  }
 
   // Cache: TVBox folder fid (created once per session, reused for all transfers).
   private static tvboxFolderFid: string | null = null;
@@ -584,7 +804,7 @@ export class QuarkPanService {
     shareId: string,
     fid: string,
   ): Promise<string | null> {
-    const cookie = this.syncedCookie;
+    const cookie = this.getSyncedCookie();
     if (!cookie) {
       console.warn(
         '[QuarkPanService] resolveQuarkDownloadUrl: no synced cookie',
@@ -594,30 +814,90 @@ export class QuarkPanService {
 
     const cacheKey = `${shareId}:${fid}`;
     const cached = this.playUrlCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
+    const currentPuus = this.extractPuus(cookie);
+    if (
+      cached &&
+      cached.expiresAt > Date.now() &&
+      cached.puus === currentPuus &&
+      currentPuus
+    ) {
       console.log(
         '[QuarkPanService] resolveQuarkDownloadUrl: cache hit for',
         cacheKey,
         '(expires in',
         Math.round((cached.expiresAt - Date.now()) / 60000),
-        'min)',
+        'min, puus matched)',
       );
       return cached.playUrl;
+    }
+    if (cached && cached.puus !== currentPuus) {
+      console.log(
+        '[QuarkPanService] resolveQuarkDownloadUrl: cache stale for',
+        cacheKey,
+        '- __puus changed (cached puus len=',
+        cached.puus.length,
+        ', current puus len=',
+        currentPuus.length,
+        '), re-resolving',
+      );
+      this.playUrlCache.delete(cacheKey);
     }
 
     // Look up the per-file shareFidToken captured during resolveShareToFiles.
     // The spider (NewQuark.java line 721) reads this from the share detail
     // API and stores it in vod_play_url; without it, /share/sharepage/save
     // returns 32003 "missing fid_token" and the transfer silently fails.
-    const cachedTokenInfo = this.shareFidTokenCache.get(cacheKey);
+    let cachedTokenInfo = this.shareFidTokenCache.get(cacheKey);
     let shareFidToken = cachedTokenInfo?.token || '';
-    const cachedShareUrl = cachedTokenInfo?.shareUrl || '';
+    let cachedShareUrl = cachedTokenInfo?.shareUrl || '';
     if (!shareFidToken) {
-      console.warn(
+      // Spider-generated "quark:shareId:fid" ids bypass resolveShareToFiles,
+      // so the per-file token cache is empty. Resolve the share now to
+      // populate it — without the token, the transfer path returns 32003
+      // and all download attempts fail.
+      console.log(
         '[QuarkPanService] resolveQuarkDownloadUrl: no cached shareFidToken for',
         cacheKey,
-        '(transfer will likely fail; resolveShareToFiles must run first)',
+        '— resolving share first',
       );
+      const shareUrl = `https://pan.quark.cn/s/${shareId}`;
+      try {
+        const resolved = await this.resolveShareToFiles(shareUrl);
+        if (resolved.success && resolved.files) {
+          const matched = resolved.files.find((f) => f.fid === fid);
+          if (matched) {
+            // resolveShareToFiles already populated shareFidTokenCache;
+            // re-read from cache so shareUrl is also captured.
+            cachedTokenInfo = this.shareFidTokenCache.get(cacheKey);
+            shareFidToken = cachedTokenInfo?.token || '';
+            cachedShareUrl = cachedTokenInfo?.shareUrl || shareUrl;
+            console.log(
+              '[QuarkPanService] resolveQuarkDownloadUrl: resolved share, got shareFidToken length=',
+              shareFidToken.length,
+              'for',
+              cacheKey,
+            );
+          } else {
+            console.warn(
+              '[QuarkPanService] resolveQuarkDownloadUrl: share resolved but fid=',
+              fid,
+              'not in file list (',
+              resolved.files.length,
+              'files)',
+            );
+          }
+        } else {
+          console.warn(
+            '[QuarkPanService] resolveQuarkDownloadUrl: resolveShareToFiles failed:',
+            resolved.error,
+          );
+        }
+      } catch (e: any) {
+        console.warn(
+          '[QuarkPanService] resolveQuarkDownloadUrl: resolveShareToFiles threw:',
+          e?.message || e,
+        );
+      }
     } else {
       console.log(
         '[QuarkPanService] resolveQuarkDownloadUrl: using cached shareFidToken length=',
@@ -636,6 +916,10 @@ export class QuarkPanService {
     };
 
     try {
+      // Clear previous resolve error at the start of each attempt so the
+      // error reflects only the most recent failure.
+      this.lastResolveError = null;
+
       // Step 1: Refresh __puus cookie (mirrors spider's refreshCookie()).
       // CDN validates __puus against the auth_key in the download URL; a
       // stale __puus causes 412 even with a fresh download URL.
@@ -648,18 +932,9 @@ export class QuarkPanService {
       const refreshResult = await this.refreshCookieForPlayback();
       if (refreshResult.expired) {
         console.warn(
-          '[QuarkPanService] resolveQuarkDownloadUrl: Quark login expired, emitting pan:loginExpired',
+          '[QuarkPanService] resolveQuarkDownloadUrl: Quark login expired (cookie invalid), returning null',
         );
-        try {
-          BrowserWindow.getAllWindows().forEach((w) =>
-            w.webContents.send('pan:loginExpired', 'quark'),
-          );
-        } catch (e: any) {
-          console.warn(
-            '[QuarkPanService] Failed to emit pan:loginExpired:',
-            e.message,
-          );
-        }
+        this.lastResolveError = 'expired';
         return null;
       }
       // refreshCookieForPlayback updated this.syncedCookie in-place if a new
@@ -710,7 +985,7 @@ export class QuarkPanService {
         return downloadUrl;
       }
 
-      // Step 4: Chat API flow (last resort — usually fails for share fids
+      // Step 5: Chat API flow (last resort — usually fails for share fids
       // with 21001, but kept for the rare case where the fid happens to be
       // accessible via chat).
       console.log(
@@ -727,6 +1002,14 @@ export class QuarkPanService {
         '[QuarkPanService] resolveQuarkDownloadUrl: all paths failed for fid=',
         fid,
       );
+      // Set a precise error reason so JarLoader.playerContent can return
+      // a meaningful message instead of the generic "cookie expired" text.
+      // Priority: spaceIssue (set by getDownloadUrlViaTransfer) > unknown.
+      if (Date.now() - this.lastSpaceError < 60 * 1000) {
+        this.lastResolveError = 'space';
+      } else {
+        this.lastResolveError = 'unknown';
+      }
       return null;
     } catch (e: any) {
       console.error(
@@ -735,8 +1018,23 @@ export class QuarkPanService {
         e.response?.status,
         e.response?.data,
       );
+      this.lastResolveError =
+        'exception:' + (e?.message || String(e)).substring(0, 100);
       return null;
     }
+  }
+
+  /**
+   * Returns the last resolve failure reason set by resolveQuarkDownloadUrl.
+   * Used by JarLoader.playerContent to return a precise error message:
+   *   - 'expired': cookie/login expired → prompt re-login in config center
+   *   - 'space': Quark drive space insufficient → prompt user to free space
+   *   - 'unknown': all paths failed for unknown reasons
+   *   - 'exception:...': unexpected exception with message
+   *   - null: no failure (resolve succeeded or hasn't been called)
+   */
+  public static getLastResolveError(): string | null {
+    return this.lastResolveError;
   }
 
   /**
@@ -766,7 +1064,7 @@ export class QuarkPanService {
     expired: boolean;
     cookie: string | null;
   }> {
-    const cookie = this.syncedCookie;
+    const cookie = this.getSyncedCookie();
     if (!cookie) {
       return { refreshed: false, expired: false, cookie: null };
     }
@@ -832,6 +1130,8 @@ export class QuarkPanService {
             '[QuarkPanService] refreshCookieForPlayback: refreshed __puus via /file/sort, cookie len=',
             this.syncedCookie.length,
           );
+          // Persist the refreshed cookie so it survives app restarts
+          this.persistCookieToDisk(this.syncedCookie);
           return {
             refreshed: true,
             expired: false,
@@ -965,6 +1265,8 @@ export class QuarkPanService {
         '[QuarkPanService] refreshCookie: refreshed __puus via /file/sort, cookie len=',
         this.syncedCookie.length,
       );
+      // Persist the refreshed cookie so it survives app restarts
+      this.persistCookieToDisk(this.syncedCookie);
       // Update commonHeaders in-place so callers use the fresh cookie.
       commonHeaders.Cookie = this.syncedCookie;
     } catch (e: any) {
@@ -1477,11 +1779,7 @@ export class QuarkPanService {
               }
               if (downloadUrl) {
                 const cacheKey = `${shareId}:${fid}`;
-                this.playUrlCache.set(cacheKey, {
-                  playUrl: downloadUrl,
-                  expiresAt: Date.now() + 5 * 3600 * 1000,
-                  transferredFid: newFid,
-                });
+                this.cachePlayUrl(cacheKey, downloadUrl, newFid);
                 return downloadUrl;
               }
             }
@@ -1496,8 +1794,44 @@ export class QuarkPanService {
 
     if (!taskId) return null;
 
-    const newFid = await this.pollTransferTask(commonHeaders, taskId);
-    if (!newFid) return null;
+    let pollResult = await this.pollTransferTask(commonHeaders, taskId);
+
+    // If transfer failed due to insufficient space, aggressively clean up
+    // ALL files in the TVBox folder (not just old ones) and retry once.
+    // The user's drive is full — we need to free up space by deleting
+    // previous transfers that may not have been cleaned up yet.
+    if (!pollResult.fid && pollResult.spaceIssue) {
+      console.log(
+        '[QuarkPanService] getDownloadUrlViaTransfer: space issue detected, aggressively cleaning TVBox folder and retrying',
+      );
+      await this.cleanupAllTransfers(commonHeaders, tvboxFid);
+      const retryTransfer = await this.transferShareFile(
+        commonHeaders,
+        shareId,
+        fid,
+        shareFidToken,
+        stoken,
+        tvboxFid,
+      );
+      if (retryTransfer.taskId) {
+        pollResult = await this.pollTransferTask(
+          commonHeaders,
+          retryTransfer.taskId,
+        );
+      }
+    }
+
+    const newFid = pollResult.fid;
+    if (!newFid) {
+      if (pollResult.spaceIssue) {
+        console.error(
+          '[QuarkPanService] getDownloadUrlViaTransfer: transfer failed due to insufficient Quark drive space',
+        );
+        // Cache the error so subsequent attempts don't retry immediately
+        this.lastSpaceError = Date.now();
+      }
+      return null;
+    }
     console.log(
       '[QuarkPanService] getDownloadUrlViaTransfer: transferred to fid=',
       newFid,
@@ -1516,11 +1850,7 @@ export class QuarkPanService {
     }
 
     const cacheKey = `${shareId}:${fid}`;
-    this.playUrlCache.set(cacheKey, {
-      playUrl: downloadUrl,
-      expiresAt: Date.now() + 5 * 3600 * 1000,
-      transferredFid: newFid,
-    });
+    this.cachePlayUrl(cacheKey, downloadUrl, newFid);
     const transferredFid = newFid;
     setTimeout(
       () => {
@@ -1538,16 +1868,20 @@ export class QuarkPanService {
 
   /**
    * Cache a download URL with a 5-hour TTL (auth_key TTL is ~6h).
+   * Also stores the current __puus value so the cache can be invalidated
+   * when __puus changes (which invalidates the auth_key).
    */
   private static cachePlayUrl(
     cacheKey: string,
     playUrl: string,
     transferredFid: string,
   ): void {
+    const cookie = this.syncedCookie || '';
     this.playUrlCache.set(cacheKey, {
       playUrl,
       expiresAt: Date.now() + 5 * 3600 * 1000,
       transferredFid,
+      puus: this.extractPuus(cookie),
     });
   }
 
@@ -1689,7 +2023,7 @@ export class QuarkPanService {
   private static async pollTransferTask(
     commonHeaders: Record<string, string>,
     taskId: string,
-  ): Promise<string | null> {
+  ): Promise<{ fid: string | null; spaceIssue: boolean }> {
     for (let i = 0; i < 30; i++) {
       try {
         const resp = await axios.get(
@@ -1710,15 +2044,45 @@ export class QuarkPanService {
             'polls, new fid=',
             topFids[0],
           );
-          return topFids[0];
+          return { fid: topFids[0], spaceIssue: false };
         }
-        // status 4 = failed, 3 = cancelled
-        if (status === 4 || status === 3) {
+        // Quark task status codes (from web app share.js):
+        //   0 = waiting, 1 = processing, 2 = success,
+        //   3 = failed (err_reason/failed_fids has details),
+        //   4 = cancelled
+        if (status === 3 || status === 4) {
+          // Detect space issue: save_as.save_as_top_fids is empty but
+          // save_as_sum_num > 0, and remain_capacity < min_save_file_size.
+          // This means the transfer failed because the user's drive is full.
+          const saveAs = data?.save_as || {};
+          const remainCapacity = saveAs.remain_capacity || 0;
+          const minFileSize = saveAs.min_save_file_size || 0;
+          const sumNum = saveAs.save_as_sum_num || 0;
+          const topFidsArr = Array.isArray(topFids) ? topFids : [];
+          const spaceIssue =
+            sumNum > 0 &&
+            topFidsArr.length === 0 &&
+            remainCapacity > 0 &&
+            minFileSize > remainCapacity;
           console.warn(
-            '[QuarkPanService] pollTransferTask: task failed/cancelled, status=',
+            '[QuarkPanService] pollTransferTask: task status=',
             status,
+            'err_reason=',
+            data?.err_reason,
+            'failed_fids=',
+            JSON.stringify(data?.failed_fids),
+            'task_id=',
+            taskId,
+            'spaceIssue=',
+            spaceIssue,
+            'remain_capacity=',
+            remainCapacity,
+            'min_save_file_size=',
+            minFileSize,
+            'full_data=',
+            JSON.stringify(data).substring(0, 600),
           );
-          return null;
+          return { fid: null, spaceIssue };
         }
         await new Promise((r) => setTimeout(r, 500));
       } catch (e: any) {
@@ -1732,7 +2096,7 @@ export class QuarkPanService {
     console.warn(
       '[QuarkPanService] pollTransferTask: timed out after 30 polls',
     );
-    return null;
+    return { fid: null, spaceIssue: false };
   }
 
   /**
@@ -1785,6 +2149,61 @@ export class QuarkPanService {
       }
     } catch (e: any) {
       console.warn('[QuarkPanService] cleanupOldTransfers error:', e.message);
+    }
+  }
+
+  /**
+   * Aggressive cleanup of ALL files in the TVBox folder.
+   *
+   * Lists every file in the TVBox folder (paging through all pages) and
+   * deletes them regardless of age. Called when a transfer fails due to
+   * insufficient drive space — the user's free quota is full of stale
+   * transfers that cleanupOldTransfers didn't catch (e.g., because they
+   * were created within the 6h window but the drive is still full from
+   * accumulated transfers across sessions).
+   *
+   * Skips subdirectories (only deletes files) to avoid nuking any
+   * user-created folders that might happen to live under TVBox.
+   */
+  private static async cleanupAllTransfers(
+    commonHeaders: Record<string, string>,
+    tvboxFid: string,
+  ): Promise<void> {
+    try {
+      let page = 1;
+      const pageSize = 100;
+      let totalDeleted = 0;
+      // Page through all files in the folder. _fetch_total=1 returns the
+      // total count in metadata so we know when to stop.
+      while (true) {
+        const resp = await axios.get(
+          `https://drive-pc.quark.cn/1/clouddrive/file/sort?pr=ucpro&fr=pc&pdir_fid=${encodeURIComponent(tvboxFid)}&_page=${page}&_size=${pageSize}&_fetch_total=1&_fetch_sub_dirs=0&_sort=file_type:asc,updated_at:desc`,
+          {
+            headers: commonHeaders,
+            timeout: 15000,
+            validateStatus: () => true,
+          },
+        );
+        const list = resp.data?.data?.list || [];
+        if (list.length === 0) break;
+        for (const item of list) {
+          if (item.dir) continue;
+          await this.deleteFile(commonHeaders, item.fid);
+          totalDeleted++;
+        }
+        // Stop if we've reached the last page
+        if (list.length < pageSize) break;
+        page++;
+        // Safety cap to avoid infinite loop if API misbehaves
+        if (page > 50) break;
+      }
+      console.log(
+        '[QuarkPanService] cleanupAllTransfers: deleted',
+        totalDeleted,
+        'files from TVBox folder',
+      );
+    } catch (e: any) {
+      console.warn('[QuarkPanService] cleanupAllTransfers error:', e.message);
     }
   }
 
@@ -2057,11 +2476,12 @@ export class QuarkPanService {
     );
     // Cache for ProxyServer to inject into spider params
     this.syncedCookie = cookie || null;
-    // Persist to temp file for diagnostic scripts
+    // Persist to userData so the cookie survives app restarts
+    // (StubSharedPreferences is in-memory only, so JVM-synced cookies are
+    // lost on restart without this disk persistence).
+    this.persistCookieToDisk(cookie || '');
+    // Also persist to temp file for diagnostic scripts (back-compat)
     try {
-      const fs = await import('fs');
-      const path = await import('path');
-      const os = await import('os');
       const cookiePath = path.join(os.tmpdir(), 'quark_cookie_debug.txt');
       fs.writeFileSync(cookiePath, cookie || '', 'utf-8');
       console.log('[QuarkPanService] Cookie persisted to:', cookiePath);
