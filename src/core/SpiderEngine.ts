@@ -80,6 +80,17 @@ const SITE_EXT_OVERRIDES: Array<{
     reason:
       'vv.229d.cn 超时；替换为可用的 bk/9.txt (API http://103.236.72.182:3688 + 匹配 key)',
   },
+  {
+    // 永永: 444421.xyz 站点存活，但 ext 中的 key "#getapp@TMD@2025" 与 API 加密 key 不匹配，
+    // AES 解密失败导致 homeContent 返回 "{}"。替换为可用的 bk/9.txt 组合（与蔬菜源相同）。
+    api: 'csp_AppGet',
+    contains: 'https://444421.xyz|#getapp@TMD@2025|120',
+    replaceFrom: 'https://444421.xyz|#getapp@TMD@2025|120',
+    replaceTo:
+      'https://allinadmin.oss-cn-hangzhou.aliyuncs.com/bk/9.txt|88689667dce61725',
+    reason:
+      '444421.xyz API 加密 key 与 ext 中的 #getapp@TMD@2025 不匹配（解密失败返回空）；替换为可用的 bk/9.txt (API http://103.236.72.182:3688 + 匹配 key)',
+  },
 ];
 
 function applyExtOverride(source: SourceBean): {
