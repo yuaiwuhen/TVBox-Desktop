@@ -13,6 +13,8 @@ console.log(
 const electronIPC = {
   invoke: (channel: string, ...args: any[]) =>
     ipcRenderer.invoke(channel, ...args),
+  sendSync: (channel: string, ...args: any[]) =>
+    ipcRenderer.sendSync(channel, ...args),
   on: (channel: string, listener: (...args: any[]) => void) => {
     const wrappedListener = (_event: any, ...args: any[]) => listener(...args);
     ipcRenderer.on(channel, wrappedListener);

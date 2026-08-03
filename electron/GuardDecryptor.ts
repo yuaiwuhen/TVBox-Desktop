@@ -59,7 +59,17 @@ export class GuardDecryptor {
     onProgress?: (progress: DecryptProgress) => void,
   ): Promise<string> {
     const workDir = path.join(cacheDir, 'wexguard');
-    const outputPath = path.join(workDir, 'wexguard-decrypted.jar');
+
+    // Use a versioned output path (includes NetEase JAR MD5) so that
+    // re-decryption writes to a NEW file instead of overwriting the JAR
+    // that an existing URLClassLoader may still have open. On Windows,
+    // overwriting an in-use JAR causes `jar uf` to fail with
+    // FileSystemException "另一个程序正在使用此文件" and leaves a corrupt
+    // (truncated) JAR that throws ZipException "invalid LOC header" on
+    // class load.
+    const neteaseMd5 = await this.getFileMd5(neteaseJarPath);
+    const versionedName = `wexguard-decrypted-${neteaseMd5}.jar`;
+    const outputPath = path.join(workDir, versionedName);
 
     // Check if already decrypted and up-to-date
     if (await this.isCacheValid(neteaseJarPath, outputPath)) {
@@ -70,7 +80,6 @@ export class GuardDecryptor {
       return outputPath;
     }
 
-    // Ensure work directory exists
     if (!fs.existsSync(workDir)) {
       fs.mkdirSync(workDir, { recursive: true });
     }
@@ -624,7 +633,9 @@ export class GuardDecryptor {
   }
 
   /**
-   * Check if cached JAR is valid and up-to-date
+   * Check if cached JAR is valid and up-to-date.
+   * Checks the versioned version-<md5>.json first, then falls back to
+   * legacy version.json.
    */
   private async isCacheValid(
     neteaseJarPath: string,
@@ -634,14 +645,23 @@ export class GuardDecryptor {
       return false;
     }
 
-    const versionFile = path.join(path.dirname(outputPath), 'version.json');
+    const dir = path.dirname(outputPath);
+    const currentMd5 = await this.getFileMd5(neteaseJarPath);
+
+    // Prefer versioned version-<md5>.json
+    const versionedVersionFile = path.join(dir, `version-${currentMd5}.json`);
+    if (fs.existsSync(versionedVersionFile)) {
+      return true;
+    }
+
+    // Fall back to legacy version.json with MD5 comparison
+    const versionFile = path.join(dir, 'version.json');
     if (!fs.existsSync(versionFile)) {
       return false;
     }
 
     try {
       const versionInfo = JSON.parse(fs.readFileSync(versionFile, 'utf8'));
-      const currentMd5 = await this.getFileMd5(neteaseJarPath);
       return versionInfo.neteaseJarMd5 === currentMd5;
     } catch {
       return false;
@@ -649,13 +669,16 @@ export class GuardDecryptor {
   }
 
   /**
-   * Save version info for cache validation
+   * Save version info for cache validation.
+   * Writes BOTH a legacy version.json (for back-compat) and a versioned
+   * version-<md5>.json (so shouldRedecryptGuardJar can match the versioned
+   * JAR without parsing the legacy file).
    */
   private async saveVersionInfo(
     neteaseJarPath: string,
     outputPath: string,
   ): Promise<void> {
-    const versionFile = path.join(path.dirname(outputPath), 'version.json');
+    const dir = path.dirname(outputPath);
     const md5 = await this.getFileMd5(neteaseJarPath);
 
     const versionInfo = {
@@ -664,8 +687,18 @@ export class GuardDecryptor {
       outputPath: path.basename(outputPath),
     };
 
+    // Legacy version.json (back-compat)
+    const versionFile = path.join(dir, 'version.json');
     fs.writeFileSync(versionFile, JSON.stringify(versionInfo, null, 2));
     console.log('[GuardDecryptor] Version info saved:', versionFile);
+
+    // Versioned version-<md5>.json (matches the versioned JAR name)
+    const versionedVersionFile = path.join(dir, `version-${md5}.json`);
+    fs.writeFileSync(
+      versionedVersionFile,
+      JSON.stringify(versionInfo, null, 2),
+    );
+    console.log('[GuardDecryptor] Versioned version info saved:', versionedVersionFile);
   }
 
   /**

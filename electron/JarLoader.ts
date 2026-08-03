@@ -10,14 +10,18 @@
  *       Updated in both tools/ and tools/runtime/ stub JARs.
  */
 
-import { ipcMain, BrowserWindow, app } from 'electron';
+import { ipcMain, app } from 'electron';
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
-import { exec as execCb, execFile as execFileCb } from 'child_process';
+import {
+  exec as execCb,
+  execFile as execFileCb,
+  spawnSync,
+} from 'child_process';
 import { promisify } from 'util';
 import { DexConverter, dexConverter } from './DexConverter';
 import { GuardDecryptor, type DecryptProgress } from './GuardDecryptor';
@@ -76,6 +80,9 @@ interface SpiderInstance {
   ext: string;
   isGuard: boolean;
   initPromise: Promise<void> | null;
+  // The spider key from the config (e.g. "NewHuBan"). Used to locate
+  // per-spider files like the siteconfig cache.
+  key?: string;
   // Per-spider isolated URLClassLoader (undefined for Guard spiders, which
   // use the shared wexguard-spider-enjarify.jar via appendClasspath).
   // callSpiderMethod switches java.classLoader to this before invoking
@@ -242,6 +249,7 @@ export class JarLoader {
     const specialSources = new Set([
       'WexGuaZiGuard', // 瓜子源(Guard)：需要 unidbg 加载 libLoadNiMa.so
       'GuaziAmns', // 瓜子源(Amns)：同上，wexguard加密壳
+      'WexWenCaiGuard', // 文采源(Guard)：同上，wexguard加密壳，需 LoadNiMa.decode()
       // Add other sources here as needed - each source is isolated
     ]);
     return specialSources.has(clsKey);
@@ -456,6 +464,14 @@ export class JarLoader {
       // Also ensure libdecjni.so is downloaded (needed by MyCrypto for WexV6
       // spiders' ext decryption). Safe to call per-spider — skips if present.
       await this.verifyAndDownloadLibDecJni();
+
+      // Set up LoadNiMa system properties globally for ALL spiders (not just
+      // WexGuaZiGuard) and decrypt api.txt to provide the API base URL.
+      // Without these, WexV6/WexWenCai/WexV6DaShiXiong/WexV6TeGou spiders
+      // get empty homeContent because LoadNiMa.decode() returns input unchanged.
+      this.setupLoadNiMaGlobally();
+      await this.fetchAndDecryptApiTxt();
+
       this.nativeLibsInitialized = true;
     } catch (e: any) {
       console.warn('[JarLoader] ensureNativeLibs: overall failure:', e.message);
@@ -470,6 +486,52 @@ export class JarLoader {
    * Check if Guard JAR needs re-decryption (NetEase JAR updated or cache missing)
    */
   private async shouldRedecryptGuardJar(): Promise<boolean> {
+    const wexguardDir = path.join(this.jarCacheDir, 'wexguard');
+
+    // Find NetEase JAR first (needed for versioned path & MD5 check)
+    const neteaseJarPath = await this.findNetEaseJar();
+
+    // If we have the NetEase JAR, check for a matching versioned JAR
+    // (wexguard-decrypted-<md5>.jar). This is the primary path and avoids
+    // the Windows file-lock corruption issue.
+    if (neteaseJarPath) {
+      try {
+        const neteaseBuffer = fs.readFileSync(neteaseJarPath);
+        const currentMd5 = crypto
+          .createHash('md5')
+          .update(neteaseBuffer)
+          .digest('hex');
+        const versionedJar = path.join(
+          wexguardDir,
+          `wexguard-decrypted-${currentMd5}.jar`,
+        );
+        const versionedVersionFile = path.join(
+          wexguardDir,
+          `version-${currentMd5}.json`,
+        );
+
+        if (
+          fs.existsSync(versionedJar) &&
+          fs.existsSync(versionedVersionFile)
+        ) {
+          // Versioned JAR + version file exist for current NetEase MD5 — no re-decrypt needed
+          return false;
+        }
+        // No matching versioned JAR — need to decrypt
+        console.log(
+          '[JarLoader] No versioned Guard JAR for current NetEase MD5, need to decrypt',
+        );
+        return true;
+      } catch (e: any) {
+        console.warn(
+          '[JarLoader] Failed to check versioned Guard JAR:',
+          e.message,
+        );
+        // Fall through to legacy check
+      }
+    }
+
+    // Legacy: check unversioned JAR + version.json (back-compat)
     const decryptedJarPath = path.join(
       this.jarCacheDir,
       'wexguard',
@@ -490,8 +552,6 @@ export class JarLoader {
     }
 
     try {
-      // Find NetEase JAR
-      const neteaseJarPath = await this.findNetEaseJar();
       if (!neteaseJarPath) {
         console.warn(
           '[JarLoader] NetEase JAR not found, skipping re-decryption',
@@ -733,6 +793,245 @@ export class JarLoader {
   }
 
   /**
+   * Set Java system properties so the LoadNiMa stub (in
+   * tvbox-spider-stubs-complete.jar) can locate libLoadNiMa.so, the unidbg
+   * loader JAR, and the Java executable for ANY spider that calls
+   * LoadNiMa.decode() — not just WexGuaZiGuard.
+   *
+   * Why this matters: WexWenCai, SoTySo, SoBaiDuSo and other wexfnw spiders
+   * call LoadNiMa.decode(Context, String) from homeContent/categoryContent/
+   * detailContent/searchContent/playerContent to decrypt API responses. The
+   * LoadNiMa stub reads `tvbox.nativelib.WexGuaZiGuard`, `tvbox.unidbg.jar`,
+   * and `tvbox.java.exe` system properties. Without these, the stub returns
+   * the encrypted input unchanged → spider fails to parse JSON → empty list.
+   *
+   * Previously these properties were set ONLY inside setupSourceSpecificHandling()
+   * for WexGuaZiGuard/GuaziAmns. Setting them globally here makes every
+   * wexfnw spider work.
+   */
+  private setupLoadNiMaGlobally(): void {
+    if (!this.java) return;
+    try {
+      const SystemClass = this.java.importClass('java.lang.System');
+
+      // 1. Locate libLoadNiMa.so — prefer shared native_libs dir, then
+      //    WexGuaZiGuard source-isolated dir (legacy extraction path).
+      const nativeLibCandidates = [
+        path.join(this.jarCacheDir, 'native_libs', 'libLoadNiMa.so'),
+        path.join(this.jarCacheDir, 'WexGuaZiGuard', 'libLoadNiMa.so'),
+      ];
+      let libPath = '';
+      for (const candidate of nativeLibCandidates) {
+        if (fs.existsSync(candidate)) {
+          libPath = candidate;
+          break;
+        }
+      }
+      if (libPath) {
+        try {
+          SystemClass.setPropertySync('tvbox.nativelib.WexGuaZiGuard', libPath);
+          console.log(
+            '[JarLoader] Set tvbox.nativelib.WexGuaZiGuard globally:',
+            libPath,
+          );
+        } catch (e: any) {
+          console.warn(
+            '[JarLoader] Failed to set tvbox.nativelib.WexGuaZiGuard:',
+            e.message,
+          );
+        }
+      } else {
+        console.warn(
+          '[JarLoader] libLoadNiMa.so not found — LoadNiMa.decode() will return input unchanged for non-WexGuaZi spiders',
+        );
+      }
+
+      // 2. Locate unidbg-loader JAR
+      const unidbgCandidates = [
+        path.join(
+          process.resourcesPath || '',
+          'tools',
+          'unidbg-loader-1.0.0-shaded.jar',
+        ),
+        path.join(
+          process.resourcesPath || '',
+          'tools',
+          'unidbg-loader-1.0.0.jar',
+        ),
+        path.join(
+          process.cwd(),
+          'tools',
+          'unidbg-loader',
+          'target',
+          'unidbg-loader-1.0.0.jar',
+        ),
+        path.join(__dirname, '..', 'tools', 'unidbg-loader-1.0.0-shaded.jar'),
+        path.join(__dirname, '..', 'tools', 'unidbg-loader-1.0.0.jar'),
+      ];
+      for (const candidate of unidbgCandidates) {
+        if (fs.existsSync(candidate)) {
+          try {
+            SystemClass.setPropertySync('tvbox.unidbg.jar', candidate);
+            console.log(
+              '[JarLoader] Set tvbox.unidbg.jar globally:',
+              candidate,
+            );
+          } catch (e: any) {
+            console.warn(
+              '[JarLoader] Failed to set tvbox.unidbg.jar:',
+              e.message,
+            );
+          }
+          break;
+        }
+      }
+
+      // 3. Locate bundled Java executable (packaged builds only)
+      const jreDir = path.join(process.resourcesPath || '', 'jre');
+      const javaExeCandidates = [
+        path.join(jreDir, 'bin', 'java.exe'),
+        path.join(jreDir, 'bin', 'java'),
+      ];
+      for (const candidate of javaExeCandidates) {
+        if (fs.existsSync(candidate)) {
+          try {
+            SystemClass.setPropertySync('tvbox.java.exe', candidate);
+            console.log('[JarLoader] Set tvbox.java.exe globally:', candidate);
+          } catch (e: any) {
+            console.warn(
+              '[JarLoader] Failed to set tvbox.java.exe:',
+              e.message,
+            );
+          }
+          break;
+        }
+      }
+    } catch (e: any) {
+      console.warn('[JarLoader] setupLoadNiMaGlobally failed:', e.message);
+    }
+  }
+
+  /**
+   * Fetch api.txt from the wexfnw config server, decrypt it, and set the
+   * result as the `tvbox.api_url.WexGuaZiGuard` Java system property.
+   *
+   * api.txt is AES/CBC/PKCS5Padding-encrypted base64. The decrypted value
+   * is the API base URL that LoadNiMa.decode() uses to fetch decryption
+   * keys from `<api_url>/wexfnwshinidie/kuihua/caonidie.php`.
+   *
+   * Without this property, the LoadNiMa stub passes an empty api_url to
+   * the unidbg subprocess, which falls back to a hardcoded default that
+   * may be outdated — causing decode() to fail and homeContent to return
+   * an empty list.
+   */
+  private async fetchAndDecryptApiTxt(): Promise<void> {
+    if (!this.java) return;
+    try {
+      let apiUrl = await this.decryptApiTxt();
+      if (!apiUrl) {
+        console.warn(
+          '[JarLoader] fetchAndDecryptApiTxt: decrypted api_url is empty',
+        );
+        return;
+      }
+      console.log('[JarLoader] Decrypted api_url from api.txt:', apiUrl);
+
+      // Validate the decrypted api_url — if it returns 403/5xx, fall back to
+      // the known-good mirror https://api.ww4f4jrg.com. The api.txt endpoint
+      // occasionally distributes dead/blocked IPs (e.g. 103.36.222.35:9595
+      // returns 403 for all UAs), which causes LoadNiMa.decode() to fail
+      // because init() can't fetch decryption keys.
+      const isValid = await this.isApiUrlAccessible(apiUrl);
+      if (!isValid) {
+        const fallback = 'https://api.ww4f4jrg.com';
+        console.warn(
+          `[JarLoader] api_url ${apiUrl} is not accessible (403/5xx), falling back to ${fallback}`,
+        );
+        apiUrl = fallback;
+      }
+
+      try {
+        const SystemClass = this.java.importClass('java.lang.System');
+        SystemClass.setPropertySync('tvbox.api_url.WexGuaZiGuard', apiUrl);
+        console.log(
+          '[JarLoader] Set tvbox.api_url.WexGuaZiGuard globally:',
+          apiUrl,
+        );
+      } catch (e: any) {
+        console.warn(
+          '[JarLoader] Failed to set tvbox.api_url.WexGuaZiGuard:',
+          e.message,
+        );
+      }
+    } catch (e: any) {
+      console.warn('[JarLoader] fetchAndDecryptApiTxt failed:', e.message);
+    }
+  }
+
+  /**
+   * Check if an api_url is accessible (returns 2xx). Used to validate the
+   * decrypted api_url before setting it as a system property, so we can
+   * fall back to a known-good mirror when the distributed IP is blocked.
+   */
+  private async isApiUrlAccessible(url: string): Promise<boolean> {
+    try {
+      const response = await axios.get(url, {
+        timeout: 8000,
+        validateStatus: () => true, // don't throw on any status
+        headers: { 'User-Agent': 'okhttp/4.9.3' },
+      });
+      const code = response.status;
+      console.log(`[JarLoader] api_url ${url} returned status ${code}`);
+      return code >= 200 && code < 400;
+    } catch (e: any) {
+      console.log(`[JarLoader] api_url ${url} check failed: ${e.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Decrypt api.txt content and return the API base URL.
+   * api.txt is base64-encoded AES/CBC/PKCS5Padding ciphertext with
+   * key="nifanbianyikeyia" (16 bytes) and IV="keyijiangjiudian" (16 bytes).
+   * The decrypted plaintext is the API base URL (e.g.
+   * "http://111.170.175.147:9595/").
+   *
+   * Exposed publicly so diagnostic scripts can verify the URL.
+   */
+  public async decryptApiTxt(): Promise<string> {
+    const apiTxtUrl = 'http://upload.baicanuc.cn/ossfiles/1768320816/api.txt';
+    try {
+      console.log('[JarLoader] Fetching api.txt from:', apiTxtUrl);
+      const response = await axios.get(apiTxtUrl, {
+        timeout: 10000,
+        responseType: 'text',
+      });
+      const raw = typeof response.data === 'string' ? response.data.trim() : '';
+      if (!raw) {
+        console.warn('[JarLoader] api.txt is empty');
+        return '';
+      }
+      // Step 1: Base64 decode
+      const encrypted = Buffer.from(raw, 'base64');
+      if (encrypted.length === 0) {
+        console.warn('[JarLoader] api.txt base64 decode yielded empty buffer');
+        return '';
+      }
+      // Step 2: AES/CBC/PKCS5Padding decrypt
+      const key = Buffer.from('nifanbianyikeyia', 'utf8'); // 16 bytes
+      const iv = Buffer.from('keyijiangjiudian', 'utf8'); // 16 bytes
+      const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
+      let decrypted = decipher.update(encrypted);
+      decrypted = Buffer.concat([decrypted, decipher.final()]);
+      const result = decrypted.toString('utf8').trim();
+      return result;
+    } catch (e: any) {
+      console.warn('[JarLoader] decryptApiTxt failed:', e.message);
+      return '';
+    }
+  }
+
+  /**
    * Verify if libdecjni.so was downloaded, and if not, manually download it.
    *
    * Why this matters: MyCrypto.extDe() is a JNI native method that requires
@@ -804,20 +1103,35 @@ export class JarLoader {
         'native_libs',
         'libdecjni.so',
       );
+      const diagLog = (msg: string) => {
+        try {
+          const logPath = path.join(
+            process.env.TEMP || process.env.TMP || '/tmp',
+            'jarloader_libdecjni_diag.log',
+          );
+          fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${msg}\n`);
+        } catch {}
+      };
+      diagLog(
+        `copyLibDecJniToSpiderDir called: filesDir=${filesDir}, sharedLibPath=${sharedLibPath}, jarCacheDir=${this.jarCacheDir}`,
+      );
       if (!fs.existsSync(sharedLibPath)) {
+        diagLog(`  sharedLibPath NOT FOUND, returning early`);
         return;
       }
       const newWexDir = path.join(filesDir, 'NewWex');
       if (!fs.existsSync(newWexDir)) {
         fs.mkdirSync(newWexDir, { recursive: true });
+        diagLog(`  Created NewWex dir: ${newWexDir}`);
       }
       const perSpiderLibPath = path.join(newWexDir, 'libdecjni.so');
       if (!fs.existsSync(perSpiderLibPath)) {
         fs.copyFileSync(sharedLibPath, perSpiderLibPath);
-        console.log(
-          '[JarLoader] Copied libdecjni.so to per-spider NewWex dir:',
-          perSpiderLibPath,
+        diagLog(
+          `  Copied libdecjni.so to per-spider NewWex dir: ${perSpiderLibPath}`,
         );
+      } else {
+        diagLog(`  libdecjni.so already exists at: ${perSpiderLibPath}`);
       }
     } catch (e: any) {
       console.warn('[JarLoader] copyLibDecJniToSpiderDir failed:', e.message);
@@ -2006,10 +2320,433 @@ export class JarLoader {
    * "no filtered JAR produced, use original".
    */
   private async removeNativeDependentClasses(
-    _jarPath: string,
-    _jarKey: string,
+    jarPath: string,
+    jarKey: string,
   ): Promise<string | null> {
+    try {
+      // Check if JAR contains DexNative.class — only itv666 aowu-style JARs do.
+      // Reading the JAR as a ZIP is much faster than running `jar tf`.
+      const data = fs.readFileSync(jarPath);
+      // Find End of Central Directory record (PK\x05\x06).
+      let eocd = -1;
+      for (
+        let i = data.length - 22;
+        i >= 0 && i > data.length - 22 - 65536;
+        i--
+      ) {
+        if (
+          data[i] === 0x50 &&
+          data[i + 1] === 0x4b &&
+          data[i + 2] === 0x05 &&
+          data[i + 3] === 0x06
+        ) {
+          eocd = i;
+          break;
+        }
+      }
+      if (eocd < 0) {
+        return null; // Not a ZIP — skip.
+      }
+      const cdSize = data.readUInt32LE(eocd + 12);
+      const cdOffset = data.readUInt32LE(eocd + 16);
+      const cdEnd = cdOffset + cdSize;
+
+      // Walk central directory entries to find DexNative.class.
+      let hasDexNative = false;
+      let p = cdOffset;
+      while (p + 46 <= cdEnd) {
+        if (data.readUInt32LE(p) !== 0x504b0102) break; // PK\x01\x02
+        const nameLen = data.readUInt16LE(p + 28);
+        const extraLen = data.readUInt16LE(p + 30);
+        const commentLen = data.readUInt16LE(p + 32);
+        const name = data.slice(p + 46, p + 46 + nameLen).toString('utf8');
+        if (name === 'com/github/catvod/spider/DexNative.class') {
+          hasDexNative = true;
+          break;
+        }
+        p += 46 + nameLen + extraLen + commentLen;
+      }
+
+      if (!hasDexNative) {
+        return null; // No DexNative.class — leave JAR untouched.
+      }
+
+      console.log(
+        '[JarLoader] JAR contains DexNative.class (itv666 aowu); stripping to use stub:',
+        path.basename(jarPath),
+      );
+
+      // Rebuild the JAR without DexNative.class using Node's built-in zip.
+      // We use `jar` command (bundled with JRE) to update the JAR in-place
+      // after deleting the entry. Alternative: use adm-zip. To avoid adding
+      // a dependency, we re-zip manually with a tiny zip writer.
+      //
+      // Simpler: use `jar uf` cannot DELETE entries. We must rebuild.
+      // Use a separate output JAR and copy all entries except DexNative.class.
+      const outJarPath = path.join(this.jarCacheDir, `${jarKey}_stripped.jar`);
+      if (fs.existsSync(outJarPath)) {
+        // Already stripped — avoid re-doing work.
+        return outJarPath;
+      }
+
+      // Use java's jar tool to create a new JAR without DexNative.class.
+      // Extract everything to a temp dir, delete DexNative.class, re-zip.
+      const tmpDir = path.join(this.jarCacheDir, `_strip_tmp_${jarKey}`);
+      if (fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+      fs.mkdirSync(tmpDir, { recursive: true });
+      await execAsync(`jar xf "${jarPath}"`, { cwd: tmpDir });
+
+      const dexNativeFile = path.join(
+        tmpDir,
+        'com',
+        'github',
+        'catvod',
+        'spider',
+        'DexNative.class',
+      );
+      if (fs.existsSync(dexNativeFile)) {
+        fs.unlinkSync(dexNativeFile);
+        console.log('[JarLoader] Removed DexNative.class from', jarPath);
+      }
+
+      // Re-create JAR from extracted contents (preserves manifest).
+      await execAsync(`jar cf "${outJarPath}" -C "${tmpDir}" .`, {
+        cwd: tmpDir,
+      });
+
+      // Cleanup temp dir.
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup failure
+      }
+
+      if (!fs.existsSync(outJarPath)) {
+        console.warn(
+          '[JarLoader] Failed to create stripped JAR — using original.',
+        );
+        return null;
+      }
+      console.log('[JarLoader] Created stripped JAR:', outJarPath);
+      return outJarPath;
+    } catch (e: any) {
+      console.warn(
+        '[JarLoader] removeNativeDependentClasses failed:',
+        e?.message || e,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Detect whether an ext URL points to an itv666-style .aowu config file.
+   *
+   * itv666 sources use `.aowu` as the ext URL suffix, but the .aowu file is
+   * just a gzip-compressed JSON containing category/filter config — NOT the
+   * encrypted DEX. The encrypted DEX (`aowunnn.amns`) lives inside a separate
+   * `woshinidie.jar` ZIP that the spider fetches from kstore.vip at runtime.
+   *
+   * We use this check to trigger pre-decryption of woshinidie.jar so the
+   * spider's DexNative stub (in tvbox-spider-stubs-complete.jar) can return
+   * a working DexClassLoader without loading the ARM awdm-v8.so.
+   */
+  private isAowuExt(ext: string): boolean {
+    if (!ext) return false;
+    // itv666 configs wrap the .aowu URL in a JSON object under "filters":
+    //   {"sites":"","filters":"https://file.icve.com.cn/.../config.aowu"}
+    // Check both the raw string and any .aowu URL inside the JSON.
+    if (/\.aowu(\?|$)/i.test(ext)) return true;
+    if (ext.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(ext);
+        if (typeof parsed === 'object' && parsed) {
+          for (const v of Object.values(parsed)) {
+            if (typeof v === 'string' && /\.aowu(\?|$)/i.test(v)) {
+              return true;
+            }
+          }
+        }
+      } catch {
+        // not JSON — fall through
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Prepare a pre-decrypted DEX JAR for an itv666 .aowu source.
+   *
+   * The .aowu ext URL is just a gzip-compressed JSON config — the actual
+   * encrypted DEX lives in `woshinidie.jar` (a ZIP fetched from kstore.vip).
+   * All itv666 sources share the same woshinidie.jar, so we only need to
+   * decrypt it ONCE (cached by the md5 returned by kstore.vip).
+   *
+   * Steps:
+   *   1. Fetch `{md5, url}` JSON from `https://9763.kstore.vip/woshinidie`.
+   *   2. Download `woshinidie.jar` from `url` (cached by md5).
+   *   3. Extract `aowunnn.amns` and `awdm-v8.so` from the ZIP.
+   *   4. Run `AowuShinidieDecryptor` (unidbg) to decrypt amns → DEX.
+   *   5. Convert DEX → JAR via enjarify/dex2jar.
+   *   6. Set `aowu.decrypted.jar.path` system property.
+   *   7. Clear the DexNative stub's cached classloader.
+   *
+   * Returns the JAR path on success, or null on failure (caller falls back
+   * to the original spider init flow which will fail with UnsatisfiedLinkError).
+   */
+  private async prepareAowuDecryptedJar(ext: string): Promise<string | null> {
+    if (!this.java) return null;
+    try {
+      // Step 1: Fetch {md5, url} from kstore.vip. This is the same JSON the
+      // spider's merge class fetches at runtime; we read it here so we use
+      // the exact same woshinidie.jar the spider expects.
+      const kstoreUrl = 'https://9763.kstore.vip/woshinidie';
+      console.log(
+        '[JarLoader] Fetching woshinidie.jar metadata from kstore.vip',
+      );
+      const metaResp = await axios.get(kstoreUrl, {
+        timeout: 30000,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0',
+        },
+      });
+      const md5 = String(metaResp.data?.md5 || '')
+        .trim()
+        .toLowerCase();
+      const woshinidieUrl = String(metaResp.data?.url || '').trim();
+      if (!md5 || !woshinidieUrl) {
+        console.error(
+          '[JarLoader] kstore.vip response missing md5/url:',
+          JSON.stringify(metaResp.data),
+        );
+        return null;
+      }
+      console.log(
+        '[JarLoader] woshinidie.jar md5:',
+        md5,
+        'url:',
+        woshinidieUrl,
+      );
+
+      // Cache dir keyed by md5 — different versions get separate cache dirs.
+      const cacheDir = path.join(this.jarCacheDir, 'aowu_decrypt', md5);
+      if (!fs.existsSync(cacheDir)) {
+        fs.mkdirSync(cacheDir, { recursive: true });
+      }
+      const woshinidiePath = path.join(cacheDir, 'woshinidie.jar');
+      const amnsPath = path.join(cacheDir, 'aowunnn.amns');
+      const soPath = path.join(cacheDir, 'awdm-v8.so');
+      const dexPath = path.join(cacheDir, 'aowunnn.dex');
+      const jarPath = path.join(cacheDir, 'aowunnn.jar');
+
+      // Step 2: Download woshinidie.jar if not cached.
+      if (!fs.existsSync(woshinidiePath)) {
+        console.log(
+          '[JarLoader] Downloading woshinidie.jar from:',
+          woshinidieUrl,
+        );
+        const response = await axios.get(woshinidieUrl, {
+          responseType: 'arraybuffer',
+          timeout: 60000,
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0',
+          },
+        });
+        fs.writeFileSync(woshinidiePath, response.data);
+        console.log(
+          '[JarLoader] woshinidie.jar downloaded, size:',
+          response.data.length,
+        );
+      } else {
+        console.log('[JarLoader] woshinidie.jar cached:', woshinidiePath);
+      }
+
+      // Step 3: Extract aowunnn.amns and awdm-v8.so from woshinidie.jar ZIP.
+      if (!fs.existsSync(amnsPath) || !fs.existsSync(soPath)) {
+        console.log(
+          '[JarLoader] Extracting aowunnn.amns and awdm-v8.so from woshinidie.jar',
+        );
+        await execAsync(`jar xf "${woshinidiePath}"`, { cwd: cacheDir });
+        if (!fs.existsSync(amnsPath)) {
+          console.error('[JarLoader] aowunnn.amns not found in woshinidie.jar');
+          return null;
+        }
+        if (!fs.existsSync(soPath)) {
+          console.error('[JarLoader] awdm-v8.so not found in woshinidie.jar');
+          return null;
+        }
+      }
+
+      // Step 4: Run AowuShinidieDecryptor (unidbg) to decrypt amns → DEX.
+      if (!fs.existsSync(dexPath)) {
+        console.log('[JarLoader] Decrypting aowunnn.amns via unidbg...');
+        const unidbgJar = this.findUnidbgLoaderJar();
+        if (!unidbgJar) {
+          console.error(
+            '[JarLoader] unidbg-loader JAR not found; cannot decrypt .aowu',
+          );
+          return null;
+        }
+        const javaExe = this.findJavaExecutable();
+        if (!javaExe) {
+          console.error(
+            '[JarLoader] Java executable not found; cannot run unidbg',
+          );
+          return null;
+        }
+        const cmd = `"${javaExe}" -cp "${unidbgJar}" com.tvbox.AowuShinidieDecryptor "${soPath}" "${amnsPath}" "${dexPath}"`;
+        console.log('[JarLoader] Running unidbg:', cmd);
+        // unidbg can take ~30s to spin up; allow up to 5 min.
+        const { stdout, stderr } = await execAsync(cmd, {
+          timeout: 5 * 60 * 1000,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        if (stdout) console.log('[unidbg stdout]', stdout);
+        if (stderr) console.log('[unidbg stderr]', stderr);
+        if (!fs.existsSync(dexPath)) {
+          console.error(
+            '[JarLoader] AowuShinidieDecryptor did not produce DEX file:',
+            dexPath,
+          );
+          return null;
+        }
+        console.log(
+          '[JarLoader] aowunnn.amns decrypted to DEX, size:',
+          fs.statSync(dexPath).size,
+        );
+      } else {
+        console.log('[JarLoader] Decrypted DEX cached:', dexPath);
+      }
+
+      // Step 5: Convert DEX → JAR via enjarify/dex2jar.
+      if (!fs.existsSync(jarPath)) {
+        console.log('[JarLoader] Converting DEX to JAR via enjarify...');
+        if (!dexConverter.isInitialized()) {
+          const ok = await dexConverter.initialize();
+          if (!ok) {
+            console.error('[JarLoader] DEX→JAR converter not available');
+            return null;
+          }
+        }
+        await dexConverter.convertDexToJar(dexPath, jarPath);
+        if (!fs.existsSync(jarPath)) {
+          console.error('[JarLoader] DEX→JAR conversion did not produce JAR');
+          return null;
+        }
+        console.log(
+          '[JarLoader] DEX→JAR conversion complete, size:',
+          fs.statSync(jarPath).size,
+        );
+      } else {
+        console.log('[JarLoader] Decrypted JAR cached:', jarPath);
+      }
+
+      // Step 6: Set system property so DexNative stub finds the JAR.
+      try {
+        const SystemClass = this.java.importClass('java.lang.System');
+        SystemClass.setPropertySync('aowu.decrypted.jar.path', jarPath);
+        console.log(
+          '[JarLoader] Set System property aowu.decrypted.jar.path =',
+          jarPath,
+        );
+      } catch (e: any) {
+        console.warn(
+          '[JarLoader] Failed to set aowu.decrypted.jar.path:',
+          e?.message || e,
+        );
+      }
+
+      // Step 7: Clear DexNative stub's cached classloader so the new
+      // system property takes effect (in case a previous itv666 source
+      // already cached a different JAR).
+      try {
+        const DexNativeClass = this.java.importClass(
+          'com.github.catvod.spider.DexNative',
+        );
+        if (typeof DexNativeClass.clearCacheSync === 'function') {
+          DexNativeClass.clearCacheSync();
+          console.log('[JarLoader] Cleared DexNative stub cache');
+        }
+      } catch (e: any) {
+        // The stub's clearCache may not be visible if spider JAR's own
+        // DexNative is loaded instead (when stripping failed). This is
+        // non-fatal — the spider will fail with UnsatisfiedLinkError.
+        console.warn(
+          '[JarLoader] Failed to clear DexNative cache:',
+          e?.message || e,
+        );
+      }
+
+      return jarPath;
+    } catch (e: any) {
+      console.error(
+        '[JarLoader] prepareAowuDecryptedJar failed:',
+        e?.message || e,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Locate the unidbg-loader shaded JAR. Checks both dev and packaged paths.
+   */
+  private findUnidbgLoaderJar(): string | null {
+    const candidates = [
+      path.join(
+        process.resourcesPath || '',
+        'tools',
+        'unidbg-loader-1.0.0-shaded.jar',
+      ),
+      path.join(
+        process.resourcesPath || '',
+        'tools',
+        'unidbg-loader-1.0.0.jar',
+      ),
+      path.join(
+        process.cwd(),
+        'tools',
+        'unidbg-loader',
+        'target',
+        'unidbg-loader-1.0.0-shaded.jar',
+      ),
+      path.join(
+        process.cwd(),
+        'tools',
+        'unidbg-loader',
+        'target',
+        'unidbg-loader-1.0.0.jar',
+      ),
+      path.join(__dirname, '..', 'tools', 'unidbg-loader-1.0.0-shaded.jar'),
+      path.join(__dirname, '..', 'tools', 'unidbg-loader-1.0.0.jar'),
+    ];
+    for (const c of candidates) {
+      if (fs.existsSync(c)) {
+        return c;
+      }
+    }
     return null;
+  }
+
+  /**
+   * Locate the Java executable. Prefers bundled JRE (packaged mode),
+   * falls back to system java on PATH.
+   */
+  private findJavaExecutable(): string | null {
+    const jreDir = path.join(process.resourcesPath || '', 'jre');
+    const candidates = [
+      path.join(jreDir, 'bin', 'java.exe'),
+      path.join(jreDir, 'bin', 'java'),
+    ];
+    for (const c of candidates) {
+      if (fs.existsSync(c)) {
+        return c;
+      }
+    }
+    // Fallback: assume `java` is on PATH.
+    return 'java';
   }
 
   /**
@@ -3215,14 +3952,39 @@ export class JarLoader {
     }
 
     // Candidate paths in order of preference:
-    // 1. Runtime decrypted JAR (most up-to-date)
-    // 2. Signature-patched pre-decrypted JAR (TypeToken fix)
-    // 3. Pre-decrypted JAR without native-dependent classes (MyCrypto removed)
-    // 4. Pre-decrypted JAR in tools/wexguard_work/
-    // 5. Packaged runtime JAR
-    const candidatePaths = [
-      // Runtime decrypted JAR (from jar_cache/wexguard/)
+    // 1. Versioned runtime decrypted JAR (wexguard-decrypted-<md5>.jar)
+    //    — avoids overwriting in-use JAR on Windows (file lock issue)
+    // 2. Legacy unversioned runtime decrypted JAR (back-compat)
+    // 3. Signature-patched pre-decrypted JAR (TypeToken fix)
+    // 4. Pre-decrypted JAR without native-dependent classes (MyCrypto removed)
+    // 5. Pre-decrypted JAR in tools/wexguard_work/
+    // 6. Packaged runtime JAR
+    const wexguardDir = path.join(this.jarCacheDir, 'wexguard');
+    const candidatePaths: string[] = [];
+
+    // Scan for versioned JARs (wexguard-decrypted-<md5>.jar), newest first
+    if (fs.existsSync(wexguardDir)) {
+      const versionedJars = fs
+        .readdirSync(wexguardDir)
+        .filter(
+          (f) => f.startsWith('wexguard-decrypted-') && f.endsWith('.jar'),
+        )
+        .map((f) => ({
+          path: path.join(wexguardDir, f),
+          mtime: fs.statSync(path.join(wexguardDir, f)).mtimeMs,
+        }))
+        .sort((a, b) => b.mtime - a.mtime);
+      for (const v of versionedJars) {
+        candidatePaths.push(v.path);
+      }
+    }
+
+    // Legacy unversioned runtime decrypted JAR (back-compat)
+    candidatePaths.push(
       path.join(this.jarCacheDir, 'wexguard', 'wexguard-decrypted.jar'),
+    );
+
+    candidatePaths.push(
       // Signature-patched JAR (TypeToken fix from previous sessions)
       path.join(
         process.cwd(),
@@ -3276,7 +4038,7 @@ export class JarLoader {
         'tools',
         'wexguard-spider-enjarify.jar',
       ),
-    ];
+    );
 
     let jarPath = candidatePaths.find((p) => fs.existsSync(p));
 
@@ -3325,13 +4087,28 @@ export class JarLoader {
           // Fall through to use pre-decrypted JAR if available.
           // However, if the runtime JAR was actually created (e.g. failed
           // during version-save step after JAR was written), use it.
-          const runtimeJar = candidatePaths[0];
-          if (fs.existsSync(runtimeJar)) {
-            console.log(
-              '[JarLoader] Using runtime-decrypted JAR despite error (JAR exists):',
-              runtimeJar,
+          // The decrypt() writes to a versioned path
+          // wexguard-decrypted-<md5>.jar; check if it exists.
+          try {
+            const neteaseBuffer = fs.readFileSync(neteaseJarPath);
+            const md5 = crypto
+              .createHash('md5')
+              .update(neteaseBuffer)
+              .digest('hex');
+            const versionedJar = path.join(
+              this.jarCacheDir,
+              'wexguard',
+              `wexguard-decrypted-${md5}.jar`,
             );
-            jarPath = runtimeJar;
+            if (fs.existsSync(versionedJar)) {
+              console.log(
+                '[JarLoader] Using runtime-decrypted JAR despite error (JAR exists):',
+                versionedJar,
+              );
+              jarPath = versionedJar;
+            }
+          } catch {
+            // ignore — fall through to candidatePaths lookup below
           }
         }
       } else {
@@ -3706,12 +4483,84 @@ export class JarLoader {
 
     // Parse class name: remove "csp_" prefix
     const clsKey = className.replace('csp_', '');
-    const isGuard = this.isGuardSpiderClassName(clsKey);
+
+    // Determine JAR key first (needed for per-JAR class index lookup below).
+    // IMPORTANT: must match loadJar's jarKey calculation. loadJar strips
+    // 'img+' prefix before hashing, so we must do the same here. Otherwise
+    // spiderClassLoaders.get(jarKey) returns undefined for img+ JARs, and
+    // callSpiderMethod retries fail with ClassNotFoundException because
+    // instance.classLoader is undefined.
+    let jarKey = 'main';
+    if (jarUrl) {
+      const urls = jarUrl.split(';md5;');
+      const rawUrl = urls[0].replace('img+', '');
+      jarKey = crypto.createHash('md5').update(rawUrl).digest('hex');
+      console.log(
+        '[JarLoader] getSpider jarKey calc:',
+        'rawUrl=',
+        urls[0].substring(0, 80),
+        'stripped=',
+        rawUrl.substring(0, 80),
+        'jarKey=',
+        jarKey,
+        'spiderClassLoaders.has=',
+        this.spiderClassLoaders.has(jarKey),
+        'classLoaders.has=',
+        this.classLoaders.has(jarKey),
+      );
+    }
+    this.recentJarKey = jarKey;
+
+    let isGuard = this.isGuardSpiderClassName(clsKey);
+    // itv666-style configs use *Amns suffix as a naming convention for regular
+    // spider classes (e.g. Y360Amns, GuaziAmns) — these classes live in the
+    // per-source JAR (loaded into spiderClassLoaders), NOT in the wexguard JAR.
+    // Only treat Amns as Guard if the class is NOT in the per-JAR class index.
+    // Guard suffix always stays Guard (those classes are in wexguard JAR).
+    //
+    // Some itv666 aowu JARs store the spider class under the STRIPPED name
+    // (e.g. csp_DoubanAmns → class "Douban", not "DoubanAmns"). When only the
+    // stripped version exists in per-JAR, treat as non-Guard AND use the
+    // stripped name as the real class key. Otherwise JarLoader would fall
+    // back to the wexguard JAR and load the wrong class (e.g. "NewDouBan"
+    // instead of "Douban"), causing homeContent to return empty {}.
+    let amnsStrippedRealKey: string | null = null;
+    if (isGuard && clsKey.endsWith('Amns') && !clsKey.endsWith('Guard')) {
+      const perJarMap = this.jarClassNameMap.get(jarKey);
+      const perJarMapSize = perJarMap ? perJarMap.size : 0;
+      const stripped = clsKey.slice(0, -'Amns'.length);
+      const hasOrig = perJarMap ? perJarMap.has(clsKey.toLowerCase()) : false;
+      const hasStripped = perJarMap
+        ? perJarMap.has(stripped.toLowerCase())
+        : false;
+      console.log(
+        `[JarLoader][DEBUG] Amns check: clsKey="${clsKey}" jarKey=${jarKey.substring(0, 12)} perJarMapSize=${perJarMapSize} hasOrig=${hasOrig} hasStripped=${hasStripped}`,
+      );
+      if (perJarMap && (hasOrig || hasStripped)) {
+        isGuard = false;
+        if (!hasOrig && hasStripped) {
+          amnsStrippedRealKey = stripped;
+          console.log(
+            `[JarLoader] Amns class "${clsKey}" stripped to "${stripped}" (found in per-JAR index); treating as non-Guard`,
+          );
+        } else {
+          console.log(
+            `[JarLoader] Amns class "${clsKey}" found in per-JAR index; treating as non-Guard`,
+          );
+        }
+      } else {
+        console.log(
+          `[JarLoader] Amns class "${clsKey}" NOT in per-JAR index; falling back to Guard JAR`,
+        );
+      }
+    }
     // For Guard/Amns spiders, strip the suffix to get the real spider class
     // (e.g. NewDouBanGuard -> NewDouBan, GuaziAmns -> Guazi). The real class
     // lives in the pre-decrypted wexguard-spider-enjarify.jar, not the outer JAR.
     let realClsKey = clsKey;
-    if (isGuard) {
+    if (amnsStrippedRealKey) {
+      realClsKey = amnsStrippedRealKey;
+    } else if (isGuard) {
       if (clsKey.endsWith('Guard')) {
         realClsKey = clsKey.slice(0, -'Guard'.length);
       } else if (clsKey.endsWith('Amns')) {
@@ -3737,34 +4586,6 @@ export class JarLoader {
     if (isGuard && realClsKey !== clsKey) {
       candidateClsKeys.unshift(clsKey);
     }
-
-    // Determine JAR key
-    // IMPORTANT: must match loadJar's jarKey calculation. loadJar strips
-    // 'img+' prefix before hashing, so we must do the same here. Otherwise
-    // spiderClassLoaders.get(jarKey) returns undefined for img+ JARs, and
-    // callSpiderMethod retries fail with ClassNotFoundException because
-    // instance.classLoader is undefined.
-    let jarKey = 'main';
-    if (jarUrl) {
-      const urls = jarUrl.split(';md5;');
-      const rawUrl = urls[0].replace('img+', '');
-      jarKey = crypto.createHash('md5').update(rawUrl).digest('hex');
-      console.log(
-        '[JarLoader] getSpider jarKey calc:',
-        'rawUrl=',
-        urls[0].substring(0, 80),
-        'stripped=',
-        rawUrl.substring(0, 80),
-        'jarKey=',
-        jarKey,
-        'spiderClassLoaders.has=',
-        this.spiderClassLoaders.has(jarKey),
-        'classLoaders.has=',
-        this.classLoaders.has(jarKey),
-      );
-    }
-
-    this.recentJarKey = jarKey;
 
     // Guard spiders don't need the outer JAR - they use the pre-decrypted JAR
     if (isGuard) {
@@ -3940,6 +4761,8 @@ export class JarLoader {
       let SpiderClass: any = null;
       let fullClassName = '';
       const failedCandidates: string[] = [];
+      // Track failure reasons for diagnostic logging
+      const failureReasons: string[] = [];
 
       for (const candidate of candidateClsKeys) {
         const candidateFullName = `com.github.catvod.spider.${candidate}`;
@@ -3961,6 +4784,48 @@ export class JarLoader {
             // we still pick the candidate and let the actual instantiation
             // (below) handle it.
             try {
+              // Diagnostic: inspect Init class before instantiation when
+              // loading Guard spiders. This helps identify which Init class
+              // (stubs vs Guard JAR) is loaded at runtime.
+              if (isGuard) {
+                try {
+                  const InitCls = this.java.importClass(
+                    'com.github.catvod.spider.Init',
+                  );
+                  const initClassLoader = InitCls.getClassLoaderSync
+                    ? InitCls.getClassLoaderSync()
+                    : InitCls.getClassLoader();
+                  console.log(
+                    '[JarLoader DIAG] Init class loader:',
+                    initClassLoader ? initClassLoader.toStringSync() : 'null',
+                  );
+                  // List declared methods
+                  const methods = InitCls.getDeclaredMethodsSync
+                    ? InitCls.getDeclaredMethodsSync()
+                    : InitCls.getDeclaredMethods();
+                  const methodNames = [];
+                  for (let i = 0; i < methods.length; i++) {
+                    const m = methods[i];
+                    const mName = m.getNameSync ? m.getNameSync() : m.getName();
+                    methodNames.push(mName);
+                  }
+                  console.log(
+                    '[JarLoader DIAG] Init methods:',
+                    methodNames.join(', '),
+                  );
+                  // Check getSpider exists
+                  const hasGetSpider = methodNames.includes('getSpider');
+                  console.log(
+                    '[JarLoader DIAG] Init.hasGetSpider:',
+                    hasGetSpider,
+                  );
+                } catch (diagErr: any) {
+                  console.warn(
+                    '[JarLoader DIAG] Failed to inspect Init:',
+                    diagErr.message,
+                  );
+                }
+              }
               // Test instantiation — discard the instance (will re-create below)
               // eslint-disable-next-line no-new
               new candidateClass();
@@ -3969,18 +4834,35 @@ export class JarLoader {
                 candidateFullName,
               );
             } catch (initErr: any) {
-              const errMsg = (initErr.message || '').substring(0, 200);
+              const errMsg = (initErr.message || '').substring(0, 2000);
               const isNativeInit =
                 errMsg.includes('UnsatisfiedLinkError') ||
-                errMsg.includes('native method');
+                errMsg.includes('native method') ||
+                errMsg.includes('ExceptionInInitializerError');
               if (isNativeInit) {
                 console.log(
                   '[JarLoader] Candidate instantiates failed (native <init>):',
                   candidateFullName,
                   '-',
-                  errMsg.substring(0, 100),
+                  errMsg.substring(0, 500),
                 );
+                try {
+                  const diagLog = path.join(
+                    process.env.TEMP || process.env.TMP || '/tmp',
+                    'jarloader_init_error.log',
+                  );
+                  fs.appendFileSync(
+                    diagLog,
+                    `[${new Date().toISOString()}] ${candidateFullName}: ${errMsg}\n\n`,
+                    'utf8',
+                  );
+                } catch {
+                  /* ignore */
+                }
                 failedCandidates.push(candidate);
+                failureReasons.push(
+                  `${candidate}: native-init-failed (${errMsg.substring(0, 200)})`,
+                );
                 continue;
               }
               // Non-native error: log but still pick this candidate.
@@ -4003,6 +4885,7 @@ export class JarLoader {
             break;
           } else {
             failedCandidates.push(candidate);
+            failureReasons.push(`${candidate}: importClass-returned-falsy`);
           }
         } catch (candidateErr: any) {
           console.log(
@@ -4012,6 +4895,9 @@ export class JarLoader {
             candidateErr.message,
           );
           failedCandidates.push(candidate);
+          failureReasons.push(
+            `${candidate}: importClass-threw (${(candidateErr.message || '').substring(0, 80)})`,
+          );
         }
       }
 
@@ -4158,6 +5044,9 @@ export class JarLoader {
                     failedCandidates.push(
                       fuzzyMatch.split('.').pop() || fuzzyMatch,
                     );
+                    failureReasons.push(
+                      `${fuzzyMatch.split('.').pop()}: fuzzy-native-init-failed (${errMsg.substring(0, 80)})`,
+                    );
                     continue;
                   }
                   // Non-native error: still pick this candidate
@@ -4186,14 +5075,64 @@ export class JarLoader {
         if (!SpiderClass) {
           this.lastError = `Spider class not found. Tried candidates: ${failedCandidates.join(
             ', ',
-          )}. The JAR may not contain this class or may not have been converted from DEX format.`;
+          )}. Failure reasons: ${failureReasons.join(' | ')}. The JAR may not contain this class or may not have been converted from DEX format.`;
           console.error('[JarLoader]', this.lastError);
           return false;
         }
       }
 
+      // itv666 .aowu sources: pre-decrypt aowunnn.amns BEFORE instantiating
+      // the spider class. AowuShinidie's constructor calls Init.getSpider() →
+      // DexNative.getSpider(Init.loader(), name), and Init.loader() is null
+      // in desktop flow (Init.init() is never called). Our DexNative stub
+      // falls back to the system property `aowu.decrypted.jar.path` when
+      // loader is null, so we must set it before `new SpiderClass()`.
+      // (See also doInitSpider — that call is a no-op for .aowu sources
+      // because the property is already set here; kept there for safety.)
+      const cleanExtForAowu = this.cleanExtForSpider(ext);
+      if (this.isAowuExt(cleanExtForAowu)) {
+        console.log(
+          '[JarLoader] Detected itv666 .aowu ext; pre-decrypting DEX before spider instantiation:',
+          key,
+        );
+        const aowuJar = await this.prepareAowuDecryptedJar(cleanExtForAowu);
+        if (!aowuJar) {
+          console.warn(
+            '[JarLoader] .aowu decryption failed; spider instantiation will likely fail:',
+            key,
+          );
+        }
+      }
+
       // Create spider instance via importClass constructor proxy.
-      const spider = new SpiderClass();
+      // Wrap in try-catch to provide a clear error message when the spider
+      // class extends AowuShinidie (itv666 configs) — AowuShinidie's instance
+      // initializer calls Init.getSpider() → DexNative static block loads ARM
+      // .so → fails on Windows x64 with UnsatisfiedLinkError. Without this
+      // catch, the error propagates as a generic "spider null".
+      let spider: any;
+      try {
+        spider = new SpiderClass();
+      } catch (initErr: any) {
+        const errMsg = String(initErr?.message || initErr);
+        const isNativeInit =
+          errMsg.includes('UnsatisfiedLinkError') ||
+          errMsg.includes('ExceptionInInitializerError') ||
+          errMsg.includes('不是有效的 Win32') ||
+          errMsg.includes('native method');
+        if (isNativeInit) {
+          this.lastError =
+            `该源(${key})依赖 ARM native library，当前不支持 Windows 平台。` +
+            `错误: ${errMsg.substring(0, 200)}`;
+          console.error(
+            '[JarLoader] Spider instantiation failed (native lib):',
+            key,
+            this.lastError,
+          );
+          return false;
+        }
+        throw initErr;
+      }
 
       this.spiders.set(key, {
         spider,
@@ -4201,6 +5140,7 @@ export class JarLoader {
         ext,
         isGuard,
         initPromise: null,
+        key,
         classLoader:
           spiderClassLoader || (isGuard ? this.guardClassLoader : undefined),
       });
@@ -5109,6 +6049,62 @@ export class JarLoader {
   }
 
   /**
+   * Call spider.init(...) asynchronously with a timeout, so that a slow
+   * init (e.g. Duopan fetching a working mirror URL via synchronous OkHttp)
+   * does NOT block the Node.js event loop and freeze the Electron window.
+   *
+   * java-bridge's `initSync()` is a synchronous JNI call — it blocks the
+   * Node main thread until the Java method returns. If the spider's init
+   * makes a network request internally, the entire event loop freezes:
+   * no IPC, no HTTP server, no timers fire. Using the async `init()`
+   * variant instead runs the Java method on a separate thread, keeping
+   * the event loop responsive.
+   *
+   * @param spider   Spider instance (java-bridge proxy)
+   * @param args     Arguments to pass to init()
+   * @param label    Description for logging
+   * @param timeoutMs Timeout in ms (default 30s). If exceeded, resolves
+   *                  gracefully — init may still complete in the background.
+   * @returns true if init completed within timeout, false if timed out.
+   */
+  private async callInitAsync(
+    spider: any,
+    args: any[],
+    label: string,
+    timeoutMs = 30000,
+  ): Promise<boolean> {
+    try {
+      const initFn = spider.init;
+      if (!initFn || typeof initFn !== 'function') {
+        console.warn(
+          `[JarLoader] callInitAsync: init not available for ${label}`,
+        );
+        return false;
+      }
+      const result = initFn.call(spider, ...args);
+      if (result && typeof result.then === 'function') {
+        const timeoutPromise = new Promise<boolean>((resolve) => {
+          setTimeout(() => {
+            console.warn(
+              `[JarLoader] callInitAsync: ${label} timed out after ${timeoutMs}ms (non-blocking, continuing)`,
+            );
+            resolve(false);
+          }, timeoutMs);
+        });
+        return await Promise.race([result.then(() => true), timeoutPromise]);
+      }
+      // Synchronous return (void) — init completed immediately
+      return true;
+    } catch (e: any) {
+      console.warn(
+        `[JarLoader] callInitAsync: ${label} failed:`,
+        e?.message || e,
+      );
+      return false;
+    }
+  }
+
+  /**
    * Call Spider method
    * All methods return JSON string
    *
@@ -5370,9 +6366,27 @@ export class JarLoader {
         vod.vod_play_from !== '';
       // If vod_name is also missing, the spider failed entirely — retry
       // won't help and we'd just delay the error.
-      const hasMetadata = vod.vod_name || vod.vod_pic;
-      if (!hasMetadata) return false;
-      const missing = !hasPlayUrl || !hasPlayFrom;
+      // But still treat as missing if spider returned placeholder text
+      // like "免费分享！切勿上当！" in play_from (NewHuBan does this when
+      // the pan resolver fails but metadata fields are partially filled).
+      const PLACEHOLDER = '免费分享！切勿上当！';
+      const isPlaceholder = (s: unknown): boolean =>
+        typeof s === 'string' && (s === PLACEHOLDER || s.includes('切勿上当'));
+      const playFromIsPlaceholder = isPlaceholder(vod.vod_play_from);
+      const playUrlIsPlaceholder = isPlaceholder(vod.vod_play_url);
+      const hasMetadata =
+        vod.vod_name || vod.vod_pic || vod.vod_director || vod.vod_actor;
+      if (!hasMetadata && !playFromIsPlaceholder && !playUrlIsPlaceholder) {
+        return false;
+      }
+      // Missing if either play_url or play_from is empty, OR if either
+      // is the placeholder text (which means spider's pan resolver failed
+      // and returned garbage instead of real play URLs).
+      const missing =
+        !hasPlayUrl ||
+        !hasPlayFrom ||
+        playFromIsPlaceholder ||
+        playUrlIsPlaceholder;
       if (missing) {
         console.log(
           '[JarLoader] isMissingPlayUrl: vod_name=',
@@ -5381,6 +6395,10 @@ export class JarLoader {
           hasPlayUrl,
           'has vod_play_from=',
           hasPlayFrom,
+          'playFromIsPlaceholder=',
+          playFromIsPlaceholder,
+          'playUrlIsPlaceholder=',
+          playUrlIsPlaceholder,
         );
       }
       return missing;
@@ -5420,62 +6438,128 @@ export class JarLoader {
     spiderResult: string,
   ): Promise<string> {
     try {
-      const parsed = JSON.parse(spiderResult);
-      const vod = parsed?.list?.[0];
-      if (!vod) return spiderResult;
+      let parsed: any;
+      try {
+        parsed = JSON.parse(spiderResult);
+      } catch {
+        parsed = { list: [] };
+      }
+      // Spider may return empty list when its internal detailContent threw
+      // an exception or returned {}. Construct a minimal vod so we can still
+      // attempt HTML-based fallback.
+      let vod = parsed?.list?.[0];
+      if (!vod) {
+        vod = { vod_id: vodId, vod_name: '' };
+        parsed = { list: [vod] };
+        console.log(
+          '[JarLoader] resolveQuarkShareFallback: spider returned empty list, constructed minimal vod for HTML fallback',
+        );
+      }
 
-      // Build detail page URL from vod_id + site_url
-      let detailUrl: string = vod.vod_id || vodId || '';
-      if (!detailUrl.startsWith('http')) {
-        let siteUrl = '';
-        try {
-          const ext =
-            typeof instance.ext === 'string'
-              ? JSON.parse(instance.ext)
-              : instance.ext;
-          siteUrl = ext?.site_urls?.[0] || '';
-        } catch {
-          /* ignore */
+      // Build detail page URL from vod_id + site_url.
+      // NewGuanYing's vod_id format is "id|category" (e.g. "bMaE|mv") and
+      // the detail page URL is "<site>/<category>/<id>" (e.g.
+      // "https://www.xn--10vr61a3xc5x3b.com/mv/bMaE"). Handle this format
+      // specially before falling back to the generic "site + vod_id" rule.
+      // Prefer the original vodId (input) over vod.vod_id (spider-returned)
+      // because the spider often strips the "|category" suffix needed to
+      // construct the correct detail URL.
+      let detailUrl: string =
+        (vodId && vodId.includes('|') ? vodId : vod.vod_id) || vodId || '';
+      let siteUrl = '';
+      try {
+        const ext =
+          typeof instance.ext === 'string'
+            ? JSON.parse(instance.ext)
+            : instance.ext;
+        siteUrl = ext?.site_urls?.[0] || '';
+      } catch {
+        /* ignore */
+      }
+      const baseName = (instance.className || '')
+        .replace(/^com\.github\.catvod\.spider\./, '')
+        .replace(/Guard$/, '');
+      // Fallback 1: read from cached WexGuard siteconfig (the same file
+      // the spider reads during init). This always reflects the latest
+      // working mirror URLs, so it's authoritative when ext.site_urls is
+      // empty.
+      if (!siteUrl) {
+        siteUrl = this.getSiteUrlFromSiteConfig(
+          instance.className || '',
+          instance.key || '',
+        );
+        if (siteUrl) {
+          console.log(
+            '[JarLoader] resolveQuarkShareFallback: using siteconfig URL for',
+            baseName,
+            '->',
+            siteUrl,
+          );
         }
-        // Fallback: hardcoded base URLs for Guard spiders whose ext is empty.
-        // The base URL is hardcoded inside the spider class; we mirror it here
-        // so the fallback can still fetch the detail HTML page.
-        if (!siteUrl) {
-          const baseName = (instance.className || '')
-            .replace(/^com\.github\.catvod\.spider\./, '')
-            .replace(/Guard$/, '');
-          const KNOWN_SITE_URLS: Record<string, string> = {
-            NewZhiZhen: 'http://www.miqk.cc/',
-            NewJuTou: 'https://1.star2.cn/',
-            NewMuOu: 'http://123.666291.xyz/',
-            NewDuoDuo: 'https://tv.yydsys.top/',
-          };
-          siteUrl = KNOWN_SITE_URLS[baseName] || '';
-          if (siteUrl) {
-            console.log(
-              '[JarLoader] resolveQuarkShareFallback: using hardcoded site_url for',
-              baseName,
-              '->',
-              siteUrl,
-            );
-          }
+      }
+      // Fallback 2: hardcoded base URLs for Guard spiders that aren't in
+      // the siteconfig (e.g. WexBoBo). The runtime field name collides
+      // across spiders — for NewGuanYing it's the cookie, for NewHuBan
+      // it's the site URL, for WexBoBo it's an API URL — so we don't read
+      // it as a URL here.
+      if (!siteUrl) {
+        const KNOWN_SITE_URLS: Record<string, string> = {
+          // WexBoBo uses wwgz.cn:5200 for both HTML and API.
+          WexBoBo: 'https://vip.wwgz.cn:5200/',
+        };
+        siteUrl = KNOWN_SITE_URLS[baseName] || '';
+        if (siteUrl) {
+          console.log(
+            '[JarLoader] resolveQuarkShareFallback: using hardcoded site_url for',
+            baseName,
+            '->',
+            siteUrl,
+          );
         }
-        if (!siteUrl) {
+      }
+      // siteUrl is only required when detailUrl is NOT already a full URL.
+      // New4KZn's vod_id is "https://4kzn.cc/book/20569.html" — a complete
+      // URL that needs no siteUrl prefix. Reorder the check so full-URL
+      // vod_ids skip the siteUrl requirement entirely.
+      const trimmedSite = siteUrl ? siteUrl.replace(/\/$/, '') : '';
+      if (detailUrl.includes('|')) {
+        // NewGuanYing format: "<id>|<category>" -> "<site>/<category>/<id>"
+        if (!trimmedSite) {
           console.warn(
-            '[JarLoader] resolveQuarkShareFallback: no site_url available',
+            '[JarLoader] resolveQuarkShareFallback: no site_url for |category| vod_id',
+          );
+          return spiderResult;
+        }
+        const [idPart, catPart] = detailUrl.split('|');
+        detailUrl = `${trimmedSite}/${catPart}/${idPart}`;
+      } else if (!detailUrl.startsWith('http')) {
+        if (!trimmedSite) {
+          console.warn(
+            '[JarLoader] resolveQuarkShareFallback: no site_url for relative vod_id',
           );
           return spiderResult;
         }
         detailUrl =
-          siteUrl.replace(/\/$/, '') +
-          (detailUrl.startsWith('/') ? '' : '/') +
-          detailUrl;
+          trimmedSite + (detailUrl.startsWith('/') ? '' : '/') + detailUrl;
       }
 
       console.log(
         '[JarLoader] resolveQuarkShareFallback: fetching detail HTML',
         detailUrl.substring(0, 100),
       );
+      try {
+        const diagLog = path.join(
+          process.env.TEMP || process.env.TMP || '/tmp',
+          'jarloader_fallback_diag.log',
+        );
+        fs.appendFileSync(
+          diagLog,
+          `[${new Date().toISOString()}] baseName=${baseName} siteUrl=${siteUrl} detailUrl=${detailUrl.substring(0, 200)}\n`,
+          'utf8',
+        );
+      } catch {
+        /* ignore */
+      }
       const resp = await axios.get(detailUrl, {
         timeout: 15000,
         responseType: 'text',
@@ -5505,39 +6589,122 @@ export class JarLoader {
         }
       }
 
-      // Extract Quark share URLs (deduplicated, order preserved)
-      const quarkRegex = /https?:\/\/pan\.quark\.cn\/s\/([a-zA-Z0-9]+)/g;
+      // Extract Quark share URLs with associated episode names.
+      // CMS detail pages typically have:
+      //   <h4>episode name</h4> ... <p>https://pan.quark.cn/s/xxx</p>
+      // or:
+      //   title="复制《name》第N集下载地址" data-clipboard-text="https://pan.quark.cn/s/xxx"
+      // We try both patterns to extract (episodeName, shareUrl) pairs.
       const seen = new Set<string>();
-      const quarkUrls: string[] = [];
-      let m: RegExpExecArray | null;
-      while ((m = quarkRegex.exec(html)) !== null) {
-        const url = m[0];
+      const quarkEntries: Array<{ url: string; name: string }> = [];
+
+      // Pattern 1: <h4>name</h4> ... <p>url</p> (most common in CMS templates)
+      const h4Pattern =
+        /<h4[^>]*>([^<]+)<\/h4>[\s\S]*?<p>(https?:\/\/pan\.quark\.cn\/s\/[a-zA-Z0-9]+)<\/p>/g;
+      let hm: RegExpExecArray | null;
+      while ((hm = h4Pattern.exec(html)) !== null) {
+        const name = hm[1].trim();
+        const url = hm[2];
         if (!seen.has(url)) {
           seen.add(url);
-          quarkUrls.push(url);
+          quarkEntries.push({ url, name });
         }
       }
 
-      if (quarkUrls.length === 0) {
+      // Pattern 2: title="复制《name》第N集下载地址" data-clipboard-text="url"
+      if (quarkEntries.length === 0) {
+        const titlePattern =
+          /title="复制《([^》]+)》([^"]*?)下载地址"[^>]*data-clipboard-text="(https?:\/\/pan\.quark\.cn\/s\/[a-zA-Z0-9]+)"/g;
+        let tm: RegExpExecArray | null;
+        while ((tm = titlePattern.exec(html)) !== null) {
+          const name = `${tm[1]} ${tm[2]}`.trim();
+          const url = tm[3];
+          if (!seen.has(url)) {
+            seen.add(url);
+            quarkEntries.push({ url, name });
+          }
+        }
+      }
+
+      // Fallback: just extract URLs without names
+      if (quarkEntries.length === 0) {
+        const quarkRegex = /https?:\/\/pan\.quark\.cn\/s\/([a-zA-Z0-9]+)/g;
+        let m: RegExpExecArray | null;
+        while ((m = quarkRegex.exec(html)) !== null) {
+          const url = m[0];
+          if (!seen.has(url)) {
+            seen.add(url);
+            quarkEntries.push({ url, name: '' });
+          }
+        }
+      }
+
+      if (quarkEntries.length === 0) {
         console.warn(
           '[JarLoader] resolveQuarkShareFallback: no Quark URLs found in HTML',
         );
+        try {
+          const diagLog = path.join(
+            process.env.TEMP || process.env.TMP || '/tmp',
+            'jarloader_fallback_diag.log',
+          );
+          fs.appendFileSync(
+            diagLog,
+            `  -> htmlSize=${html.length} noQuarkUrlsFound first300=${html.substring(0, 300).replace(/\s+/g, ' ')}\n`,
+            'utf8',
+          );
+        } catch {
+          /* ignore */
+        }
         return spiderResult;
       }
 
       console.log(
         '[JarLoader] resolveQuarkShareFallback: found',
-        quarkUrls.length,
-        'Quark share URLs',
+        quarkEntries.length,
+        'Quark share URLs:',
+        quarkEntries.map((e) => `${e.name || '(no name)'} -> ${e.url}`),
       );
 
-      // Resolve each share URL to get the file list
+      // Check if Quark cookie is available. If not, inject placeholder play
+      // items so the detail page still shows play sources. When the user
+      // clicks play, playerContent will detect the "quark-share:shareId"
+      // format and emit pan:loginExpired to show the QR code login popup.
+      const hasCookie = !!QuarkPanService.getSyncedCookie();
+      if (!hasCookie) {
+        console.log(
+          '[JarLoader] resolveQuarkShareFallback: no Quark cookie, injecting placeholder play items',
+        );
+        const placeholderItems: string[] = [];
+        for (const entry of quarkEntries) {
+          const shareIdMatch = entry.url.match(/\/s\/([a-zA-Z0-9]+)/);
+          if (shareIdMatch) {
+            const shareId = shareIdMatch[1];
+            const name = entry.name || `第${placeholderItems.length + 1}集`;
+            const itemId = `quark-share:${shareId}`;
+            placeholderItems.push(`${name}$${itemId}`);
+          }
+        }
+        if (placeholderItems.length === 0) {
+          return spiderResult;
+        }
+        vod.vod_play_from = '夸克网盘';
+        vod.vod_play_url = placeholderItems.join('#');
+        console.log(
+          '[JarLoader] resolveQuarkShareFallback: injected',
+          placeholderItems.length,
+          'placeholder episodes (no cookie, will prompt login on play)',
+        );
+        return JSON.stringify(parsed);
+      }
+
+      // Cookie available: resolve each share URL to get the file list
       const videoExtRegex =
         /\.(mp4|mkv|ts|avi|mov|flv|webm|m4v|mpg|mpeg|3gp)$/i;
       const playItems: string[] = [];
-      for (const shareUrl of quarkUrls) {
+      for (const entry of quarkEntries) {
         try {
-          const result = await QuarkPanService.resolveShareToFiles(shareUrl);
+          const result = await QuarkPanService.resolveShareToFiles(entry.url);
           if (result.success && result.files) {
             for (const file of result.files) {
               if (videoExtRegex.test(file.fileName)) {
@@ -5550,14 +6717,23 @@ export class JarLoader {
           } else {
             console.warn(
               '[JarLoader] resolveQuarkShareFallback: resolveShareToFiles failed for',
-              shareUrl,
+              entry.url,
               result.error,
             );
+            // Inject placeholder so user can still see and try the play source.
+            // playerContent will re-resolve and show login/error as needed.
+            const shareIdMatch = entry.url.match(/\/s\/([a-zA-Z0-9]+)/);
+            if (shareIdMatch) {
+              const shareId = shareIdMatch[1];
+              const name = entry.name || `第${playItems.length + 1}集`;
+              const itemId = `quark-share:${shareId}`;
+              playItems.push(`${name}$${itemId}`);
+            }
           }
         } catch (e: any) {
           console.warn(
             '[JarLoader] resolveQuarkShareFallback: exception for',
-            shareUrl,
+            entry.url,
             e?.message || e,
           );
         }
@@ -5580,6 +6756,19 @@ export class JarLoader {
       );
       return JSON.stringify(parsed);
     } catch (e: any) {
+      try {
+        const diagLog = path.join(
+          process.env.TEMP || process.env.TMP || '/tmp',
+          'jarloader_fallback_diag.log',
+        );
+        fs.appendFileSync(
+          diagLog,
+          `  -> EXCEPTION: ${e?.message || e} stack=${e?.stack?.substring(0, 500) || ''}\n`,
+          'utf8',
+        );
+      } catch {
+        /* ignore */
+      }
       console.warn(
         '[JarLoader] resolveQuarkShareFallback failed:',
         e?.message || e,
@@ -5603,6 +6792,30 @@ export class JarLoader {
       return key;
     }
     return crypto.createHash('md5').update(key, 'utf8').digest('hex');
+  }
+
+  private appendPlayerContentDiag(line: string): void {
+    try {
+      const diagLog = path.join(
+        process.env.TEMP || process.env.TMP || '/tmp',
+        'jarloader_playercontent_diag.log',
+      );
+      fs.appendFileSync(diagLog, line + '\n', 'utf8');
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private appendDetailDiag(line: string): void {
+    try {
+      const diagLog = path.join(
+        process.env.TEMP || process.env.TMP || '/tmp',
+        'jarloader_detail_diag.log',
+      );
+      fs.appendFileSync(diagLog, line + '\n', 'utf8');
+    } catch {
+      /* ignore */
+    }
   }
 
   private clearSpiderFileCache(key: string): void {
@@ -5745,24 +6958,32 @@ export class JarLoader {
       const match = args[1].match(/^quark:([a-zA-Z0-9]+):([a-f0-9]+)$/);
       if (match) {
         const [, shareId, fid] = match;
+        const t0 = Date.now();
         console.log(
           '[JarLoader] playerContent: resolving Quark fallback id',
           shareId,
           fid,
         );
         try {
+          this.appendPlayerContentDiag(
+            `[${new Date().toISOString()}] quark-fallback ENTER shareId=${shareId} fid=${fid} hasCookie=${!!QuarkPanService.getSyncedCookie()}`,
+          );
           const playUrl = await QuarkPanService.resolveQuarkDownloadUrl(
             shareId,
             fid,
+          );
+          this.appendPlayerContentDiag(
+            `  -> resolveQuarkDownloadUrl took=${Date.now() - t0}ms playUrlLen=${playUrl?.length || 0}`,
           );
           if (playUrl) {
             // Route through ProxyServer's streamPanDirect (quarkDirect) so
             // the Quark Cookie/UA/Referer are injected and __puus is refreshed.
             // streamPanDirect also handles CDN 412 by refreshing cookie.
+            // Pass shareId and fid so streamPanDirect can re-resolve on 412.
             const proxyPort = proxyServer.getPort();
             if (proxyPort > 0) {
               const encodedUrl = encodeURIComponent(playUrl);
-              const proxyUrl = `http://127.0.0.1:${proxyPort}/proxy?do=quarkDirect&url=${encodedUrl}`;
+              const proxyUrl = `http://127.0.0.1:${proxyPort}/proxy?do=quarkDirect&url=${encodedUrl}&shareId=${shareId}&fid=${fid}`;
               console.log(
                 '[JarLoader] playerContent: Quark fallback resolved, routing through ProxyServer',
               );
@@ -5785,26 +7006,147 @@ export class JarLoader {
               },
             });
           }
-          // resolveQuarkDownloadUrl returned null: cookie may be expired
-          if (!QuarkPanService.getSyncedCookie()) {
+          // resolveQuarkDownloadUrl returned null: check lastResolveError
+          // for a precise failure reason before falling back to generic msg.
+          const currentCookie = QuarkPanService.getSyncedCookie();
+          if (!currentCookie) {
+            // Not logged in — just report the error (config center handles login)
             console.warn(
-              '[JarLoader] playerContent: Quark cookie missing, emitting pan:loginExpired',
+              '[JarLoader] playerContent: Quark cookie missing (not logged in)',
             );
-            try {
-              BrowserWindow.getAllWindows().forEach((w) =>
-                w.webContents.send('pan:loginExpired', 'quark'),
-              );
-            } catch {
-              /* ignore */
-            }
-            return JSON.stringify({ msg: '请扫描夸克网盘登录二维码' });
+            this.appendPlayerContentDiag(
+              `  -> playUrl=null (no cookie) took=${Date.now() - t0}ms returning 未登录错误`,
+            );
+            return JSON.stringify({
+              msg: '未登录夸克网盘，请在配置中心登录后再播放',
+            });
           }
-          return JSON.stringify({
-            msg: '夸克网盘解析失败，请稍后重试或重新登录',
-          });
+          const resolveError = QuarkPanService.getLastResolveError();
+          let errMsg: string;
+          if (resolveError === 'expired') {
+            errMsg = '夸克网盘登录已失效，请在配置中心重新登录';
+          } else if (resolveError === 'space') {
+            errMsg =
+              '夸克网盘空间不足，无法转存视频文件。请登录夸克网盘清理不需要的文件后重试';
+          } else if (resolveError && resolveError.startsWith('exception:')) {
+            errMsg =
+              '夸克网盘解析异常：' +
+              resolveError.substring('exception:'.length);
+          } else {
+            errMsg =
+              '夸克网盘解析失败，请稍后重试，或在配置中心重新登录夸克网盘';
+          }
+          this.appendPlayerContentDiag(
+            `  -> playUrl=null (cookie present, len=${currentCookie.length}, resolveError=${resolveError}) took=${Date.now() - t0}ms returning: ${errMsg}`,
+          );
+          return JSON.stringify({ msg: errMsg });
         } catch (e: any) {
           console.error(
             '[JarLoader] playerContent: Quark fallback failed:',
+            e?.message || e,
+          );
+          this.appendPlayerContentDiag(
+            `  -> EXCEPTION took=${Date.now() - t0}ms err=${e?.message || String(e)}`,
+          );
+          return JSON.stringify({
+            msg: '夸克网盘解析失败：' + (e?.message || String(e)),
+          });
+        }
+      }
+    }
+
+    // playerContent fallback for "quark-share:shareId" placeholder ids.
+    // resolveQuarkShareFallback injects these when the Quark cookie is missing
+    // (or when share resolution failed) so the detail page still shows play
+    // sources. When the user clicks play, we get here and must:
+    //  1. If no cookie → return error msg (config center handles login)
+    //  2. If cookie → resolve the share to get the first video file's fid,
+    //     then resolve the CDN URL via resolveQuarkDownloadUrl.
+    if (
+      method === 'playerContent' &&
+      typeof args[1] === 'string' &&
+      args[1].startsWith('quark-share:')
+    ) {
+      const match = args[1].match(/^quark-share:([a-zA-Z0-9]+)$/);
+      if (match) {
+        const [, shareId] = match;
+        console.log(
+          '[JarLoader] playerContent: resolving quark-share placeholder',
+          shareId,
+        );
+        // Step 1: check cookie
+        if (!QuarkPanService.getSyncedCookie()) {
+          console.warn(
+            '[JarLoader] playerContent: quark-share hit but no cookie (not logged in)',
+          );
+          return JSON.stringify({
+            msg: '未登录夸克网盘，请在配置中心登录后再播放',
+          });
+        }
+        // Step 2: resolve share → first video file → CDN URL
+        try {
+          const shareUrl = `https://pan.quark.cn/s/${shareId}`;
+          const resolveResult =
+            await QuarkPanService.resolveShareToFiles(shareUrl);
+          if (
+            !resolveResult.success ||
+            !resolveResult.files ||
+            resolveResult.files.length === 0
+          ) {
+            console.warn(
+              '[JarLoader] playerContent: quark-share resolve failed:',
+              resolveResult.error,
+            );
+            return JSON.stringify({
+              msg:
+                '夸克网盘解析失败：' +
+                (resolveResult.error || '分享无可用文件'),
+            });
+          }
+          const videoExtRegex =
+            /\.(mp4|mkv|ts|avi|mov|flv|webm|m4v|mpg|mpeg|3gp)$/i;
+          const file = resolveResult.files.find((f) =>
+            videoExtRegex.test(f.fileName),
+          );
+          if (!file) {
+            return JSON.stringify({ msg: '分享中没有可播放的视频文件' });
+          }
+          const playUrl = await QuarkPanService.resolveQuarkDownloadUrl(
+            shareId,
+            file.fid,
+          );
+          if (!playUrl) {
+            return JSON.stringify({
+              msg: '夸克网盘解析失败，请稍后重试或重新登录',
+            });
+          }
+          const proxyPort = proxyServer.getPort();
+          if (proxyPort > 0) {
+            const encodedUrl = encodeURIComponent(playUrl);
+            const proxyUrl = `http://127.0.0.1:${proxyPort}/proxy?do=quarkDirect&url=${encodedUrl}&shareId=${shareId}&fid=${file.fid}`;
+            console.log(
+              '[JarLoader] playerContent: quark-share resolved, routing through ProxyServer',
+            );
+            return JSON.stringify({
+              url: proxyUrl,
+              header: {
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                Referer: 'https://pan.quark.cn/',
+              },
+            });
+          }
+          return JSON.stringify({
+            url: playUrl,
+            header: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+              Referer: 'https://pan.quark.cn/',
+            },
+          });
+        } catch (e: any) {
+          console.error(
+            '[JarLoader] playerContent: quark-share fallback failed:',
             e?.message || e,
           );
           return JSON.stringify({
@@ -5822,8 +7164,8 @@ export class JarLoader {
     // __puus → CDN 412.
     //
     // Refresh __puus here and push the fresh cookie to JVM so the spider uses
-    // it. If the refresh detects true login expiry, emit pan:loginExpired so
-    // the renderer can pop up the QR re-login dialog.
+    // it. If the refresh detects true login expiry, throw an error so the
+    // renderer can display the message (config center handles re-login).
     if (
       method === 'playerContent' &&
       typeof args[0] === 'string' &&
@@ -5834,19 +7176,9 @@ export class JarLoader {
         const refreshResult = await QuarkPanService.refreshCookieForPlayback();
         if (refreshResult.expired) {
           console.warn(
-            '[JarLoader] playerContent: Quark login expired, emitting pan:loginExpired',
+            '[JarLoader] playerContent: Quark login expired (cookie invalid)',
           );
-          try {
-            BrowserWindow.getAllWindows().forEach((w) =>
-              w.webContents.send('pan:loginExpired', 'quark'),
-            );
-          } catch (e: any) {
-            console.warn(
-              '[JarLoader] Failed to emit pan:loginExpired:',
-              e.message,
-            );
-          }
-          throw new Error('Quark login expired, please re-scan QR code');
+          throw new Error('夸克网盘登录已失效，请在配置中心重新登录');
         }
         if (refreshResult.refreshed && refreshResult.cookie) {
           console.log(
@@ -5855,7 +7187,7 @@ export class JarLoader {
           await QuarkPanService.syncCookieToJVM(refreshResult.cookie);
         }
       } catch (e: any) {
-        if (e.message?.includes('Quark login expired')) throw e;
+        if (e.message?.includes('夸克网盘登录已失效')) throw e;
         console.warn(
           '[JarLoader] playerContent: Quark cookie refresh failed, continuing with existing cookie:',
           e.message,
@@ -5874,19 +7206,12 @@ export class JarLoader {
         const refreshResult = await UCPanService.refreshCookieForPlayback();
         if (refreshResult.expired) {
           console.warn(
-            '[JarLoader] playerContent: UC login expired, emitting pan:loginExpired',
+            '[JarLoader] playerContent: UC login expired (cookie invalid)',
           );
-          try {
-            BrowserWindow.getAllWindows().forEach((w) =>
-              w.webContents.send('pan:loginExpired', 'uc'),
-            );
-          } catch (e: any) {
-            console.warn(
-              '[JarLoader] Failed to emit pan:loginExpired:',
-              e.message,
-            );
-          }
-          throw new Error('UC login expired, please re-scan QR code');
+          // Don't emit pan:loginExpired — config center is the single source
+          // of truth for login state. Return a clear error message guiding
+          // the user to re-login in the config center.
+          throw new Error('UC网盘登录已失效，请在配置中心重新登录');
         }
         if (refreshResult.refreshed && refreshResult.cookie) {
           UCPanService.setSyncedCookie(refreshResult.cookie);
@@ -5894,6 +7219,7 @@ export class JarLoader {
         }
       } catch (e: any) {
         if (e.message?.includes('UC login expired')) throw e;
+        if (e.message?.includes('UC网盘登录已失效')) throw e;
         console.warn(
           '[JarLoader] playerContent: UC cookie refresh failed, continuing:',
           e.message,
@@ -5904,7 +7230,8 @@ export class JarLoader {
     // Pre-playback Baidu login check.
     // Baidu doesn't have a refreshCookieForPlayback like Quark/UC — the BDUSS
     // cookie is long-lived. But if no cookie is saved at all, skip the spider
-    // call and prompt re-login immediately.
+    // call and return a clear error message guiding the user to login in the
+    // config center.
     if (
       method === 'playerContent' &&
       typeof args[0] === 'string' &&
@@ -5912,16 +7239,13 @@ export class JarLoader {
       !BaiduPanService.getSyncedCookie()
     ) {
       console.warn(
-        '[JarLoader] playerContent: Baidu cookie missing, emitting pan:loginExpired',
+        '[JarLoader] playerContent: Baidu cookie missing (not logged in)',
       );
-      try {
-        BrowserWindow.getAllWindows().forEach((w) =>
-          w.webContents.send('pan:loginExpired', 'baidu'),
-        );
-      } catch (e: any) {
-        console.warn('[JarLoader] Failed to emit pan:loginExpired:', e.message);
-      }
-      throw new Error('Baidu login required, please scan QR code');
+      // Don't emit pan:loginExpired — config center is the single source of
+      // truth for login state. Return a clear error message instead.
+      return JSON.stringify({
+        msg: '未登录百度网盘，请在配置中心登录后再播放',
+      });
     }
 
     // Pre-detailContent pan cookie injection.
@@ -6074,19 +7398,20 @@ export class JarLoader {
                     e.message,
                   );
                 }
-                const initSync = spider.initSync;
-                if (initSync && typeof initSync === 'function') {
-                  initSync.call(spider, context);
-                } else {
-                  spider.init(context);
-                }
+                // Use callInitAsync (async + timeout) for the same reason as
+                // doInitSpider: initSync blocks the Node event loop and can
+                // freeze the Electron window if init makes a network call.
+                await this.callInitAsync(
+                  spider,
+                  [context],
+                  `retry init(Context) ${key}#${retry}`,
+                );
               } else {
-                const initSync = spider.initSync;
-                if (initSync && typeof initSync === 'function') {
-                  initSync.call(spider, context, cleanExt);
-                } else {
-                  spider.init(context, cleanExt);
-                }
+                await this.callInitAsync(
+                  spider,
+                  [context, cleanExt],
+                  `retry init(Context, String) ${key}#${retry}`,
+                );
               }
             } catch (initErr: any) {
               console.warn(
@@ -6201,6 +7526,19 @@ export class JarLoader {
                 bytes.toString('hex'),
               );
             }
+            // File-based diagnostic for itv666 Amns sources
+            try {
+              const diagLog = path.join(
+                process.env.TEMP || process.env.TMP || '/tmp',
+                'jarloader_home_diag.log',
+              );
+              const diagLine =
+                `[${new Date().toISOString()}] key=${key} cls=${clsKey} method=${method} ` +
+                `len=${result.length} result=${result.substring(0, 800)}`;
+              fs.appendFileSync(diagLog, diagLine + '\n', 'utf8');
+            } catch {
+              /* ignore */
+            }
           }
 
           // Guard spiders return JSON with obfuscated field names (e.g.
@@ -6216,6 +7554,16 @@ export class JarLoader {
 
           // detailContent: log full input/output for debugging jar issues.
           if (method === 'detailContent') {
+            const diagLines: string[] = [];
+            diagLines.push(
+              `[${new Date().toISOString()}] ========== detailContent debug ==========`,
+            );
+            diagLines.push(
+              `[${new Date().toISOString()}] key=${key} args=${JSON.stringify(args).substring(0, 500)}`,
+            );
+            diagLines.push(
+              `[${new Date().toISOString()}] result(len=${result.length})=${result.substring(0, 1500)}`,
+            );
             console.log(
               '[JarLoader] ========== detailContent debug ==========',
             );
@@ -6240,12 +7588,18 @@ export class JarLoader {
                 vod_play_from: vod.vod_play_from,
                 vod_play_url_len: vod.vod_play_url?.length || 0,
               });
+              diagLines.push(
+                `[${new Date().toISOString()}] vod_summary=${JSON.stringify({ vod_name: vod.vod_name, has_play_url: !!vod.vod_play_url, has_play_from: !!vod.vod_play_from, play_from: vod.vod_play_from, play_url_len: vod.vod_play_url?.length || 0 })}`,
+              );
             } catch {
               /* not JSON */
             }
             console.log(
               '[JarLoader] ========== end detailContent debug ==========',
             );
+            for (const line of diagLines) {
+              this.appendDetailDiag(line);
+            }
           }
 
           // playerContent: Guard spiders (NewWogg/NewQuark/etc.) return JSON
@@ -6426,6 +7780,24 @@ export class JarLoader {
               });
             }
             return JSON.stringify({ msg: cleanMsg });
+          }
+
+          // detailContent: spider threw an exception after all retries.
+          // The spider's internal HTML parser likely failed, but the raw
+          // HTML may still contain Quark share URLs we can extract. Try
+          // the HTML-based fallback before returning empty.
+          if (retryOnMissingPlayUrl) {
+            const fallbackResult = await this.resolveQuarkShareFallback(
+              instance,
+              Array.isArray(args[0]) ? args[0][0] : args[0],
+              '{}',
+            );
+            if (fallbackResult !== '{}') {
+              console.log(
+                `[JarLoader] detailContent: Quark share fallback succeeded after exception, returning enriched result`,
+              );
+              return fallbackResult;
+            }
           }
 
           return '{}';
@@ -6613,6 +7985,66 @@ export class JarLoader {
   }
 
   /**
+   * Look up the first working site URL for a Guard spider from the cached
+   * WexGuard siteconfig. Returns '' if not found.
+   *
+   * The siteconfig maps short keys (e.g. "huban", "guanying") to arrays of
+   * mirror URLs. Spider class names follow the pattern "New<Name>Guard" —
+   * we strip "New" and "Guard", lowercase the remainder, and use that as
+   * the lookup key. A few spiders use non-obvious keys (NewPanMe123 ->
+   * "123pan"), so we keep an explicit alias map for those.
+   */
+  private getSiteUrlFromSiteConfig(
+    className: string,
+    spiderKey: string,
+  ): string {
+    // Use in-memory cache if available, otherwise read from disk (the
+    // siteconfig file is written by ensureWexGuardSiteConfig on spider
+    // init, so it's always present for Guard spiders).
+    let jsonStr = this.wexGuardSiteConfigJson;
+    if (!jsonStr && spiderKey) {
+      try {
+        const sanitizedKey = this.sanitizeSpiderKey(spiderKey);
+        const tmpDir = process.env.TEMP || process.env.TMP || '/tmp';
+        const siteConfigPath = path.join(
+          tmpDir,
+          'tvbox_' + sanitizedKey,
+          'NewWex',
+          'siteconfig',
+        );
+        if (fs.existsSync(siteConfigPath)) {
+          jsonStr = fs.readFileSync(siteConfigPath, 'utf8');
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!jsonStr) return '';
+    try {
+      const parsed = JSON.parse(jsonStr);
+      const baseName = (className || '')
+        .replace(/^com\.github\.catvod\.spider\./, '')
+        .replace(/Guard$/, '');
+      // Explicit aliases for spiders whose siteconfig key doesn't match
+      // the lowercased base name (after stripping "New" prefix).
+      const SITECONFIG_ALIASES: Record<string, string> = {
+        NewPanMe123: '123pan',
+      };
+      // Siteconfig keys are the base name without the "New" prefix,
+      // lowercased (e.g. "NewHuBan" -> "huban", "NewWogg" -> "wogg").
+      const stripped = baseName.replace(/^New/, '');
+      const key = SITECONFIG_ALIASES[baseName] || stripped.toLowerCase();
+      const urls = parsed[key];
+      if (Array.isArray(urls) && urls.length > 0) {
+        return urls[0];
+      }
+    } catch {
+      /* ignore */
+    }
+    return '';
+  }
+
+  /**
    * Ensure <filesDir>/NewWex/siteconfig exists for the given spider key.
    * Called before spider.init() so Guard spiders (NewWogg/NewJuTou/etc.) can
    * read working mirror URLs instead of falling back to hijacked hardcoded
@@ -6721,6 +8153,27 @@ export class JarLoader {
 
     const cleanExt = this.cleanExtForSpider(ext);
 
+    // itv666 .aowu sources: pre-decrypt aowunnn.amns via unidbg and set
+    // `aowu.decrypted.jar.path` system property so the DexNative stub (in
+    // tvbox-spider-stubs-complete.jar) returns a working classloader. Without
+    // this, the spider's own DexNative.class static initializer would try to
+    // load the ARM awdm-v8.so and fail with UnsatisfiedLinkError on Windows
+    // x64 JVM. The spider JAR's DexNative.class is stripped in loadJarFile()
+    // (see removeNativeDependentClasses) so the stub version is used.
+    if (this.isAowuExt(cleanExt)) {
+      console.log(
+        '[JarLoader] Detected itv666 .aowu ext; pre-decrypting DEX...',
+        key,
+      );
+      const aowuJar = await this.prepareAowuDecryptedJar(cleanExt);
+      if (!aowuJar) {
+        console.warn(
+          '[JarLoader] .aowu decryption failed; spider init will likely fail:',
+          key,
+        );
+      }
+    }
+
     // For Guard spiders, set InitOrigin.oOoOoOo0O0O0oO0o (filesDir) EARLY so
     // the wrapped spider can find siteconfig regardless of which init()
     // overload gets called. Without this, Guard spiders whose wrapped class
@@ -6783,6 +8236,31 @@ export class JarLoader {
       const sanitizedKey = this.sanitizeSpiderKey(key);
       ContextClass.setCurrentSpiderKeySync(sanitizedKey);
       const context = new ContextClass();
+
+      // itv666 .aowu sources: call AwInit.init(Context) to set the singleton's
+      // Application field before the spider's own init() runs. The wrapped
+      // spider (e.g. AppV7, Hxq, NewGrV2) does NOT call AwInit.init() itself —
+      // it expects the host app to have done so. Without this, AwInit.context()
+      // returns null → NullPointerException in getFilesDir() → homeContent
+      // returns "{}". Only present in itv666 spider JARs, so importClass will
+      // throw for feimao/newwex sources (caught and skipped below).
+      //
+      // AwInit.init() casts the Context parameter to Application, so we MUST
+      // pass an Application instance (which extends Context) — passing a bare
+      // Context would throw ClassCastException.
+      try {
+        const AwInitClass = this.java.importClass(
+          'com.github.catvod.spider.AwInit',
+        );
+        const ApplicationClass = this.java.importClass(
+          'android.app.Application',
+        );
+        const awInitContext = new ApplicationClass();
+        await AwInitClass.init(awInitContext);
+        console.log('[JarLoader] AwInit.init(Context) called for:', key);
+      } catch (awInitErr: any) {
+        // AwInit class not present in this JAR (non-itv666 source) — ignore.
+      }
 
       // Guard spiders (NewWogg/NewJuTou/etc.) override init(Context) — the
       // single-parameter overload — to read siteconfig and pick a working
@@ -6859,7 +8337,18 @@ export class JarLoader {
         }
 
         try {
-          instance.spider.initSync(context);
+          const ok = await this.callInitAsync(
+            instance.spider,
+            [context],
+            `init(Context) ${key}`,
+          );
+          if (!ok) {
+            console.warn(
+              '[JarLoader] init(Context) did not complete for',
+              key,
+              '— falling through to init(Context, String)',
+            );
+          }
           console.log(
             '[JarLoader] Spider initialized with init(Context):',
             key,
@@ -6878,17 +8367,16 @@ export class JarLoader {
           } catch (e: any) {
             // Non-Guard spiders don't have this field — ignore.
           }
-          // Guard spiders (NewWogg/NewJuTou) only need init(Context) —
-          // they read siteconfig and don't use the ext string.
-          // Non-Guard SpiderApi subclasses (XBPQ, XYQBiu, etc.) also
-          // override init(Context) to do base setup, but they need the
-          // ext string passed via init(Context, String) to set request
-          // rules, headers, etc. Without this, homeContent returns class
-          // list but no video items, and categoryContent NPEs because
-          // the JSON config fields are never parsed.
-          if (instance.isGuard) {
-            return;
-          }
+          // Guard spiders: BaseSpiderGuard does NOT override init(Context),
+          // so instance.spider.init(Context) is a no-op (resolves to
+          // Spider.init(Context)). Guard spiders MUST fall through to
+          // init(Context, String) below — BaseSpiderGuard DOES override that
+          // and delegates to the wrapped spider's init(Context, String)
+          // (e.g. LiveBiLi.init fetches cookie from {base}/cookie/bili.php).
+          // After that, callWrappedSpiderInitContext calls the wrapped
+          // spider's init(Context) (e.g. NewJuTou.init fetches cookie from
+          // https://1.star2.cn). Without both calls, spiders that depend on
+          // init to fetch cookies/config return empty home/category lists.
         } catch (ctxInitErr: any) {
           console.warn(
             '[JarLoader] init(Context) failed, falling back:',
@@ -6897,10 +8385,20 @@ export class JarLoader {
         }
       }
 
+      // init(Context, String) — use callInitAsync (async + timeout) instead of
+      // initSync. initSync is a synchronous JNI call that blocks the Node event
+      // loop; if the spider's init makes a network request (e.g. Duopan
+      // fetching a working mirror URL via synchronous OkHttp), the entire
+      // Electron window freezes: no IPC, no HTTP server, no timers fire.
+      let ctxStrInitOk = false;
       try {
-        const initSync = instance.spider.initSync;
-        if (initSync && typeof initSync === 'function') {
-          initSync.call(instance.spider, context, cleanExt);
+        const ok = await this.callInitAsync(
+          instance.spider,
+          [context, cleanExt],
+          `init(Context, String) ${key}`,
+        );
+        ctxStrInitOk = ok;
+        if (ok) {
           console.log(
             '[JarLoader] Spider initialized with Context:',
             key,
@@ -6909,9 +8407,10 @@ export class JarLoader {
           );
           // For Guard spiders, BaseSpiderGuard.init(Context, String) delegates
           // to the wrapped spider's init(Context, String). But many wrapped
-          // spiders (NewErXiao, NewWogg, etc.) only override init(Context) to
-          // fetch a working domain. Without calling init(Context), the spider
-          // uses the default (often unreachable) base URL, causing empty list.
+          // spiders (NewErXiao, NewWogg, NewJuTou, etc.) only override
+          // init(Context) to fetch a working domain/cookie. Without calling
+          // init(Context), the spider uses the default/unreachable base URL,
+          // causing empty list.
           if (instance.isGuard) {
             console.log(
               '[JarLoader] Guard spider detected, calling callWrappedSpiderInitContext for:',
@@ -6932,10 +8431,27 @@ export class JarLoader {
         );
       }
 
+      // For Guard spiders, if init(Context, String) failed above, still call
+      // callWrappedSpiderInitContext to ensure the wrapped spider's
+      // init(Context) is called. Some wrapped spiders (NewJuTou) only
+      // override init(Context) to fetch cookies/config, not init(Context,
+      // String), so the fallback is required to avoid empty lists.
+      if (instance.isGuard && !ctxStrInitOk) {
+        console.log(
+          '[JarLoader] Guard spider fallback: calling callWrappedSpiderInitContext for:',
+          key,
+        );
+        await this.callWrappedSpiderInitContext(instance.spider, context, key);
+      }
+
+      // init(String) — also async with timeout
       try {
-        const initSync = instance.spider.initSync;
-        if (initSync && typeof initSync === 'function') {
-          initSync.call(instance.spider, cleanExt);
+        const ok = await this.callInitAsync(
+          instance.spider,
+          [cleanExt],
+          `init(String) ${key}`,
+        );
+        if (ok) {
           console.log('[JarLoader] Spider initialized without Context:', key);
           return;
         }
@@ -6943,31 +8459,11 @@ export class JarLoader {
         console.warn('[JarLoader] init(String) failed:', strInitErr.message);
       }
 
-      try {
-        instance.spider.init(context, cleanExt);
-        console.log(
-          '[JarLoader] Spider initialized (async with Context):',
-          key,
-        );
-      } catch (e: any) {
-        console.warn(
-          '[JarLoader] Async init(Context, String) failed:',
-          e.message,
-        );
-        try {
-          instance.spider.init(cleanExt);
-          console.log(
-            '[JarLoader] Spider initialized (async, no Context):',
-            key,
-          );
-        } catch (e2: any) {
-          console.error(
-            '[JarLoader] All init methods failed for:',
-            key,
-            e2.message,
-          );
-        }
-      }
+      console.warn(
+        '[JarLoader] All init methods exhausted for:',
+        key,
+        '— spider may not be fully initialized (init may still complete in background)',
+      );
     } catch (e) {
       console.error('[JarLoader] Failed to init spider:', key, e);
     }
@@ -7129,7 +8625,14 @@ export class JarLoader {
         // field not accessible
       }
       try {
-        wrappedSpider.initSync(context);
+        // Use callInitAsync (async + timeout) instead of initSync — same
+        // reasoning as in doInitSpider: initSync blocks the Node event loop
+        // and can freeze the Electron window if init makes a network call.
+        await this.callInitAsync(
+          wrappedSpider,
+          [context],
+          `wrapped init(Context) ${wrappedClassName} ${key}`,
+        );
       } catch (initErr: any) {
         console.warn(
           '[JarLoader] Wrapped spider init(Context) threw:',
@@ -7224,8 +8727,13 @@ export class JarLoader {
    * the cookie to NewWexFnw_preferences (key: Wex_quark_cookie) and
    * com.github.catvod.tvbox_preferences (keys: mi.quark encrypted, .quark plain).
    * Read from the plain .quark key for simplicity.
+   *
+   * Public so QuarkPanService.getSyncedCookie() can fallback to here when
+   * the in-memory syncedCookie field is null (e.g., user logged in via
+   * wexconfig iframe during the current session — that path writes to
+   * SharedPreferences but never calls syncCookieToJVM).
    */
-  private readQuarkCookieFromJVM(): string | null {
+  public readQuarkCookieFromJVM(): string | null {
     if (!this.java) return null;
     try {
       const InitClass = this.java.importClass('com.github.catvod.spider.Init');
@@ -7253,6 +8761,79 @@ export class JarLoader {
     } catch (e: any) {
       console.warn(
         '[JarLoader] readQuarkCookieFromJVM failed:',
+        e?.message || e,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Read the UC pan cookie from JVM SharedPreferences.
+   * Mirrors readQuarkCookieFromJVM. Used by UCPanService.getSyncedCookie()
+   * when the in-memory syncedCookie is null (e.g., user logged in via
+   * wexconfig iframe during this session).
+   */
+  public readUcCookieFromJVM(): string | null {
+    if (!this.java) return null;
+    try {
+      const InitClass = this.java.importClass('com.github.catvod.spider.Init');
+      const ctx = InitClass.contextSync();
+      if (!ctx) return null;
+      const guardPrefs = ctx.getSharedPreferencesSync(
+        'NewWexFnw_preferences',
+        0,
+      );
+      const guardCookie = guardPrefs.getStringSync('Wex_ucpan_cookie', '');
+      if (guardCookie && guardCookie.length > 10) {
+        return guardCookie;
+      }
+      const prefs = ctx.getSharedPreferencesSync(
+        'com.github.catvod.tvbox_preferences',
+        0,
+      );
+      const plainCookie = prefs.getStringSync('.uc', '');
+      if (plainCookie && plainCookie.length > 10) {
+        return plainCookie;
+      }
+      return null;
+    } catch (e: any) {
+      console.warn('[JarLoader] readUcCookieFromJVM failed:', e?.message || e);
+      return null;
+    }
+  }
+
+  /**
+   * Read the Baidu pan cookie from JVM SharedPreferences.
+   * Mirrors readQuarkCookieFromJVM. Used by BaiduPanService.getSyncedCookie()
+   * when the in-memory syncedCookie is null (e.g., user logged in via
+   * wexconfig iframe during this session).
+   */
+  public readBaiduCookieFromJVM(): string | null {
+    if (!this.java) return null;
+    try {
+      const InitClass = this.java.importClass('com.github.catvod.spider.Init');
+      const ctx = InitClass.contextSync();
+      if (!ctx) return null;
+      const guardPrefs = ctx.getSharedPreferencesSync(
+        'NewWexFnw_preferences',
+        0,
+      );
+      const guardCookie = guardPrefs.getStringSync('Wex_baidu_cookie', '');
+      if (guardCookie && guardCookie.length > 10) {
+        return guardCookie;
+      }
+      const prefs = ctx.getSharedPreferencesSync(
+        'com.github.catvod.tvbox_preferences',
+        0,
+      );
+      const plainCookie = prefs.getStringSync('.baidu', '');
+      if (plainCookie && plainCookie.length > 10) {
+        return plainCookie;
+      }
+      return null;
+    } catch (e: any) {
+      console.warn(
+        '[JarLoader] readBaiduCookieFromJVM failed:',
         e?.message || e,
       );
       return null;
@@ -7548,8 +9129,12 @@ export class JarLoader {
   /**
    * Re-initialize spider with ext config before method call.
    * This ensures Java static state is correct for the current source.
+   *
+   * NOTE: Uses callInitAsync (async + timeout) to avoid blocking the Node
+   * event loop. initSync would freeze the Electron window if init makes a
+   * network call.
    */
-  private reInitSpider(key: string, ext: string): void {
+  private async reInitSpider(key: string, ext: string): Promise<void> {
     const instance = this.spiders.get(key);
     if (!instance || !this.java) return;
 
@@ -7557,55 +9142,33 @@ export class JarLoader {
       const ContextClass = this.java.importClass('android.content.Context');
       const context = new ContextClass();
 
-      try {
-        const initSync = instance.spider.initSync;
-        if (initSync && typeof initSync === 'function') {
-          initSync.call(instance.spider, context, ext);
-          console.log(
-            '[JarLoader] reInitSpider success: initSync(Context, String)',
-            key,
-          );
-          return;
-        }
-      } catch (e: any) {
-        console.warn(
-          '[JarLoader] reInitSpider failed: initSync(Context, String)',
-          key,
-          e.message,
-        );
-      }
-
-      try {
-        const initSync = instance.spider.initSync;
-        if (initSync && typeof initSync === 'function') {
-          initSync.call(instance.spider, ext);
-          console.log(
-            '[JarLoader] reInitSpider success: initSync(String)',
-            key,
-          );
-          return;
-        }
-      } catch (e: any) {
-        console.warn(
-          '[JarLoader] reInitSpider failed: initSync(String)',
-          key,
-          e.message,
-        );
-      }
-
-      try {
-        instance.spider.init(context, ext);
+      const ok = await this.callInitAsync(
+        instance.spider,
+        [context, ext],
+        `reInit init(Context, String) ${key}`,
+      );
+      if (ok) {
         console.log(
-          '[JarLoader] reInitSpider success: init(Context, String) async',
+          '[JarLoader] reInitSpider success: init(Context, String)',
           key,
         );
-      } catch (e: any) {
-        console.warn(
-          '[JarLoader] reInitSpider failed: init(Context, String)',
-          key,
-          e.message,
-        );
+        return;
       }
+
+      const ok2 = await this.callInitAsync(
+        instance.spider,
+        [ext],
+        `reInit init(String) ${key}`,
+      );
+      if (ok2) {
+        console.log('[JarLoader] reInitSpider success: init(String)', key);
+        return;
+      }
+
+      console.warn(
+        '[JarLoader] reInitSpider: all init methods exhausted for',
+        key,
+      );
     } catch (e: any) {
       console.error(
         '[JarLoader] reInitSpider failed: import Context',
@@ -7623,6 +9186,293 @@ export class JarLoader {
     this.classLoaders.clear();
     this.spiderClassLoaders.clear();
     console.log('[JarLoader] Cleared all caches');
+  }
+
+  /**
+   * Synchronously call MyCrypto.extDe(String) via unidbg subprocess.
+   * Used by JS spiders (ManJu/WexV6/WexWenCai/WexGuaZi series) that need to
+   * decrypt "v2.{keyPart}.{cipherB64}" API responses.
+   *
+   * Why subprocess: extDe is a JNI native method in libdecjni.so (ARM only).
+   * We use unidbg emulation (unidbg-loader-1.0.0-shaded.jar) to run it on x64.
+   * The subprocess takes ~500ms per call due to JVM+unidbg startup overhead,
+   * but results are cached by the caller (JS spider) to avoid repeated calls.
+   *
+   * Returns: Base64-encoded 32-byte AES key+IV (key=first16, iv=last16),
+   * or empty string on failure.
+   */
+  public callExtDeSync(keyPart: string): string {
+    try {
+      if (!keyPart || typeof keyPart !== 'string') {
+        return '';
+      }
+      // Validate keyPart to prevent command injection
+      if (!/^[A-Za-z0-9_]+$/.test(keyPart)) {
+        console.warn(
+          '[JarLoader] callExtDeSync: invalid keyPart (contains special chars):',
+          keyPart.substring(0, 50),
+        );
+        return '';
+      }
+      const nativeLibDir = path.join(this.jarCacheDir, 'native_libs');
+      const libPath = path.join(nativeLibDir, 'libdecjni.so');
+      if (!fs.existsSync(libPath)) {
+        console.warn(
+          '[JarLoader] callExtDeSync: libdecjni.so not found at',
+          libPath,
+        );
+        return '';
+      }
+      // awenc-v8.so is actually wexguard_v8.so renamed - libdecjni.so dlopens
+      // "awenc-v8.so" at runtime. We pass the path so unidbg preloads it.
+      const awencCandidates = [
+        path.join(process.cwd(), 'tools', 'assets', 'wexguard_v8.so'),
+        path.join(app.getAppPath(), 'tools', 'assets', 'wexguard_v8.so'),
+        path.join(this.jarCacheDir, 'wexguard', 'assets', 'wexguard_v8.so'),
+      ];
+      let awencSoPath = '';
+      for (const p of awencCandidates) {
+        if (fs.existsSync(p)) {
+          awencSoPath = p;
+          break;
+        }
+      }
+      // Find unidbg-loader JAR
+      const candidates = [
+        path.join(
+          process.cwd(),
+          'tools',
+          'runtime',
+          'unidbg-loader-1.0.0-shaded.jar',
+        ),
+        path.join(
+          process.cwd(),
+          'tools',
+          'unidbg-loader',
+          'target',
+          'unidbg-loader-1.0.0.jar',
+        ),
+        path.join(
+          app.getAppPath(),
+          'tools',
+          'runtime',
+          'unidbg-loader-1.0.0-shaded.jar',
+        ),
+        path.join(
+          app.getAppPath(),
+          'tools',
+          'unidbg-loader',
+          'target',
+          'unidbg-loader-1.0.0.jar',
+        ),
+      ];
+      let unidbgJar = '';
+      for (const p of candidates) {
+        if (fs.existsSync(p)) {
+          unidbgJar = p;
+          break;
+        }
+      }
+      if (!unidbgJar) {
+        console.warn('[JarLoader] callExtDeSync: unidbg-loader JAR not found');
+        return '';
+      }
+      const javaArgs = awencSoPath
+        ? [
+            '-cp',
+            unidbgJar,
+            'com.tvbox.MyCryptoDecryptor',
+            libPath,
+            awencSoPath,
+            keyPart,
+          ]
+        : ['-cp', unidbgJar, 'com.tvbox.MyCryptoDecryptor', libPath, keyPart];
+      const result = spawnSync('java', javaArgs, {
+        encoding: 'utf8',
+        timeout: 60000,
+        maxBuffer: 50 * 1024 * 1024,
+        windowsHide: true,
+      });
+      if (result.status !== 0) {
+        console.warn(
+          '[JarLoader] callExtDeSync: subprocess failed exit=',
+          result.status,
+          'stderr=',
+          (result.stderr || '').substring(0, 200),
+        );
+        return '';
+      }
+      const base64 = (result.stdout || '').trim();
+      if (!base64) {
+        console.warn('[JarLoader] callExtDeSync: empty stdout');
+        return '';
+      }
+      return base64;
+    } catch (e: any) {
+      console.warn('[JarLoader] callExtDeSync failed:', e.message);
+      return '';
+    }
+  }
+
+  /**
+   * Synchronous call to MyCrypto.Awdm(String, byte[]) via unidbg subprocess.
+   * Used by AnimeMiaoWu (and similar) spiders to decrypt API response data.
+   *
+   * The native Awdm method takes a hex key string and cipher bytes, returns
+   * the decrypted bytes. We pass them through and return the plaintext as
+   * a UTF-8 string (so JS can JSON.parse it directly).
+   *
+   * Returns: decrypted UTF-8 string, or empty string on failure.
+   */
+  public callAwdmSync(keyHex: string, cipherBase64: string): string {
+    try {
+      if (!keyHex || typeof keyHex !== 'string') return '';
+      if (!cipherBase64 || typeof cipherBase64 !== 'string') return '';
+      // Validate keyHex (must be hex chars only)
+      if (!/^[0-9a-fA-F]+$/.test(keyHex)) {
+        console.warn(
+          '[JarLoader] callAwdmSync: invalid keyHex (non-hex):',
+          keyHex.substring(0, 50),
+        );
+        return '';
+      }
+      // Validate cipherBase64 (basic check - chars used by base64)
+      if (!/^[A-Za-z0-9+/=\s]+$/.test(cipherBase64)) {
+        console.warn(
+          '[JarLoader] callAwdmSync: invalid cipherBase64 (non-base64)',
+        );
+        return '';
+      }
+      const nativeLibDir = path.join(this.jarCacheDir, 'native_libs');
+      const libPath = path.join(nativeLibDir, 'libdecjni.so');
+      if (!fs.existsSync(libPath)) {
+        console.warn(
+          '[JarLoader] callAwdmSync: libdecjni.so not found at',
+          libPath,
+        );
+        return '';
+      }
+      const awencCandidates = [
+        path.join(process.cwd(), 'tools', 'assets', 'wexguard_v8.so'),
+        path.join(app.getAppPath(), 'tools', 'assets', 'wexguard_v8.so'),
+        path.join(this.jarCacheDir, 'wexguard', 'assets', 'wexguard_v8.so'),
+      ];
+      let awencSoPath = '';
+      for (const p of awencCandidates) {
+        if (fs.existsSync(p)) {
+          awencSoPath = p;
+          break;
+        }
+      }
+      const candidates = [
+        path.join(
+          process.cwd(),
+          'tools',
+          'runtime',
+          'unidbg-loader-1.0.0-shaded.jar',
+        ),
+        path.join(
+          process.cwd(),
+          'tools',
+          'unidbg-loader',
+          'target',
+          'unidbg-loader-1.0.0.jar',
+        ),
+        path.join(
+          app.getAppPath(),
+          'tools',
+          'runtime',
+          'unidbg-loader-1.0.0-shaded.jar',
+        ),
+        path.join(
+          app.getAppPath(),
+          'tools',
+          'unidbg-loader',
+          'target',
+          'unidbg-loader-1.0.0.jar',
+        ),
+      ];
+      let unidbgJar = '';
+      for (const p of candidates) {
+        if (fs.existsSync(p)) {
+          unidbgJar = p;
+          break;
+        }
+      }
+      if (!unidbgJar) {
+        console.warn('[JarLoader] callAwdmSync: unidbg-loader JAR not found');
+        return '';
+      }
+      // Windows command line length limit (~32767 chars). Large cipher is
+      // written to a temp file and passed via 'awdmFile' mode to avoid the
+      // limit. Small ciphers can use inline 'awdm' mode.
+      const MAX_INLINE_CIPHER_LEN = 30000;
+      let mode = 'awdm';
+      let cipherArg = cipherBase64;
+      let tmpFile = '';
+      if (cipherBase64.length > MAX_INLINE_CIPHER_LEN) {
+        const os = require('os');
+        tmpFile = path.join(
+          os.tmpdir(),
+          `tvbox_cipher_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.b64`,
+        );
+        fs.writeFileSync(tmpFile, cipherBase64, 'utf8');
+        mode = 'awdmFile';
+        cipherArg = tmpFile;
+      }
+      try {
+        const javaArgs = [
+          '-cp',
+          unidbgJar,
+          'com.tvbox.MyCryptoDecryptor',
+          libPath,
+          awencSoPath,
+          mode,
+          keyHex,
+          cipherArg,
+        ];
+        const result = spawnSync('java', javaArgs, {
+          encoding: 'utf8',
+          timeout: 120000,
+          maxBuffer: 100 * 1024 * 1024,
+          windowsHide: true,
+        });
+        if (result.status !== 0) {
+          console.warn(
+            '[JarLoader] callAwdmSync: subprocess failed exit=',
+            result.status,
+            'stderr=',
+            (result.stderr || '').substring(0, 200),
+          );
+          return '';
+        }
+        // stdout is Base64-encoded decrypted bytes
+        const base64 = (result.stdout || '').trim();
+        if (!base64) {
+          console.warn('[JarLoader] callAwdmSync: empty stdout');
+          return '';
+        }
+        // Decode Base64 to UTF-8 string for JS consumption
+        try {
+          return Buffer.from(base64, 'base64').toString('utf8');
+        } catch (e: any) {
+          console.warn(
+            '[JarLoader] callAwdmSync: base64 decode failed:',
+            e.message,
+          );
+          return '';
+        }
+      } finally {
+        if (tmpFile) {
+          try {
+            fs.unlinkSync(tmpFile);
+          } catch {}
+        }
+      }
+    } catch (e: any) {
+      console.warn('[JarLoader] callAwdmSync failed:', e.message);
+      return '';
+    }
   }
 
   /**
@@ -8298,6 +10148,14 @@ export class JarLoader {
   /**
    * Call Proxy.proxy() static method (fallback).
    * This is the original implementation before spider.proxyLocal support.
+   *
+   * IMPORTANT: When the recent spider has its own classloader (e.g. 肥猫's
+   * Config spider, newwex's WexConfig spider, itv666's AAConfigAmns spider),
+   * use THAT classloader — not guardClassLoader. Each config spider's JAR
+   * contains its own ProxyOrigin with its own wexconfig page layout. Using
+   * guardClassLoader (which only sees the wexguard JAR's ProxyOrigin) makes
+   * every config center display 王小二's NewWexFnw page regardless of which
+   * config is active.
    */
   private proxyInvokeStatic(params: Record<string, string>): {
     status: number;
@@ -8311,7 +10169,21 @@ export class JarLoader {
       );
       return null;
     }
+    // Pick the classloader that sees the right ProxyOrigin for the active
+    // spider. Prefer the spider's own classloader (each config spider JAR
+    // contains its own ProxyOrigin); fall back to guardClassLoader (which
+    // sees the wexguard ProxyOrigin) only when no per-spider classloader
+    // is available.
+    const spiderInstance = this.recentSpiderKey
+      ? this.spiders.get(this.recentSpiderKey)
+      : undefined;
+    const targetCL = spiderInstance?.classLoader || this.guardClassLoader;
+    const savedCL = this.java.getClassLoader();
     try {
+      if (targetCL) {
+        this.java.setClassLoader(targetCL);
+        this.java.clearClassProxies();
+      }
       const ProxyClass = this.java.importClass(
         'com.github.catvod.spider.ProxyOrigin',
       );
@@ -8371,6 +10243,15 @@ export class JarLoader {
     } catch (e: any) {
       console.error('[JarLoader] proxyInvokeStatic error:', e.message || e);
       return null;
+    } finally {
+      // Restore original classloader so subsequent spider calls see the
+      // expected classloader state.
+      try {
+        this.java.setClassLoader(savedCL);
+        this.java.clearClassProxies();
+      } catch {
+        // ignore restore failure
+      }
     }
   }
 
@@ -8484,6 +10365,7 @@ export function registerJarLoaderIPC(): void {
     'jar:testGuardSources',
     'jar:debugClassLoad',
     'jar:getSpiderState',
+    'jar:inspectWrappedSpider',
   ];
   for (const name of handlerNames) {
     try {
@@ -8675,7 +10557,13 @@ export function registerJarLoaderIPC(): void {
     return true;
   });
 
-  // Clear spider file cache directory
+  // Clear spider file cache directory.
+  // NOTE: We intentionally do NOT clear the in-memory `this.spiders` Map here.
+  // Re-creating a spider is expensive (JAR load + native lib setup), and
+  // initSpider() already re-initializes the cached instance with the current
+  // ext before each method call. Clearing the in-memory instance on every
+  // force-reload caused regressions (spiders returning empty results due to
+  // init race conditions).
   ipcMain.handle('jar:clearSpiderCache', async (_event, spiderKey: string) => {
     try {
       const tmpDir = process.env.TEMP || process.env.TMP || '/tmp';
@@ -8683,12 +10571,13 @@ export function registerJarLoaderIPC(): void {
         tmpDir,
         'tvbox_' + jarLoader.sanitizeSpiderKey(spiderKey),
       );
+      let fileCleared = false;
       if (fs.existsSync(spiderCacheDir)) {
         fs.rmSync(spiderCacheDir, { recursive: true, force: true });
-        console.log('[JarLoader] Cleared spider file cache:', spiderCacheDir);
-        return { success: true };
+        fileCleared = true;
+        console.log('[JarLoader] Cleared spider file cache:', spiderKey);
       }
-      return { success: false, error: 'Cache directory not found' };
+      return { success: true, fileCleared };
     } catch (e: any) {
       console.error('[JarLoader] clearSpiderCache error:', e.message);
       return { success: false, error: e.message };
@@ -8729,6 +10618,92 @@ export function registerJarLoaderIPC(): void {
       return { success: false, error: e.message };
     }
   });
+
+  // Diagnostic: inspect wrapped spider's fields for Guard spiders.
+  // Used to verify cookie/base_url fields are populated after init
+  // (e.g. LiveBiLi stores cookie in field `oOo0oOo0Oo0oO0Oo`).
+  ipcMain.handle(
+    'jar:inspectWrappedSpider',
+    async (_event, spiderKey: string, fieldNames: string[]) => {
+      try {
+        const instance = (jarLoader as any).spiders.get(spiderKey);
+        if (!instance || !instance.spider) {
+          return { success: false, error: 'spider not found' };
+        }
+        const result: any = {
+          success: true,
+          spiderKey,
+          isGuard: instance.isGuard,
+          className: instance.className,
+        };
+        // Read top-level fields directly
+        for (const f of fieldNames) {
+          try {
+            result['top_' + f] = String(instance.spider[f]);
+          } catch {
+            result['top_' + f] = '(inaccessible)';
+          }
+        }
+        // For Guard spiders, walk into wrapped spider via reflection
+        if (instance.isGuard) {
+          try {
+            const guardSpider = instance.spider;
+            const guardClass = guardSpider.getClassSync
+              ? guardSpider.getClassSync()
+              : guardSpider.getClass();
+            // Find wrapped spider field `oOoOoOoOoOoOoO0o` up the hierarchy
+            let field: any = null;
+            let cls: any = guardClass;
+            for (let i = 0; i < 10 && cls; i++) {
+              try {
+                field = cls.getDeclaredFieldSync
+                  ? cls.getDeclaredFieldSync('oOoOoOoOoOoOoO0o')
+                  : cls.getDeclaredField('oOoOoOoOoOoOoO0o');
+                if (field) break;
+              } catch {
+                /* try parent */
+              }
+              cls = cls.getSuperclassSync
+                ? cls.getSuperclassSync()
+                : cls.getSuperclass();
+            }
+            if (!field) {
+              result.wrappedError = 'wrapped field not found';
+            } else {
+              field.setAccessibleSync
+                ? field.setAccessibleSync(true)
+                : field.setAccessible(true);
+              const wrapped = field.getSync
+                ? field.getSync(guardSpider)
+                : field.get(guardSpider);
+              if (!wrapped) {
+                result.wrappedError = 'wrapped spider is null';
+              } else {
+                const wrappedClass = wrapped.getClassSync
+                  ? wrapped.getClassSync()
+                  : wrapped.getClass();
+                result.wrappedClassName = wrappedClass.getNameSync
+                  ? wrappedClass.getNameSync()
+                  : wrappedClass.getName();
+                for (const f of fieldNames) {
+                  try {
+                    result['wrapped_' + f] = String(wrapped[f]);
+                  } catch {
+                    result['wrapped_' + f] = '(inaccessible)';
+                  }
+                }
+              }
+            }
+          } catch (e: any) {
+            result.wrappedError = e.message;
+          }
+        }
+        return result;
+      } catch (e: any) {
+        return { success: false, error: e.message };
+      }
+    },
+  );
 
   // Test all sources' homeContent - returns array of per-source results
   ipcMain.handle('jar:testAllSources', async () => {
@@ -8825,6 +10800,54 @@ export function registerJarLoaderIPC(): void {
         return results;
       } catch (e: any) {
         return { success: false, error: e.message };
+      }
+    },
+  );
+
+  // Synchronous extDe call - used by JS spiders via ipcRenderer.sendSync().
+  // Must be sync because the JS spider sandbox runs in a VM with sync req().
+  // Returns Base64-encoded 32-byte AES key+IV, or empty string on failure.
+  // Cache results to avoid repeated subprocess spawns for the same keyPart.
+  const extDeCache = new Map<string, string>();
+  ipcMain.on('jar:callExtDeSync', (event, keyPart: string) => {
+    try {
+      if (extDeCache.has(keyPart)) {
+        event.returnValue = extDeCache.get(keyPart);
+        return;
+      }
+      const result = jarLoader.callExtDeSync(keyPart);
+      if (result) {
+        extDeCache.set(keyPart, result);
+      }
+      event.returnValue = result;
+    } catch (e: any) {
+      console.warn('[JarLoader] jar:callExtDeSync failed:', e.message);
+      event.returnValue = '';
+    }
+  });
+
+  // Synchronous Awdm call - used by JS spiders (AnimeMiaoWu etc.) via
+  // ipcRenderer.sendSync(). Returns decrypted UTF-8 string, or empty on
+  // failure. Cache by (keyHex, cipherHash) to avoid repeated subprocess
+  // spawns for the same cipher.
+  const awdmCache = new Map<string, string>();
+  ipcMain.on(
+    'jar:callAwdmSync',
+    (event, keyHex: string, cipherBase64: string) => {
+      try {
+        const cacheKey = `${keyHex}|${cipherBase64.length}|${cipherBase64.substring(0, 32)}|${cipherBase64.substring(cipherBase64.length - 32)}`;
+        if (awdmCache.has(cacheKey)) {
+          event.returnValue = awdmCache.get(cacheKey);
+          return;
+        }
+        const result = jarLoader.callAwdmSync(keyHex, cipherBase64);
+        if (result) {
+          awdmCache.set(cacheKey, result);
+        }
+        event.returnValue = result;
+      } catch (e: any) {
+        console.warn('[JarLoader] jar:callAwdmSync failed:', e.message);
+        event.returnValue = '';
       }
     },
   );

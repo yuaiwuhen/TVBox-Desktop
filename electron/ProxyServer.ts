@@ -27,6 +27,7 @@ import { QuarkPanService } from './QuarkPanService';
 import { UCPanService } from './UCPanService';
 import { BaiduPanService } from './BaiduPanService';
 import { dnsOptimizer } from './DnsOptimizer';
+import QRCode from 'qrcode';
 
 // __dirname for ES Modules — used to locate the project root in dev mode.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -367,6 +368,7 @@ const UPSTREAM_HEADER_DEFAULTS: Record<
 
 export class ProxyServer {
   private server: http.Server | null = null;
+  private gyingServer: http.Server | null = null;
   private port: number = -1;
   private onPortChanged: PortCallback | null = null;
   // 优先监听 9978 端口（spider的ProxyOrigin.findPort()扫描范围是9978-9999）
@@ -374,6 +376,9 @@ export class ProxyServer {
   private static readonly PREFERRED_PORT = 9978;
   private static readonly START_PORT = 9978;
   private static readonly END_PORT = 9999;
+  // NewGuanYing spider hardcodes http://127.0.0.1:8096/gying for PoW solving.
+  // We listen on 8096 separately just for /gying so the spider can reach us.
+  private static readonly GYING_PORT = 8096;
   private contentLengthCache = new Map<string, number>();
   private dnsOptimized: boolean = false; // DNS优化是否已初始化
   private cdnOptimized: boolean = false; // CDN优化是否已初始化
@@ -585,6 +590,149 @@ export class ProxyServer {
   }
 
   /**
+   * Start a separate HTTP listener on port 8096 for /gying requests.
+   * NewGuanYing spider hardcodes http://127.0.0.1:8096/gying for PoW solving
+   * (see NewGuanYing.init(Context)). The main ProxyServer listens on 9978,
+   * so we need this extra listener on 8096 to handle the spider's PoW POST.
+   *
+   * Resolves with the actual port (8096, or -1 if unavailable).
+   */
+  startGyingListener(): Promise<number> {
+    return new Promise<number>((resolve) => {
+      if (this.gyingServer) {
+        resolve(ProxyServer.GYING_PORT);
+        return;
+      }
+      // 30 retries over ~90s — covers zombie JVM cleanup and Windows
+      // TIME_WAIT (default 2*MSL = ~2min, but 127.0.0.1 usually clears faster).
+      const maxAttempts = 30;
+      const tryBind = (attempt: number) => {
+        const server = http.createServer((req, res) => {
+          const url = req.url || '/';
+          const pathname = url.split('?')[0];
+          if (pathname === '/gying') {
+            this.handleGyingPoW(req, res);
+            return;
+          }
+          res.writeHead(404, { 'Content-Type': 'text/plain' });
+          res.end('Not Found');
+        });
+        server.on('error', (e: NodeJS.ErrnoException) => {
+          if (e.code === 'EADDRINUSE' && attempt < maxAttempts) {
+            // Port held by zombie process or in TIME_WAIT — retry.
+            if (attempt === 1 || attempt % 5 === 0) {
+              console.warn(
+                `[ProxyServer] /gying port ${ProxyServer.GYING_PORT} in use (attempt ${attempt}/${maxAttempts}), retrying...`,
+              );
+            }
+            // Exponential backoff capped at 5s: 1s, 1s, 2s, 2s, 4s, 4s, ...
+            const delay = Math.min(5000, 1000 * Math.pow(1.4, Math.floor(attempt / 2)));
+            setTimeout(() => tryBind(attempt + 1), delay);
+            return;
+          }
+          if (e.code === 'EADDRINUSE') {
+            console.warn(
+              `[ProxyServer] /gying port ${ProxyServer.GYING_PORT} still in use after ${maxAttempts} attempts. /gying will be served on the main port only.`,
+            );
+          } else {
+            console.warn(`[ProxyServer] /gying listener error:`, e.message);
+          }
+          resolve(-1);
+        });
+        server.listen(ProxyServer.GYING_PORT, '127.0.0.1', () => {
+          this.gyingServer = server;
+          console.log(
+            `[ProxyServer] /gying listener on http://127.0.0.1:${ProxyServer.GYING_PORT}`,
+          );
+          resolve(ProxyServer.GYING_PORT);
+        });
+      };
+      tryBind(1);
+    });
+  }
+
+  /**
+   * Handle POST /gying — solve NewGuanYing's PoW challenge.
+   *
+   * Request body: JSON {N: "<hex>", x: "<hex>", t: <int>}
+   * Response body: JSON {"y": "<hex solution>"}
+   *
+   * Algorithm (mirrors browser powSolve.js):
+   *   y = x
+   *   repeat t times: y = (y * y) mod N
+   *   return y as hex
+   *
+   * Uses Node.js BigInt for arbitrary-precision arithmetic. With t=400000
+   * and 2048-bit N, this takes ~1-3 seconds on a modern CPU.
+   */
+  private handleGyingPoW(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): void {
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        const body = Buffer.concat(chunks).toString('utf8');
+        const challenge = JSON.parse(body);
+        const N = challenge.N;
+        const x = challenge.x;
+        const t = Number(challenge.t);
+        if (!N || !x || typeof t !== 'number' || t <= 0) {
+          console.warn(
+            '[ProxyServer] /gying: invalid challenge, keys=',
+            Object.keys(challenge),
+          );
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'invalid challenge' }));
+          return;
+        }
+
+        console.log(
+          `[ProxyServer] /gying: solving PoW t=${t} N_len=${N.length} x_len=${x.length}`,
+        );
+        const t0 = Date.now();
+
+        // BigInt-based modular squaring: y = x^(2^t) mod N
+        const bigN = BigInt('0x' + N);
+        let y = BigInt('0x' + x);
+        // Yield to the event loop periodically so we don't block other
+        // proxy requests during the ~1-3s computation.
+        const CHUNK = 50000;
+        const solve = (start: number) => {
+          const end = Math.min(t, start + CHUNK);
+          for (let i = start; i < end; i++) {
+            y = (y * y) % bigN;
+          }
+          if (end < t) {
+            setImmediate(() => solve(end));
+          } else {
+            const durationSec = ((Date.now() - t0) / 1000).toFixed(2);
+            const yHex = y.toString(16);
+            console.log(
+              `[ProxyServer] /gying: solved in ${durationSec}s, y_len=${yHex.length}`,
+            );
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ y: yHex }));
+          }
+        };
+        solve(0);
+      } catch (e: any) {
+        console.warn('[ProxyServer] /gying: error:', e.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    req.on('error', (e) => {
+      console.warn('[ProxyServer] /gying: req error:', e.message);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  }
+
+  /**
    * Try preferred port first, then fall back to START_PORT-END_PORT range.
    */
   private tryListenWithPreferred(
@@ -658,9 +806,20 @@ export class ProxyServer {
     // Allow HEAD for video format probing. Node.js http automatically
     // suppresses response body for HEAD requests (Content-Length is still
     // set correctly from writeHead/end calls).
-    if (method !== 'GET' && method !== 'HEAD') {
+    // Exception: /gying must accept POST — NewGuanYing spider POSTs the
+    // PoW challenge JSON to http://127.0.0.1:<port>/gying and expects a
+    // {"y":"<hex>"} response.
+    if (method !== 'GET' && method !== 'HEAD' && pathname !== '/gying') {
       res.writeHead(405, { 'Content-Type': 'text/plain' });
       res.end('Method Not Allowed');
+      return;
+    }
+
+    // NewGuanYing PoW solver: spider POSTs {N, x, t} and expects {"y": "<hex>"}.
+    // The algorithm is t iterations of modular squaring: y = x^(2^t) mod N.
+    // Mirrors the browser's powSolve.js (static.filejin.ru/.../powSolve-*.js).
+    if (pathname === '/gying') {
+      this.handleGyingPoW(req, res);
       return;
     }
 
@@ -802,7 +961,9 @@ export class ProxyServer {
       const kaiserMode = this.parseKaiserMode(params);
       console.log(
         '[ProxyServer] /kaiser →',
-        panType === 'quark' && kaiserMode ? 'streamPanKaiser' : 'streamPanDirect',
+        panType === 'quark' && kaiserMode
+          ? 'streamPanKaiser'
+          : 'streamPanDirect',
         panType,
         decoded.substring(0, 100),
       );
@@ -818,6 +979,9 @@ export class ProxyServer {
         );
         return;
       }
+      // For quark, pass shareId/fid so streamPanDirect can re-resolve on 412.
+      const shareId = params['shareId'] || '';
+      const fid = params['fid'] || '';
       void this.streamPanDirect(
         decoded,
         req,
@@ -825,6 +989,8 @@ export class ProxyServer {
         panType,
         headerOverride,
         externalPlayer,
+        shareId,
+        fid,
       );
       return;
     }
@@ -909,9 +1075,15 @@ export class ProxyServer {
         // Extract real image URL (everything before the first @Referer, @User-Agent, or @Cookie)
         let imageUrl = rawUrl;
         const firstHeaderIndex = Math.min(
-          rawUrl.indexOf('@Referer=') >= 0 ? rawUrl.indexOf('@Referer=') : Infinity,
-          rawUrl.indexOf('@User-Agent=') >= 0 ? rawUrl.indexOf('@User-Agent=') : Infinity,
-          rawUrl.indexOf('@Cookie=') >= 0 ? rawUrl.indexOf('@Cookie=') : Infinity,
+          rawUrl.indexOf('@Referer=') >= 0
+            ? rawUrl.indexOf('@Referer=')
+            : Infinity,
+          rawUrl.indexOf('@User-Agent=') >= 0
+            ? rawUrl.indexOf('@User-Agent=')
+            : Infinity,
+          rawUrl.indexOf('@Cookie=') >= 0
+            ? rawUrl.indexOf('@Cookie=')
+            : Infinity,
         );
         if (firstHeaderIndex !== Infinity) {
           imageUrl = rawUrl.substring(0, firstHeaderIndex);
@@ -936,7 +1108,10 @@ export class ProxyServer {
           const decodedPath = decodeURIComponent(actionPath);
           // decodedPath looks like: /proxy?do=wexdanmu&danmuurl=...
           const actionUrl = `http://127.0.0.1:${this.port}${decodedPath.startsWith('/') ? '' : '/'}${decodedPath}`;
-          console.log('[ProxyServer] /action: redirecting to danmu proxy URL:', actionUrl.substring(0, 120));
+          console.log(
+            '[ProxyServer] /action: redirecting to danmu proxy URL:',
+            actionUrl.substring(0, 120),
+          );
           res.writeHead(302, { Location: actionUrl });
           res.end();
           return;
@@ -955,12 +1130,53 @@ export class ProxyServer {
       return;
     }
 
+    // wexconfig: JAR's web configuration page for pan login/cookie management.
+    // Most actions (addQuark, delQuark, saveCookieParamChunk, loginCancel, etc.)
+    // return JSON and are handled by the JAR's Proxy.proxy() via the generic
+    // invokeSpiderProxy path below. The "qr" action generates a QR code image
+    // — JAR uses Bitmap.compress() which our Bitmap stub cannot render to real
+    // pixels, so we intercept it here and generate the PNG via Node qrcode.
+    // Params mirror JAR's ProxyOrigin.proxy(): action=qr&text=<scan_url>.
+    if (params['do'] === 'wexconfig' && params['action'] === 'qr') {
+      const text = params['text'] || '';
+      if (!text) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Missing "text" parameter for wexconfig qr action');
+        return;
+      }
+      console.log(
+        '[ProxyServer] wexconfig qr: generating QR for text len=',
+        text.length,
+      );
+      QRCode.toBuffer(text, {
+        width: 320,
+        margin: 1,
+        color: { dark: '#000000', light: '#ffffff' },
+      })
+        .then((pngBuffer: Buffer) => {
+          res.writeHead(200, {
+            'Content-Type': 'image/png',
+            'Content-Length': String(pngBuffer.length),
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+          });
+          res.end(pngBuffer);
+        })
+        .catch((e: any) => {
+          console.error(
+            '[ProxyServer] wexconfig qr generation failed:',
+            e.message,
+          );
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('QR code generation failed: ' + e.message);
+        });
+      return;
+    }
+
     // Pan direct streaming (GoProxy replacement).
     // JarLoader rewrites /kaiser → /proxy?do=quarkDirect|ucDirect|baiduDirect.
     // Also used by rewritePanM3u8Manifest for HLS segment URLs.
-    const directMatch = (params['do'] || '').match(
-      /^(quark|uc|baidu)Direct$/i,
-    );
+    const directMatch = (params['do'] || '').match(/^(quark|uc|baidu)Direct$/i);
     if (directMatch) {
       const panType = directMatch[1].toLowerCase() as PanType;
       const downloadUrl = params['url'] || '';
@@ -1026,6 +1242,9 @@ export class ProxyServer {
         );
         return;
       }
+      // For quark, pass shareId/fid so streamPanDirect can re-resolve on 412.
+      const shareId = params['shareId'] || '';
+      const fid = params['fid'] || '';
       void this.streamPanDirect(
         decoded,
         req,
@@ -1033,6 +1252,8 @@ export class ProxyServer {
         panType,
         headerOverride,
         externalPlayer,
+        shareId,
+        fid,
       );
       return;
     }
@@ -1048,6 +1269,18 @@ export class ProxyServer {
       res.writeHead(400, { 'Content-Type': 'text/plain' });
       res.end('Missing "do" parameter');
       return;
+    }
+
+    // Config center iframe includes siteKey=<config_center_source_key> so
+    // the proxy can route /proxy?do=wexconfig to the correct spider
+    // (WexConfig / Config / AAConfigAmns). Without this, all configs share
+    // whichever spider was last cached, causing every config center to
+    // display 王小二's WexConfig page. Subsequent requests from inside the
+    // iframe (e.g. ?do=wexconfig&action=qr) omit siteKey and reuse the
+    // recentSpiderKey set here.
+    const siteKeyParam = params['siteKey'];
+    if (siteKeyParam) {
+      jarLoader.setRecentSpider(siteKeyParam, 'jar');
     }
 
     // All proxy requests now go through jarLoader.proxyInvoke which will:
@@ -1227,6 +1460,8 @@ export class ProxyServer {
           panType,
           headerOverride,
           externalPlayer,
+          params['shareId'] || '',
+          params['fid'] || '',
         );
         return;
       }
@@ -1262,14 +1497,21 @@ export class ProxyServer {
     // Android uses GoProxy (libwexproxy.so, ARM-only) at 127.0.0.1:8096/danmuku
     // for danmu search. On PC, we search public danmu API directly instead.
     if (params['do'] === 'wexautodanmu') {
-      const danmuXml = await ProxyServer.searchDanmuFromBilibili(params['vod_name'], params['ep_name']);
+      const danmuXml = await ProxyServer.searchDanmuFromBilibili(
+        params['vod_name'],
+        params['ep_name'],
+      );
       if (danmuXml) {
         console.log('[ProxyServer] wexautodanmu: found danmu, returning XML');
-        res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8' });
+        res.writeHead(200, {
+          'Content-Type': 'application/xml; charset=utf-8',
+        });
         res.end(danmuXml);
         return;
       }
-      console.log('[ProxyServer] wexautodanmu: no danmu found, falling back to JAR');
+      console.log(
+        '[ProxyServer] wexautodanmu: no danmu found, falling back to JAR',
+      );
     }
 
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1434,6 +1676,37 @@ export class ProxyServer {
       return;
     }
 
+    // wexconfig HTML page: inject a <style> block so the cross-origin
+    // iframe's scrollbar matches the app's slim scrollbar style. Parent
+    // page CSS can't reach into a cross-origin iframe, so we inline it.
+    if (
+      params['do'] === 'wexconfig' &&
+      effectiveMime.includes('text/html') &&
+      !res.headersSent
+    ) {
+      try {
+        const htmlBuffer = jarLoader.readJavaInputStream(stream);
+        const injected = this.injectWexConfigScrollbarCss(htmlBuffer);
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Length': String(injected.length),
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-cache',
+        });
+        res.end(injected);
+      } catch (e: any) {
+        console.error(
+          '[ProxyServer] wexconfig HTML injection failed:',
+          e.message,
+        );
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('Failed to render config page');
+        }
+      }
+      return;
+    }
+
     try {
       res.writeHead(effectiveStatus, headerObj);
     } catch {
@@ -1565,6 +1838,33 @@ export class ProxyServer {
         },
       );
     }
+  }
+
+  /**
+   * Inject a <style> block into the wexconfig HTML so the cross-origin
+   * iframe scrollbar matches the app's slim scrollbar style. Uses
+   * semi-transparent gray so the thumb stays visible on both the JAR's
+   * light and dark page backgrounds.
+   */
+  private injectWexConfigScrollbarCss(html: Buffer): Buffer {
+    const css =
+      '::-webkit-scrollbar{width:8px;height:8px}' +
+      '::-webkit-scrollbar-track{background:transparent}' +
+      '::-webkit-scrollbar-thumb{background:rgba(128,128,128,0.4);border-radius:4px}' +
+      '::-webkit-scrollbar-thumb:hover{background:rgba(128,128,128,0.65)}';
+    const styleTag = `<style data-wexconfig-scrollbar>${css}</style>`;
+    const htmlStr = html.toString('utf8');
+
+    const headMatch = htmlStr.match(/<head[^>]*>/i);
+    let modified: string;
+    if (headMatch && headMatch.index !== undefined) {
+      const insertAt = headMatch.index + headMatch[0].length;
+      modified =
+        htmlStr.slice(0, insertAt) + styleTag + htmlStr.slice(insertAt);
+    } else {
+      modified = styleTag + htmlStr;
+    }
+    return Buffer.from(modified, 'utf8');
   }
 
   /**
@@ -2002,9 +2302,7 @@ export class ProxyServer {
   /**
    * Detect pan type from a CDN download URL hostname.
    */
-  private detectPanTypeFromUrl(
-    downloadUrl: string,
-  ): PanType | null {
+  private detectPanTypeFromUrl(downloadUrl: string): PanType | null {
     const u = (downloadUrl || '').toLowerCase();
     if (u.includes('quark.cn') || u.includes('.quark.')) return 'quark';
     if (u.includes('uc.cn') || u.includes('drive.uc')) return 'uc';
@@ -2046,7 +2344,11 @@ export class ProxyServer {
     panType: PanType,
     headerOverride?: Record<string, string>,
     rangeHeader?: string,
-  ): { headers: Record<string, string>; cookie: string | null; userAgent: string } {
+  ): {
+    headers: Record<string, string>;
+    cookie: string | null;
+    userAgent: string;
+  } {
     let cookie: string | null = null;
     let referer = '';
     let userAgent = '';
@@ -2119,9 +2421,15 @@ export class ProxyServer {
         },
         (upstreamRes) => {
           const contentType = String(upstreamRes.headers['content-type'] || '');
-          const contentRange = String(upstreamRes.headers['content-range'] || '');
-          const contentLength = String(upstreamRes.headers['content-length'] || '');
-          const acceptRanges = String(upstreamRes.headers['accept-ranges'] || '');
+          const contentRange = String(
+            upstreamRes.headers['content-range'] || '',
+          );
+          const contentLength = String(
+            upstreamRes.headers['content-length'] || '',
+          );
+          const acceptRanges = String(
+            upstreamRes.headers['accept-ranges'] || '',
+          );
           const status = upstreamRes.statusCode || 0;
           let totalLength = -1;
           if (contentRange) {
@@ -2243,9 +2551,16 @@ export class ProxyServer {
       `streamPanKaiser START panType=${panType} url=${downloadUrl} thread=${kaiserMode.threadCount} chunkKB=${Math.floor(kaiserMode.chunkSizeBytes / 1024)} key=${kaiserMode.strategyKey} type=${kaiserMode.strategyType} range=${clientRangeHeader || ''}`,
     );
 
-    let probe: { totalLength: number; contentType: string; supportsRange: boolean };
+    let probe: {
+      totalLength: number;
+      contentType: string;
+      supportsRange: boolean;
+    };
     try {
-      probe = await this.probePanDirectResource(downloadUrl, baseHeaders.headers);
+      probe = await this.probePanDirectResource(
+        downloadUrl,
+        baseHeaders.headers,
+      );
     } catch (e: any) {
       console.warn(
         '[ProxyServer] streamPanKaiser: probe failed, fallback to direct:',
@@ -2306,7 +2621,10 @@ export class ProxyServer {
       }
     }
 
-    const clientRange = this.parseClientRange(clientRangeHeader, probe.totalLength);
+    const clientRange = this.parseClientRange(
+      clientRangeHeader,
+      probe.totalLength,
+    );
     if (!clientRange) {
       res.writeHead(416, {
         'Content-Type': 'text/plain',
@@ -2385,7 +2703,10 @@ export class ProxyServer {
     const fetchChunk = (chunkIndex: number) => {
       activeCount++;
       const chunkStart = chunkIndex * chunkSize;
-      const chunkEnd = Math.min(probe.totalLength - 1, chunkStart + chunkSize - 1);
+      const chunkEnd = Math.min(
+        probe.totalLength - 1,
+        chunkStart + chunkSize - 1,
+      );
       const rangeHeader = `bytes=${chunkStart}-${chunkEnd}`;
       const parsedUrl = new URL(downloadUrl);
       const isHttps = parsedUrl.protocol === 'https:';
@@ -2597,6 +2918,8 @@ export class ProxyServer {
     panType: 'quark' | 'uc' | 'baidu',
     headerOverride?: Record<string, string>,
     isExternalPlayer: boolean = false,
+    shareId: string = '',
+    fid: string = '',
   ): Promise<void> {
     let cookie: string | null = null;
     let referer = '';
@@ -2739,8 +3062,91 @@ export class ProxyServer {
               debugLog(
                 `streamPanDirect ERROR_BODY len=${body.length} body=${body.substring(0, 2000)}`,
               );
-              // Send the error response to the browser FIRST, so the video
-              // player doesn't wait for the login validity check below.
+
+              // 412/400/403 from Quark CDN: auth_key may be stale (bound to
+              // old __puus) or the CDN may have invalidated the URL early.
+              // Quark CDN returns:
+              //   - 412 Precondition Failed (auth_key fully expired)
+              //   - 400 with x-auth-msg: 301 (auth_key rejected — happens
+              //     when __puus was refreshed but cached URL still uses the
+              //     old auth_key)
+              //   - 403 Forbidden (rare, usually for region restrictions)
+              // If we have shareId+fid and login is still valid, re-resolve
+              // the download URL (which refreshes __puus) and retry once.
+              if (
+                (status === 412 || status === 400 || status === 403) &&
+                panType === 'quark' &&
+                shareId &&
+                fid &&
+                !res.headersSent
+              ) {
+                let loginValid = true;
+                try {
+                  const validity = await QuarkPanService.checkTokenValid();
+                  loginValid = validity.valid;
+                } catch (e: any) {
+                  loginValid = false;
+                }
+                if (loginValid) {
+                  console.log(
+                    '[ProxyServer] streamPanDirect: 412 with valid login, re-resolving Quark URL for',
+                    `${shareId}:${fid}`,
+                  );
+                  try {
+                    // Clear the cache entry first so re-resolve actually
+                    // re-fetches a fresh URL (otherwise resolveQuarkDownloadUrl
+                    // would just return the same cached URL that the CDN
+                    // just rejected).
+                    QuarkPanService.invalidatePlayUrlCache(
+                      `${shareId}:${fid}`,
+                    );
+                    const freshUrl =
+                      await QuarkPanService.resolveQuarkDownloadUrl(
+                        shareId,
+                        fid,
+                      );
+                    if (freshUrl && freshUrl !== downloadUrl) {
+                      console.log(
+                        '[ProxyServer] streamPanDirect: got fresh URL, retrying upstream request',
+                      );
+                      // Recursive call with fresh URL. The inner call rebuilds
+                      // upstreamHeaders from QuarkPanService.getSyncedCookie()
+                      // which now has the refreshed __puus.
+                      // Pass empty shareId/fid to prevent infinite retry loop.
+                      this.streamPanDirect(
+                        freshUrl,
+                        req,
+                        res,
+                        panType,
+                        headerOverride,
+                        isExternalPlayer,
+                        '', // clear shareId/fid to prevent another retry
+                        '',
+                      );
+                      return;
+                    }
+                  } catch (e: any) {
+                    console.warn(
+                      '[ProxyServer] streamPanDirect: re-resolve failed:',
+                      e.message,
+                    );
+                  }
+                } else {
+                  // Login expired — emit pan:loginExpired so renderer shows QR.
+                  try {
+                    BrowserWindow.getAllWindows().forEach((w) =>
+                      w.webContents.send('pan:loginExpired', 'quark'),
+                    );
+                  } catch (e: any) {
+                    console.warn(
+                      '[ProxyServer] Failed to emit pan:loginExpired:',
+                      e.message,
+                    );
+                  }
+                }
+              }
+
+              // Send the error response to the browser.
               if (!res.headersSent) {
                 res.writeHead(status, {
                   'Content-Type':
@@ -3519,8 +3925,9 @@ export class ProxyServer {
       // Step 1: Search for video
       const searchUrl = `https://api.bilibili.com/x/web-interface/search/type/v2?search_type=video&keyword=${encodeURIComponent(vodName)}`;
       const searchData = await ProxyServer.httpsGet(searchUrl, {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.bilibili.com/',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        Referer: 'https://www.bilibili.com/',
       });
       if (!searchData) return null;
       const searchJson = JSON.parse(searchData);
@@ -3530,8 +3937,9 @@ export class ProxyServer {
       // Step 2: Get video info for CID
       const viewUrl = `https://api.bilibili.com/x/web-interface/view?aid=${result.aid}`;
       const viewData = await ProxyServer.httpsGet(viewUrl, {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.bilibili.com/',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        Referer: 'https://www.bilibili.com/',
       });
       if (!viewData) return null;
       const viewJson = JSON.parse(viewData);
@@ -3541,12 +3949,15 @@ export class ProxyServer {
       // Step 3: Fetch danmu XML
       const danmuUrl = `https://api.bilibili.com/x/v1/dm/list.so?oid=${cid}`;
       const danmuXml = await ProxyServer.httpsGet(danmuUrl, {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.bilibili.com/',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        Referer: 'https://www.bilibili.com/',
       });
       if (!danmuXml || !danmuXml.includes('<d p=')) return null;
 
-      console.log(`[ProxyServer] searchDanmuFromBilibili: found ${(danmuXml.match(/<d p=/g) || []).length} danmu items for "${vodName}"`);
+      console.log(
+        `[ProxyServer] searchDanmuFromBilibili: found ${(danmuXml.match(/<d p=/g) || []).length} danmu items for "${vodName}"`,
+      );
       return danmuXml;
     } catch (e: any) {
       console.warn('[ProxyServer] searchDanmuFromBilibili error:', e.message);
@@ -3568,7 +3979,10 @@ export class ProxyServer {
         });
       });
       req.on('error', (_e: Error) => resolve(null));
-      req.on('timeout', () => { req.destroy(); resolve(null); });
+      req.on('timeout', () => {
+        req.destroy();
+        resolve(null);
+      });
     });
   }
 

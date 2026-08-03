@@ -442,7 +442,16 @@ function lenientJsonParse(text: string): any | null {
  */
 function base64ToText(b64: string): string {
   try {
-    return atob(b64);
+    const binary = atob(b64);
+    // atob returns a binary string (each char's charCode is 0-255). For UTF-8
+    // content (e.g., Chinese site names like "豆瓣推荐"), we must decode the
+    // binary string as UTF-8 bytes. Without this, "豆瓣推荐" becomes
+    // "è±ç£æ¨è" (Latin1 misinterpretation of UTF-8 bytes).
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
   } catch {
     try {
       return base64UrlDecode(b64);
@@ -555,7 +564,46 @@ function tryExtractConfig(bytes: Uint8Array): string | null {
     }
   }
 
-  // 5. Fallback: try latin1 text directly (some configs have mixed encodings)
+  // 5. WEBP/RIFF steganography: data appended after RIFF container
+  // itv666 configs use .webp files where JSON (often base64-encoded with
+  // [A-Za-z]{8}** prefix) is appended AFTER the RIFF container. The RIFF
+  // container size is at bytes[4..7] (little-endian). Without this branch,
+  // the fallback UTF-8 decode would treat binary RIFF headers as text and
+  // produce garbled site names (e.g., source name like "鈧€璞ㄩ摑鎺?)
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 && // 'R'
+    bytes[1] === 0x49 && // 'I'
+    bytes[2] === 0x46 && // 'F'
+    bytes[3] === 0x46 && // 'F'
+    bytes[8] === 0x57 && // 'W'
+    bytes[9] === 0x45 && // 'E'
+    bytes[10] === 0x42 && // 'B'
+    bytes[11] === 0x50 //  'P'
+  ) {
+    // RIFF container size = bytes[4..7] (little-endian) + 8 header bytes
+    const riffSize =
+      bytes[4] | (bytes[5] << 8) | (bytes[6] << 16) | (bytes[7] << 24);
+    const afterStart = Math.min(riffSize + 8, bytes.length);
+    const after = new TextDecoder('utf-8', { fatal: false }).decode(
+      bytes.slice(afterStart),
+    );
+    // Try [A-Za-z]{8}** pattern first (itv666 uses this)
+    const pm = pattern.exec(after);
+    if (pm) {
+      const b64 = after.substring(pm.index + 10);
+      const decoded = base64ToText(b64);
+      if (decoded && lenientJsonParse(decoded)) {
+        return decoded;
+      }
+    }
+    // Try direct lenient JSON
+    if (lenientJsonParse(after)) {
+      return after;
+    }
+  }
+
+  // 6. Fallback: try latin1 text directly (some configs have mixed encodings)
   if (lenientJsonParse(text)) {
     return text;
   }

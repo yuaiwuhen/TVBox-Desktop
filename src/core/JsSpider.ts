@@ -240,8 +240,7 @@ const DRPY_RULE_PATCHES: Record<
       // json: 解析器无法处理前缀 ( 和后缀 )，改用 js: 手动 strip + JSON.parse
       // drpy2 的 homeVodParse 和 categoryParse 都在 __hostEval 后读取 VODS，
       // 所以 js: 代码必须显式设置 VODS（不仅设置 input）
-      一级:
-        'js:var d=[];var resp=request(input);var data=JSON.parse(resp.replace(/^\\(/,"").replace(/\\);?\\s*$/,""));data.data.items.forEach(function(it){d.push({title:it.name,img:it.image,url:String(it.video_id),desc:it.duration_string})});VODS=d;input=d',
+      一级: 'js:var d=[];var resp=request(input);var data=JSON.parse(resp.replace(/^\\(/,"").replace(/\\);?\\s*$/,""));data.data.items.forEach(function(it){d.push({title:it.name,img:it.image,url:String(it.video_id),desc:it.duration_string})});VODS=d;input=d',
     },
     originHeaders: {
       'https://www.tuxiaobei.com': {
@@ -264,11 +263,9 @@ function applyDrpyRulePatch(
   try {
     const fieldsJson = JSON.stringify(patch.fields);
     const vm = require('vm');
-    vm.runInContext(
-      `Object.assign(globalThis.rule, ${fieldsJson});`,
-      context,
-      { timeout: 2000 },
-    );
+    vm.runInContext(`Object.assign(globalThis.rule, ${fieldsJson});`, context, {
+      timeout: 2000,
+    });
     console.log(
       `[JsSpider] applied drpy rule patch for ${key}: ${patch.reason}`,
     );
@@ -319,7 +316,6 @@ function applyDrpyRulePatch(
     return false;
   }
 }
-
 
 // ─── Prototype defineProperty neutralization ───────────────────────────────
 // drpy2.min.js calls Object.defineProperty(Object.prototype, "myValues", {value:...,enumerable:false})
@@ -2545,6 +2541,197 @@ export class JsSpider implements ISpider {
         }
       },
 
+      // Synchronous native bridge to MyCrypto.extDe(String).
+      // Used by JS spiders (ManJu/WexV6/WexWenCai/WexGuaZi series) to decrypt
+      // "v2.{keyPart}.{cipherB64}" API responses. The native extDe method is
+      // in libdecjni.so (ARM only) and is emulated via unidbg-loader subprocess
+      // in the main process. Results are cached in the main process per keyPart.
+      //
+      // Returns: hex string of 32 bytes (key=first16bytes/32hex, iv=last16bytes/32hex),
+      // or empty string on failure. The hex format lets JS use CryptoJS.enc.Hex.parse directly.
+      __nativeExtDe: (keyPart: string) => {
+        try {
+          if (!keyPart || typeof keyPart !== 'string') return '';
+          // Validate keyPart to prevent command injection on the main side.
+          // Real keyParts are alphanumeric with underscores (e.g. api_abc123...).
+          if (!/^[A-Za-z0-9_]+$/.test(keyPart)) {
+            console.warn(
+              `[JsSpider] __nativeExtDe: invalid keyPart rejected: ${keyPart.substring(0, 50)}`,
+            );
+            return '';
+          }
+          let ipc: any = (globalThis as any).electronIPC;
+          if (!ipc && typeof (globalThis as any).window !== 'undefined') {
+            ipc = (globalThis as any).window.electronIPC;
+          }
+          if (!ipc) {
+            try {
+              if ((globalThis as any).require) {
+                const { ipcRenderer } = (globalThis as any).require('electron');
+                ipc = {
+                  sendSync: (channel: string, ...args: any[]) =>
+                    ipcRenderer.sendSync(channel, ...args),
+                };
+              }
+            } catch {
+              ipc = null;
+            }
+          }
+          if (!ipc || typeof ipc.sendSync !== 'function') {
+            console.warn(
+              '[JsSpider] __nativeExtDe: electronIPC.sendSync not available',
+            );
+            return '';
+          }
+          const base64 = ipc.sendSync('jar:callExtDeSync', keyPart);
+          if (!base64 || typeof base64 !== 'string') return '';
+          // Convert base64 -> hex for easier CryptoJS.enc.Hex.parse
+          try {
+            const buf = Buffer.from(base64, 'base64');
+            return buf.toString('hex');
+          } catch {
+            return '';
+          }
+        } catch (e: any) {
+          console.warn('[JsSpider] __nativeExtDe failed:', e.message);
+          return '';
+        }
+      },
+
+      // Synchronous native bridge to MyCrypto.Awdm(String, byte[]).
+      // Used by AnimeMiaoWu (and similar) spiders to decrypt API response data
+      // that is encrypted with the native Awdm algorithm. The native Awdm
+      // method is in libdecjni.so (ARM only) and is emulated via unidbg-loader
+      // subprocess in the main process. Results are cached by (keyHex, cipher).
+      //
+      // Returns: decrypted UTF-8 string (typically JSON), or empty string on
+      // failure. The string format lets JS use JSON.parse directly.
+      __nativeAwdm: (keyHex: string, cipherBase64: string) => {
+        try {
+          if (!keyHex || typeof keyHex !== 'string') return '';
+          if (!cipherBase64 || typeof cipherBase64 !== 'string') return '';
+          // Validate keyHex (hex chars only)
+          if (!/^[0-9a-fA-F]+$/.test(keyHex)) {
+            console.warn(
+              `[JsSpider] __nativeAwdm: invalid keyHex rejected (non-hex): ${keyHex.substring(0, 50)}`,
+            );
+            return '';
+          }
+          // Validate cipherBase64 (chars used by base64 only)
+          if (!/^[A-Za-z0-9+/=\s]+$/.test(cipherBase64)) {
+            console.warn(
+              '[JsSpider] __nativeAwdm: invalid cipherBase64 rejected (non-base64)',
+            );
+            return '';
+          }
+          let ipc: any = (globalThis as any).electronIPC;
+          if (!ipc && typeof (globalThis as any).window !== 'undefined') {
+            ipc = (globalThis as any).window.electronIPC;
+          }
+          if (!ipc) {
+            try {
+              if ((globalThis as any).require) {
+                const { ipcRenderer } = (globalThis as any).require('electron');
+                ipc = {
+                  sendSync: (channel: string, ...args: any[]) =>
+                    ipcRenderer.sendSync(channel, ...args),
+                };
+              }
+            } catch {
+              ipc = null;
+            }
+          }
+          if (!ipc || typeof ipc.sendSync !== 'function') {
+            console.warn(
+              '[JsSpider] __nativeAwdm: electronIPC.sendSync not available',
+            );
+            return '';
+          }
+          const plain = ipc.sendSync('jar:callAwdmSync', keyHex, cipherBase64);
+          if (!plain || typeof plain !== 'string') return '';
+          return plain;
+        } catch (e: any) {
+          console.warn('[JsSpider] __nativeAwdm failed:', e.message);
+          return '';
+        }
+      },
+
+      // Synchronous native bridge to LoadNiMa.decode(Context, String).
+      // Used by ChildrenDuoDuo/ChildrenTuTu/ChildrenBaoBao/ChildrenBeiWa/
+      // MusicLiYuan/MusicIKtv/WexWenCai/WexTangDou/WexXiaoPingGuo/DuanJuHeMa/
+      // MyPan115/NewPan115/AnimeXiFan etc. to decrypt encrypted API responses.
+      //
+      // The native decode method is in libLoadNiMa.so (ARM only) and would
+      // normally be emulated via unidbg-loader subprocess. However, unidbg
+      // fails to decrypt wexguard-encrypted responses due to signature
+      // verification issues (env_check at 0x915b4 patch doesn't fully bypass).
+      //
+      // Solution: wexguard encryption uses a date-based AES-128-CBC key that
+      // is shared across all wexfnw series sources. We decrypt directly in JS:
+      //   Key: YYYYMMDD + "woshini8" (16 bytes, UTF-8)
+      //   IV:  "Wexfnwshinidieha" (16 bytes, capital W, UTF-8)
+      //   Algorithm: AES-128-CBC, PKCS5/PKCS7 padding
+      //   Input: base64-encoded ciphertext
+      //   Output: UTF-8 string (typically JSON)
+      //
+      // This matches the AES fallback in
+      // tools/stubs/com/wexfnw/libso/LoadNiMa.java tryWenCaiAESFallback()
+      // and works for all wexfnw/wexguard encrypted responses.
+      __nativeLoadNiMaDecode: (input: string) => {
+        try {
+          if (!input || typeof input !== 'string') return '';
+          const trimmed = input.trim();
+          if (!trimmed) return '';
+
+          // Try today and yesterday (handle midnight boundary)
+          const now = new Date();
+          const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+          const dateCandidates = [
+            now.toISOString().substring(0, 10).replace(/-/g, ''),
+            yesterday.toISOString().substring(0, 10).replace(/-/g, ''),
+          ];
+
+          const iv = CryptoJS.enc.Utf8.parse('Wexfnwshinidieha');
+          let ciphertext;
+          try {
+            ciphertext = CryptoJS.enc.Base64.parse(trimmed);
+          } catch {
+            return '';
+          }
+          if (ciphertext.sigBytes === 0 || ciphertext.sigBytes % 16 !== 0) {
+            return '';
+          }
+
+          for (const dateStr of dateCandidates) {
+            const keyStr = dateStr + 'woshini8';
+            const key = CryptoJS.enc.Utf8.parse(keyStr);
+            try {
+              const cp = CryptoJS.lib.CipherParams.create({ ciphertext });
+              const plain = CryptoJS.AES.decrypt(cp, key, {
+                iv,
+                mode: CryptoJS.mode.CBC,
+                padding: CryptoJS.pad.Pkcs7,
+              });
+              const hex = plain.toString(CryptoJS.enc.Hex);
+              // Valid JSON responses start with { (7b) or [ (5b)
+              if (hex.startsWith('7b') || hex.startsWith('5b')) {
+                const utf8 = plain.toString(CryptoJS.enc.Utf8);
+                if (utf8 && utf8.length > 0) {
+                  return utf8;
+                }
+              }
+            } catch {
+              // try next date
+            }
+          }
+          // AES fallback failed - return empty so spider can handle gracefully
+          return '';
+        } catch (e: any) {
+          console.warn('[JsSpider] __nativeLoadNiMaDecode failed:', e.message);
+          return '';
+        }
+      },
+
       // HTML parsing
       pdfh,
       pdfa,
@@ -2842,6 +3029,12 @@ export class JsSpider implements ISpider {
     const builtinMap: Record<string, any> = {
       cheerio: cheerioWithJinja,
       'crypto-js': CryptoJS,
+      zlib: nodeRequire ? nodeRequire('zlib') : undefined,
+      pako: nodeRequire ? nodeRequire('pako') : undefined,
+      https: nodeRequire ? nodeRequire('https') : undefined,
+      http: nodeRequire ? nodeRequire('http') : undefined,
+      url: nodeRequire ? nodeRequire('url') : undefined,
+      querystring: nodeRequire ? nodeRequire('querystring') : undefined,
     };
 
     if (builtinMap[moduleName]) {

@@ -362,9 +362,9 @@
       </Transition>
     </Teleport>
 
-    <!-- QR Login Dialog -->
-    <QRLoginDialog v-if="currentPanType" v-model:visible="showPanLogin" :title="panLoginTitle"
-      :pan-type="currentPanType" @success="onPanLoginSuccess" />
+    <!-- 网盘配置中心对话框（iframe 嵌入 JAR 的 wexconfig 页面） -->
+    <WexConfigDialog v-model:visible="showPanLogin" :target-pan-type="wexConfigTargetPan"
+      :title="panLoginTitle" @success="onPanLoginSuccess" />
   </div>
 </template>
 
@@ -380,7 +380,7 @@ import { PanResolver, type PanType } from '../core/PanResolver'
 import { PanLogin } from '../core/PanLogin'
 import { QuarkPan } from '../core/QuarkPan'
 import VideoPlayer from '../components/VideoPlayer.vue'
-import QRLoginDialog from '../components/QRLoginDialog.vue'
+import WexConfigDialog from '../components/WexConfigDialog.vue'
 import { processImageUrl } from '../core/models'
 
 const route = useRoute()
@@ -510,6 +510,19 @@ const panLoginTitle = computed(() => {
     default:
       return '网盘登录'
   }
+})
+
+// WexConfigDialog only supports quark/uc/baidu login detection (via JVM
+// SharedPreferences). For other pan types, pass null so the dialog shows the
+// full config page without targeting a specific pan.
+const wexConfigTargetPan = computed<
+  'quark' | 'uc' | 'baidu' | null
+>(() => {
+  const type = currentPanType.value
+  if (type === 'quark' || type === 'uc' || type === 'baidu') {
+    return type
+  }
+  return null
 })
 
 function isPanSource(flag: string): boolean {
@@ -656,7 +669,8 @@ async function playEpisode(flag: string, url: string) {
 }
 
 function onPanLoginSuccess() {
-  ElMessage.success('登录成功')
+  // WexConfigDialog already shows a success toast; just refresh state and
+  // retry the pending play if any.
   refreshPanLoginState(activePlaySource.value)
   if (pendingPlayAfterLogin.value) {
     const { flag, url } = pendingPlayAfterLogin.value

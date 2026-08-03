@@ -5,6 +5,7 @@ import { QuarkPanService } from './QuarkPanService';
 import { UCPanService } from './UCPanService';
 import { AliyunPanService } from './AliyunPanService';
 import { BaiduPanService } from './BaiduPanService';
+import { jarLoader } from './JarLoader';
 
 export type PanType = 'quark' | 'uc' | 'aliyun' | 'baidu' | 'bili';
 
@@ -184,9 +185,113 @@ export class PanLoginService {
       },
     );
 
+    // wexconfig login status check: reads cookies from JVM SharedPreferences
+    // that the JAR's wexconfig web page writes after successful QR login.
+    // Used by WexConfigDialog.vue to detect login completion and auto-close.
+    ipcMain.handle(
+      'pan:checkWexConfigLogin',
+      async (): Promise<{
+        quark: boolean;
+        uc: boolean;
+        baidu: boolean;
+        cookies: { quark?: string; uc?: string; baidu?: string };
+      }> => {
+        return this.checkWexConfigLogin();
+      },
+    );
+
     console.log(
       '[PanLoginService] Initialized with 5 pan types: quark, uc, aliyun, baidu, bili',
     );
+  }
+
+  /**
+   * Read pan cookies from JVM SharedPreferences to detect logins completed
+   * via the JAR's wexconfig web page. The JAR writes cookies to two prefs:
+   *   1. com.github.catvod.tvbox_preferences — keys: .quark, .uc, .baidu (plaintext)
+   *   2. NewWexFnw_preferences — keys: Wex_quark_cookie, Wex_ucpan_cookie, Wex_baidu_cookie
+   * We check both and return the first non-empty cookie found for each pan.
+   */
+  static async checkWexConfigLogin(): Promise<{
+    quark: boolean;
+    uc: boolean;
+    baidu: boolean;
+    cookies: { quark?: string; uc?: string; baidu?: string };
+  }> {
+    const result = {
+      quark: false,
+      uc: false,
+      baidu: false,
+      cookies: {} as { quark?: string; uc?: string; baidu?: string },
+    };
+
+    if (!jarLoader || !jarLoader.java) {
+      console.warn('[PanLoginService] JVM not ready for checkWexConfigLogin');
+      return result;
+    }
+
+    try {
+      const InitClass = jarLoader.java.importClass(
+        'com.github.catvod.spider.Init',
+      );
+      const ctx = InitClass.contextSync();
+      if (!ctx) {
+        console.warn('[PanLoginService] Init.context() returned null');
+        return result;
+      }
+
+      const PREFS_MAIN = 'com.github.catvod.tvbox_preferences';
+      const PREFS_GUARD = 'NewWexFnw_preferences';
+
+      const mainPrefs = ctx.getSharedPreferencesSync(PREFS_MAIN, 0);
+      const guardPrefs = ctx.getSharedPreferencesSync(PREFS_GUARD, 0);
+
+      // Quark: check .quark (main) and Wex_quark_cookie (guard)
+      const quarkPlain = mainPrefs?.getStringSync('.quark', '') || '';
+      const quarkGuard = guardPrefs?.getStringSync('Wex_quark_cookie', '') || '';
+      const quarkCookie = quarkPlain || quarkGuard;
+      if (quarkCookie) {
+        result.quark = true;
+        result.cookies.quark = quarkCookie;
+      }
+
+      // UC: check .uc (main) and Wex_ucpan_cookie (guard)
+      const ucPlain = mainPrefs?.getStringSync('.uc', '') || '';
+      const ucGuard = guardPrefs?.getStringSync('Wex_ucpan_cookie', '') || '';
+      const ucCookie = ucPlain || ucGuard;
+      if (ucCookie) {
+        result.uc = true;
+        result.cookies.uc = ucCookie;
+      }
+
+      // Baidu: check .baidu (main) and Wex_baidu_cookie (guard)
+      const baiduPlain = mainPrefs?.getStringSync('.baidu', '') || '';
+      const baiduGuard =
+        guardPrefs?.getStringSync('Wex_baidu_cookie', '') || '';
+      const baiduCookie = baiduPlain || baiduGuard;
+      if (baiduCookie) {
+        result.baidu = true;
+        result.cookies.baidu = baiduCookie;
+      }
+
+      console.log('[PanLoginService] checkWexConfigLogin:', {
+        quark: result.quark,
+        uc: result.uc,
+        baidu: result.baidu,
+        cookieLens: {
+          quark: result.cookies.quark?.length || 0,
+          uc: result.cookies.uc?.length || 0,
+          baidu: result.cookies.baidu?.length || 0,
+        },
+      });
+    } catch (e: any) {
+      console.warn(
+        '[PanLoginService] checkWexConfigLogin error:',
+        e.message || e,
+      );
+    }
+
+    return result;
   }
 
   static async generateQRCode(panType: PanType): Promise<QrCodeResult> {

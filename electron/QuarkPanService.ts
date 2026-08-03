@@ -78,6 +78,35 @@ export class QuarkPanService {
       },
     );
 
+    // Diagnostic: trigger refreshCookieForPlayback to refresh __puus and
+    // sync to JVM SharedPreferences. Used to verify the refresh+sync logic
+    // without needing to play a video.
+    ipcMain.handle('quark:debugRefreshCookie', async () => {
+      const before = this.getSyncedCookie();
+      const beforeHasPus = before?.includes('__pus') ?? false;
+      const beforeHasPuus = before?.includes('__puus') ?? false;
+      const result = await this.refreshCookieForPlayback();
+      const after = this.syncedCookie;
+      const afterHasPus = after?.includes('__pus') ?? false;
+      const afterHasPuus = after?.includes('__puus') ?? false;
+      return {
+        before: {
+          length: before?.length ?? 0,
+          hasPus: beforeHasPus,
+          hasPuus: beforeHasPuus,
+          preview: before?.substring(0, 200) ?? '',
+        },
+        after: {
+          length: after?.length ?? 0,
+          hasPus: afterHasPus,
+          hasPuus: afterHasPuus,
+          preview: after?.substring(0, 200) ?? '',
+        },
+        refreshed: result.refreshed,
+        expired: result.expired,
+      };
+    });
+
     // Restore cookie from disk on startup. StubSharedPreferences is
     // in-memory only, so JVM-synced cookies are lost when the app restarts.
     // Without this restore, every restart requires re-login.
@@ -710,6 +739,23 @@ export class QuarkPanService {
   >();
 
   /**
+   * Invalidate a specific playUrlCache entry.
+   *
+   * Called by ProxyServer.streamPanDirect when the CDN rejects a cached URL
+   * (status 412/400/403), so the next resolveQuarkDownloadUrl call will
+   * actually re-fetch a fresh URL instead of returning the rejected cache hit.
+   */
+  public static invalidatePlayUrlCache(cacheKey: string): void {
+    if (this.playUrlCache.has(cacheKey)) {
+      this.playUrlCache.delete(cacheKey);
+      console.log(
+        '[QuarkPanService] invalidatePlayUrlCache: cleared cache for',
+        cacheKey,
+      );
+    }
+  }
+
+  /**
    * Extract the __puus cookie value from a full cookie string.
    * Returns '' if __puus is not present.
    */
@@ -1132,6 +1178,17 @@ export class QuarkPanService {
           );
           // Persist the refreshed cookie so it survives app restarts
           this.persistCookieToDisk(this.syncedCookie);
+          // Sync the refreshed __puus to JVM SharedPreferences so the spider's
+          // e_1.b() read path also picks up the new __puus. Without this,
+          // the spider would send a stale __puus to the CDN and get 412.
+          try {
+            await this.syncCookieToJVM(this.syncedCookie);
+          } catch (syncErr: any) {
+            console.warn(
+              '[QuarkPanService] refreshCookieForPlayback: JVM sync failed (continuing):',
+              syncErr?.message,
+            );
+          }
           return {
             refreshed: true,
             expired: false,
@@ -1269,6 +1326,21 @@ export class QuarkPanService {
       this.persistCookieToDisk(this.syncedCookie);
       // Update commonHeaders in-place so callers use the fresh cookie.
       commonHeaders.Cookie = this.syncedCookie;
+      // Sync the refreshed __puus to JVM SharedPreferences so the spider's
+      // SharedPreferences read path (e_1.b() in NewQuark) also picks up the
+      // new __puus. Without this, the spider would read a stale __puus from
+      // JVM and the CDN would reject play requests with 412.
+      try {
+        await this.syncCookieToJVM(this.syncedCookie);
+        console.log(
+          '[QuarkPanService] refreshCookie: synced refreshed cookie to JVM SharedPreferences',
+        );
+      } catch (syncErr: any) {
+        console.warn(
+          '[QuarkPanService] refreshCookie: JVM sync failed (continuing):',
+          syncErr?.message,
+        );
+      }
     } catch (e: any) {
       console.warn(
         '[QuarkPanService] refreshCookie failed (continuing with existing cookie):',
@@ -1763,10 +1835,11 @@ export class QuarkPanService {
             tvboxFid,
           );
           if (retryResult.taskId) {
-            const newFid = await this.pollTransferTask(
+            const retryPoll = await this.pollTransferTask(
               commonHeaders,
               retryResult.taskId,
             );
+            const newFid = retryPoll.fid;
             if (newFid) {
               console.log(
                 '[QuarkPanService] getDownloadUrlViaTransfer: transferred after token refresh, fid=',
@@ -1776,6 +1849,13 @@ export class QuarkPanService {
               let downloadUrl = await this.tryFileV2Play(commonHeaders, newFid);
               if (!downloadUrl) {
                 downloadUrl = await this.tryFileDownload(commonHeaders, newFid);
+              }
+              if (!downloadUrl) {
+                // Last-resort fallback: chat API with transferred fid.
+                downloadUrl = await this.getDownloadUrlViaChatApi(
+                  commonHeaders,
+                  newFid,
+                );
               }
               if (downloadUrl) {
                 const cacheKey = `${shareId}:${fid}`;
@@ -1842,9 +1922,20 @@ export class QuarkPanService {
     if (!downloadUrl) {
       downloadUrl = await this.tryFileDownload(commonHeaders, newFid);
     }
+    // If direct download APIs return "inner error" (code 15000 — happens
+    // when the file was just transferred and Quark's index hasn't caught
+    // up yet), try the chat API flow with the NEW fid (which is in the
+    // user's own drive, so chat API can access it).
+    if (!downloadUrl) {
+      console.log(
+        '[QuarkPanService] getDownloadUrlViaTransfer: direct download failed, trying chat API with transferred fid=',
+        newFid,
+      );
+      downloadUrl = await this.getDownloadUrlViaChatApi(commonHeaders, newFid);
+    }
     if (!downloadUrl) {
       console.warn(
-        '[QuarkPanService] getDownloadUrlViaTransfer: both /file/v2/play and /file/download failed on transferred fid',
+        '[QuarkPanService] getDownloadUrlViaTransfer: all download paths failed on transferred fid',
       );
       return null;
     }

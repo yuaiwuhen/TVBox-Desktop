@@ -3,6 +3,11 @@ import vue from '@vitejs/plugin-vue';
 import electron from 'vite-plugin-electron';
 import tailwindcss from '@tailwindcss/vite';
 
+// When VITE_RENDERER_ONLY=1, skip the electron plugin to avoid the rollup
+// build hanging on "transforming..." for large electron main bundles.
+// The electron main is built separately by the dev launcher (esbuild).
+const rendererOnly = process.env.VITE_RENDERER_ONLY === '1';
+
 export default defineConfig({
   // hevc.js不需要SharedArrayBuffer和COOP/COEP headers（单线程解码）
   server: {
@@ -13,7 +18,7 @@ export default defineConfig({
   plugins: [
     vue(),
     tailwindcss(),
-    electron([
+    ...(rendererOnly ? [] : [electron([
       {
         entry: 'electron/main.ts',
         vite: {
@@ -39,19 +44,11 @@ export default defineConfig({
           },
         },
       },
-      {
-        entry: 'electron/preload.ts',
-        vite: {
-          build: {
-            rollupOptions: {
-              output: {
-                format: 'cjs',
-              },
-            },
-          },
-        },
-      },
-    ]),
+      // Preload is NOT built by Vite — it's a static CJS file (electron/preload.cjs)
+      // copied to dist-electron/preload.cjs by run-dev.mjs / build scripts.
+      // Vite's rollup was outputting ESM syntax (import/export) in a .cjs file,
+      // which Electron's CJS loader cannot parse, breaking ipcRenderer exposure.
+    ])]),
   ],
   build: {
     rollupOptions: {

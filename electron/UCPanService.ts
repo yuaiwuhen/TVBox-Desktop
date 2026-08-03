@@ -38,8 +38,27 @@ export class UCPanService {
   static setSyncedCookie(cookie: string | null): void {
     this.syncedCookie = cookie;
   }
+  /**
+   * Get the last cookie synced from renderer (or JVM SharedPreferences).
+   *
+   * If the in-memory syncedCookie is null (e.g., user logged in via wexconfig
+   * iframe during this session — that path writes to SharedPreferences but
+   * never calls setSyncedCookie), fall back to reading directly from JVM
+   * SharedPreferences. This makes the config center the single source of
+   * truth for login state.
+   */
   static getSyncedCookie(): string | null {
-    return this.syncedCookie;
+    if (this.syncedCookie) return this.syncedCookie;
+    const jvmCookie = jarLoader.readUcCookieFromJVM();
+    if (jvmCookie) {
+      this.syncedCookie = jvmCookie;
+      this.debugLog(
+        'getSyncedCookie: syncedCookie was null, read from JVM SharedPreferences (len=' +
+          jvmCookie.length +
+          ')',
+      );
+    }
+    return jvmCookie;
   }
 
   private static debugLog(msg: string): void {

@@ -79,6 +79,45 @@ export class PanLogin {
     return DISPLAY_NAMES[panType] || panType;
   }
 
+  /**
+   * Get the local proxy server port (via IPC).
+   * Used to build wexconfig iframe URL.
+   */
+  static async getProxyPort(): Promise<number> {
+    const ipc = getIPC();
+    if (!ipc) {
+      return 9978; // fallback to default port
+    }
+    try {
+      const port = await ipc.invoke('proxy:getPort');
+      return typeof port === 'number' && port > 0 ? port : 9978;
+    } catch (e: any) {
+      console.warn('[PanLogin] getProxyPort failed:', e.message);
+      return 9978;
+    }
+  }
+
+  /**
+   * Build the wexconfig page URL for iframe embedding.
+   * The JAR serves a full HTML config page at /proxy?do=wexconfig where
+   * users can add/del pan logins via QR scan. Cookies are written to
+   * SharedPreferences after successful login; we poll those via
+   * checkWexConfigLogin() to detect completion.
+   *
+   * @param siteKey The active config center source's key. Passed to the proxy
+   *                so it can route the request to the correct spider
+   *                (WexConfig / Config / AAConfigAmns). Different configs have
+   *                different config center spiders; without this parameter all
+   *                configs would fall back to whichever spider was last cached.
+   */
+  static async getWexConfigUrl(siteKey?: string): Promise<string> {
+    const port = await this.getProxyPort();
+    const siteParam = siteKey
+      ? `&siteKey=${encodeURIComponent(siteKey)}`
+      : '';
+    return `http://127.0.0.1:${port}/proxy?do=wexconfig${siteParam}`;
+  }
+
   static isLoggedIn(panType: PanType): boolean {
     const info = this.getLoginInfo(panType);
     return !!(info?.cookie || info?.refreshToken || info?.accessToken);
@@ -321,6 +360,72 @@ export class PanLogin {
     } catch (e: any) {
       console.error('[PanLogin] syncAllToJVM failed:', e.message);
       return { success: false, synced, error: e.message };
+    }
+  }
+
+  /**
+   * Check pan login status by reading cookies from JVM SharedPreferences.
+   * Used by WexConfigDialog to detect logins completed via the JAR's
+   * wexconfig web page (iframe). When a new login is detected, the cookie
+   * is saved to localStorage so it persists across app restarts.
+   *
+   * @param targetPanType If provided, only check and return this pan type.
+   *                      If null, check all pan types.
+   * @returns Object with login status per pan type and detected cookies.
+   */
+  static async checkWexConfigLogin(
+    targetPanType?: PanType | null,
+  ): Promise<{
+    logins: Record<string, boolean>;
+    cookies: Record<string, string>;
+    newLogins: PanType[];
+  }> {
+    const ipc = getIPC();
+    if (!ipc) {
+      return { logins: {}, cookies: {}, newLogins: [] };
+    }
+
+    try {
+      const result = await ipc.invoke('pan:checkWexConfigLogin');
+      const logins: Record<string, boolean> = {
+        quark: result.quark,
+        uc: result.uc,
+        baidu: result.baidu,
+      };
+      const cookies: Record<string, string> = {};
+      const newLogins: PanType[] = [];
+
+      // For each pan that has a cookie in SharedPreferences, check if it's
+      // new (not already in localStorage). If new, save it.
+      const panTypes: PanType[] = targetPanType
+        ? [targetPanType]
+        : (['quark', 'uc', 'baidu'] as PanType[]);
+
+      for (const panType of panTypes) {
+        const cookie = result.cookies?.[panType];
+        if (cookie) {
+          cookies[panType] = cookie;
+          const existing = this.getLoginInfo(panType);
+          if (!existing?.cookie) {
+            // New login detected — save to localStorage
+            const loginInfo: PanLoginInfo = {
+              panType,
+              cookie,
+              loginTime: Date.now(),
+            };
+            this.saveLoginInfo(loginInfo);
+            newLogins.push(panType);
+            console.log(
+              `[PanLogin] checkWexConfigLogin: new ${panType} login detected, saved to localStorage`,
+            );
+          }
+        }
+      }
+
+      return { logins, cookies, newLogins };
+    } catch (e: any) {
+      console.error('[PanLogin] checkWexConfigLogin failed:', e.message);
+      return { logins: {}, cookies: {}, newLogins: [] };
     }
   }
 }

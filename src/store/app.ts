@@ -10,6 +10,12 @@ import {
 } from '../core/Database';
 import { PanLogin, type PanType } from '../core/PanLogin';
 import { saveToFile } from '../core/ConfigSync';
+import {
+  normalizeHomeContentResponse,
+  normalizeCategoryContentResponse,
+  normalizeDetailContentResponse,
+  normalizeSearchContentResponse,
+} from '../core/ObfuscatedNormalizer';
 import type {
   SourceBean,
   Movie,
@@ -84,6 +90,10 @@ export const useAppStore = defineStore('app', () => {
   const homeLoading = ref(false);
   const activeCategory = ref(''); // 当前选中的分类
   const filterValues = ref<Record<string, string>>({}); // 当前选中的筛选值
+  // True when the active config center source's spider loaded successfully.
+  // When false (e.g. itv666 .so load fails on Windows x64), the renderer
+  // falls back to the hardcoded pan login grid instead of the JAR iframe.
+  const configCenterSpiderLoaded = ref(false);
 
   // ===== Category =====
   const categoryVodList = ref<Movie[]>([]);
@@ -413,7 +423,11 @@ export const useAppStore = defineStore('app', () => {
       console.log(
         `[Store] resetHome: clearing spider cache for oldKey=${oldKey}`,
       );
-      spiderEngine.clear(oldKey);
+      // Fire-and-forget: resetHome is sync and called from setActiveSite.
+      // The cache clear doesn't need to block site switching.
+      spiderEngine.clear(oldKey).catch((e) => {
+        console.warn('[Store] resetHome: spiderEngine.clear error:', e);
+      });
     }
   }
 
@@ -443,7 +457,7 @@ export const useAppStore = defineStore('app', () => {
         '[Store] loadHome: force reload, clearing spider cache for',
         activeSite.value.key,
       );
-      spiderEngine.clear(activeSite.value.key);
+      await spiderEngine.clear(activeSite.value.key);
     }
 
     homeLoading.value = true;
@@ -469,6 +483,26 @@ export const useAppStore = defineStore('app', () => {
         classes.value = [];
         filters.value = {};
         homeVodList.value = await buildConfigCenterVodList();
+        // Load the config center spider so the local proxy can route
+        // /proxy?do=wexconfig requests to the correct spider
+        // (WexConfig / Config / AAConfigAmns). Without this, all configs
+        // share whichever spider was last cached, causing every config
+        // center to display 王小二's WexConfig page.
+        try {
+          const spider = await spiderEngine.getSpider(activeSite.value);
+          configCenterSpiderLoaded.value = !!spider;
+          if (!spider) {
+            console.warn(
+              '[Store] loadHome: config center spider failed to load, falling back to pan login grid',
+            );
+          }
+        } catch (e: any) {
+          console.warn(
+            '[Store] loadHome: config center spider load error:',
+            e?.message || e,
+          );
+          configCenterSpiderLoaded.value = false;
+        }
       } finally {
         homeLoading.value = false;
       }
@@ -497,7 +531,7 @@ export const useAppStore = defineStore('app', () => {
           2,
         ),
       );
-      const homeResult = JSON.parse(rawHome);
+      const homeResult = normalizeHomeContentResponse(JSON.parse(rawHome));
       console.log(
         '[Store] loadHome parsed response:',
         JSON.stringify(
@@ -519,7 +553,23 @@ export const useAppStore = defineStore('app', () => {
 
       let hasHomeData = false;
       if (homeResult.list && homeResult.list.length > 0) {
-        homeVodList.value = homeResult.list;
+        // Normalize drpy-style items ({title, img, url, desc}) to TVBox format
+        // ({vod_name, vod_pic, vod_id, vod_remarks}). Some drpy2 spiders (e.g.
+        // 儿童/tuxiaobei) return drpy format which lacks vod_id, causing
+        // downstream detail/play to receive "undefined" as vod_id.
+        homeVodList.value = homeResult.list.map((item: any) => {
+          if (!item) return item;
+          const normalized: any = { ...item };
+          if (!normalized.vod_name && normalized.title)
+            normalized.vod_name = normalized.title;
+          if (!normalized.vod_pic && normalized.img)
+            normalized.vod_pic = normalized.img;
+          if (!normalized.vod_id && normalized.url !== undefined)
+            normalized.vod_id = String(normalized.url);
+          if (!normalized.vod_remarks && normalized.desc)
+            normalized.vod_remarks = normalized.desc;
+          return normalized;
+        });
         hasHomeData = true;
       }
 
@@ -560,14 +610,28 @@ export const useAppStore = defineStore('app', () => {
         let vodResult: any = { list: [] };
         if (rawVod && rawVod.trim().length > 0) {
           try {
-            vodResult = JSON.parse(rawVod);
+            vodResult = normalizeCategoryContentResponse(JSON.parse(rawVod));
           } catch (e) {
             console.warn(
               '[Store] loadHome: homeVideoContent returned invalid JSON, treating as empty',
             );
           }
         }
-        homeVodList.value = vodResult.list || vodResult.vod_list || [];
+        const rawVodList = vodResult.list || vodResult.vod_list || [];
+        // Normalize drpy-style items to TVBox format (same as homeResult.list).
+        homeVodList.value = rawVodList.map((item: any) => {
+          if (!item) return item;
+          const normalized: any = { ...item };
+          if (!normalized.vod_name && normalized.title)
+            normalized.vod_name = normalized.title;
+          if (!normalized.vod_pic && normalized.img)
+            normalized.vod_pic = normalized.img;
+          if (!normalized.vod_id && normalized.url !== undefined)
+            normalized.vod_id = String(normalized.url);
+          if (!normalized.vod_remarks && normalized.desc)
+            normalized.vod_remarks = normalized.desc;
+          return normalized;
+        });
         console.log(
           '[Store] loadHome homeVideoContent parsed:',
           JSON.stringify(
@@ -660,21 +724,22 @@ export const useAppStore = defineStore('app', () => {
         return;
       }
 
-      const hasFilter =
-        activeSite.value.filterable === 1 &&
-        Object.keys(filterValues).length > 0;
+      // Android always passes filter=true (see SourceViewModel.getList line 316).
+      // Some Guard spiders return empty list when filter=false, so we mirror
+      // Android's behavior to avoid breaking category loading.
       // Vue reactive proxy cannot be cloned by Electron IPC — convert to plain object
       const plainFilterValues = JSON.parse(JSON.stringify(filterValues));
       const rawResult = await spider.categoryContent(
         tid,
         pg,
-        hasFilter,
+        true,
         plainFilterValues,
       );
       let result: any;
       try {
-        result =
+        const parsed =
           typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
+        result = normalizeCategoryContentResponse(parsed);
       } catch {
         result = { list: [] };
       }
@@ -683,11 +748,27 @@ export const useAppStore = defineStore('app', () => {
         `[Store] loadCategory: parsed list=${result.list?.length || 0}, page=${result.page || pg}, pagecount=${result.pagecount || 1}`,
       );
 
+      // Normalize drpy-style items to TVBox format (same as loadHome).
+      const normalizeItems = (items: any[]) =>
+        (items || []).map((item: any) => {
+          if (!item) return item;
+          const normalized: any = { ...item };
+          if (!normalized.vod_name && normalized.title)
+            normalized.vod_name = normalized.title;
+          if (!normalized.vod_pic && normalized.img)
+            normalized.vod_pic = normalized.img;
+          if (!normalized.vod_id && normalized.url !== undefined)
+            normalized.vod_id = String(normalized.url);
+          if (!normalized.vod_remarks && normalized.desc)
+            normalized.vod_remarks = normalized.desc;
+          return normalized;
+        });
+
       if (pg === '1') {
-        categoryVodList.value = result.list || [];
+        categoryVodList.value = normalizeItems(result.list);
       } else {
         // Append for scroll-to-bottom pagination
-        const newItems = result.list || [];
+        const newItems = normalizeItems(result.list);
         categoryVodList.value = [...categoryVodList.value, ...newItems];
       }
       categoryPage.value = parseInt(result.page || pg);
@@ -728,17 +809,22 @@ export const useAppStore = defineStore('app', () => {
           rawResult?.substring?.(0, 1000),
         );
         if (!rawResult || !rawResult.trim()) {
-          lastError = '该资源无法解析（源未返回数据），可能已下线或分享链接已失效';
+          lastError =
+            '该资源无法解析（源未返回数据），可能已下线或分享链接已失效';
           if (attempt < maxRetries) {
-            console.log(`[Store] loadDetail empty result, retrying in ${1500 + attempt * 1000}ms...`);
-            await new Promise(resolve => setTimeout(resolve, 1500 + attempt * 1000));
+            console.log(
+              `[Store] loadDetail empty result, retrying in ${1500 + attempt * 1000}ms...`,
+            );
+            await new Promise((resolve) =>
+              setTimeout(resolve, 1500 + attempt * 1000),
+            );
             continue;
           }
           break;
         }
         let result: any;
         try {
-          result = JSON.parse(rawResult);
+          result = normalizeDetailContentResponse(JSON.parse(rawResult));
         } catch {
           lastError = '源返回的数据格式异常，可能资源已下线';
           break;
@@ -746,14 +832,37 @@ export const useAppStore = defineStore('app', () => {
         if (!result.list || result.list.length === 0) {
           lastError = '未找到该资源的详情信息，可能已下线';
           if (attempt < maxRetries) {
-            console.log(`[Store] loadDetail empty list, retrying in ${1500 + attempt * 1000}ms...`);
-            await new Promise(resolve => setTimeout(resolve, 1500 + attempt * 1000));
+            console.log(
+              `[Store] loadDetail empty list, retrying in ${1500 + attempt * 1000}ms...`,
+            );
+            await new Promise((resolve) =>
+              setTimeout(resolve, 1500 + attempt * 1000),
+            );
             continue;
           }
           break;
         }
 
         const vod = result.list[0];
+        // Fallback: some spiders (e.g. csp_MiSou) return detail with episodes
+        // but no vod_name. Extract from episode name or use vod_id.
+        if (!vod.vod_name && vod.vod_play_url) {
+          const firstEp = vod.vod_play_url.split('#')[0] || '';
+          const epName = firstEp.split('$')[0] || '';
+          // Strip bracket prefixes like "[Y一念永恒 (2020)]S01E166..."
+          const bracketMatch = epName.match(/^\[([^\]]+)\]/);
+          if (bracketMatch) {
+            vod.vod_name = bracketMatch[1].trim();
+          } else if (epName) {
+            vod.vod_name = epName.trim();
+          } else {
+            vod.vod_name = vod.vod_id || '未知';
+          }
+          console.log(
+            '[Store] loadDetail: vod_name missing, falling back to:',
+            vod.vod_name,
+          );
+        }
         console.log('[Store] loadDetail vod:', {
           vod_id: vod.vod_id,
           vod_name: vod.vod_name,
@@ -804,8 +913,12 @@ export const useAppStore = defineStore('app', () => {
         console.warn(`loadDetail failed (attempt ${attempt + 1}):`, e.message);
         lastError = `加载详情失败: ${e.message || '未知错误'}`;
         if (attempt < maxRetries) {
-          console.log(`[Store] loadDetail error, retrying in ${1500 + attempt * 1000}ms...`);
-          await new Promise(resolve => setTimeout(resolve, 1500 + attempt * 1000));
+          console.log(
+            `[Store] loadDetail error, retrying in ${1500 + attempt * 1000}ms...`,
+          );
+          await new Promise((resolve) =>
+            setTimeout(resolve, 1500 + attempt * 1000),
+          );
         }
       }
     }
@@ -933,8 +1046,10 @@ export const useAppStore = defineStore('app', () => {
           return;
         } else {
           // 没有配置VLC，弹窗提示并显示播放地址
-          playError.value =
-            (result as any).message || '此视频格式不支持网页播放';
+          // 注意：URL已经成功解析，只是格式不支持网页播放。
+          // 标记 externalPlayerLaunched=true 以便调用方（如E2E测试）能识别此路径为"已成功解析但需外部播放"。
+          // 用户可在弹窗中复制URL到外部播放器打开。
+          externalPlayerLaunched.value = true;
 
           const { ipcRenderer } = window.require('electron');
           ipcRenderer.invoke('show-unsupported-format-dialog', {
@@ -1063,9 +1178,10 @@ export const useAppStore = defineStore('app', () => {
             return;
           } else {
             // 没有配置VLC，弹窗提示并显示播放地址
-            playError.value =
-              formatInfo.message ||
-              '此视频格式不支持网页播放，请使用第三方播放器打开';
+            // 注意：URL已经成功解析，只是格式不支持网页播放。
+            // 标记 externalPlayerLaunched=true 以便调用方（如E2E测试）能识别此路径为"已成功解析但需外部播放"。
+            // 用户可在弹窗中复制URL到外部播放器打开。
+            externalPlayerLaunched.value = true;
             await ipcRenderer.invoke('show-unsupported-format-dialog', {
               format: formatInfo.format || formatInfo.contentType || '未知格式',
               directUrl: vlcUrl,
@@ -1189,7 +1305,9 @@ export const useAppStore = defineStore('app', () => {
             return;
           }
           const rawResult = await spider.searchContent(keyword, quick);
-          const result = JSON.parse(rawResult || '{}');
+          const result = normalizeSearchContentResponse(
+            JSON.parse(rawResult || '{}'),
+          );
           const list = result.list || [];
           console.log(
             `[Store] doSearch: ${site.name} found ${list.length} results`,
@@ -1311,6 +1429,7 @@ export const useAppStore = defineStore('app', () => {
     homeLoading,
     activeCategory,
     filterValues,
+    configCenterSpiderLoaded,
     categoryVodList,
     categoryPage,
     categoryPageCount,
@@ -1327,6 +1446,7 @@ export const useAppStore = defineStore('app', () => {
     resumeProgress,
     playLoading,
     playError,
+    externalPlayerLaunched,
     searchResults,
     searchLoading,
     liveGroups,

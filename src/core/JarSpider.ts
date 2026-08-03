@@ -304,28 +304,79 @@ export class JarSpider implements ISpider {
     try {
       const parsed = JSON.parse(raw);
       const url: string = parsed?.url || '';
-      if (!url && id && id.includes('|')) {
-        const [realUrl, suffix] = id.split('|');
-        // Only treat as playable URL if it ends with a known media format
-        // and the suffix is a known parser tag (lzm3u8, lzmp4, etc.).
+      if (!url) {
+        // Fallback 1: id contains "|suffix" (e.g. "http://x.m3u8|lzm3u8")
+        if (id && id.includes('|')) {
+          const [realUrl, suffix] = id.split('|');
+          if (
+            realUrl &&
+            /\.(m3u8|mp4|flv|ts)(\?|$)/i.test(realUrl) &&
+            /^(lz)?m3u8$|^(lz)?mp4$|^flv$/i.test(suffix || '')
+          ) {
+            console.log(
+              '[JarSpider] playerContent fallback: spider returned empty url, using id directly:',
+              { suffix, urlPreview: realUrl.substring(0, 100) },
+            );
+            const fallback = {
+              ...parsed,
+              url: realUrl,
+              parse: 0,
+              jx: 0,
+              header:
+                parsed.header ||
+                JSON.stringify({
+                  'User-Agent':
+                    'Mozilla/5.0 (Linux; Android 13; SM-A037U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36  uacq',
+                }),
+            };
+            return JSON.stringify(fallback);
+          }
+        }
+        // Fallback 2: id is a direct playable URL (no suffix). Triggered when
+        // spider threw an exception (e.g. WexV6DaShiXiong's JSONException on
+        // null url field) and callMethod returned {msg:"..."}. If the id is
+        // itself a media URL, use it directly.
         if (
-          realUrl &&
-          /\.(m3u8|mp4|flv|ts)(\?|$)/i.test(realUrl) &&
-          /^(lz)?m3u8$|^(lz)?mp4$|^flv$/i.test(suffix || '')
+          id &&
+          /^https?:\/\//i.test(id) &&
+          /\.(m3u8|mp4|flv|ts)(\?|$)/i.test(id)
         ) {
           console.log(
-            '[JarSpider] playerContent fallback: spider returned empty url, using id directly:',
-            { suffix, urlPreview: realUrl.substring(0, 100) },
+            '[JarSpider] playerContent fallback: spider threw error, id is direct media URL:',
+            { urlPreview: id.substring(0, 100) },
           );
-          const fallback = {
-            ...parsed,
-            url: realUrl,
+          return JSON.stringify({
+            url: id,
             parse: 0,
             jx: 0,
-            header: parsed.header || JSON.stringify({
+            header: JSON.stringify({
               'User-Agent':
                 'Mozilla/5.0 (Linux; Android 13; SM-A037U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36  uacq',
             }),
+          });
+        }
+        // Fallback 3: obfuscated field names. Some spiders (e.g.
+        // csp_SportFeiQiuGuard) return playerContent result with obfuscated
+        // field names like {"OoOo0oO0o0o0oOo0":"rtmp://..."} instead of
+        // {"url":"..."}. Scan all string values for one that looks like a
+        // playable stream URL and use it.
+        const urlLike = this.findUrlLikeValue(parsed);
+        if (urlLike) {
+          console.log(
+            '[JarSpider] playerContent fallback: spider used obfuscated field name, extracted URL:',
+            { urlPreview: urlLike.substring(0, 100) },
+          );
+          const fallback = {
+            ...parsed,
+            url: urlLike,
+            parse: 0,
+            jx: 0,
+            header:
+              parsed.header ||
+              JSON.stringify({
+                'User-Agent':
+                  'Mozilla/5.0 (Linux; Android 13; SM-A037U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36  uacq',
+              }),
           };
           return JSON.stringify(fallback);
         }
@@ -334,6 +385,33 @@ export class JarSpider implements ISpider {
       // Not JSON or no url field — return raw result as-is.
     }
     return raw;
+  }
+
+  /**
+   * Scan an object's string values for one that looks like a playable
+   * stream URL. Used as a fallback when the spider uses obfuscated field
+   * names (e.g. csp_SportFeiQiuGuard returns {"OoOo0oO0o0o0oOo0":"rtmp://..."}).
+   * Returns the first matching URL string, or null if none found.
+   */
+  private findUrlLikeValue(obj: any): string | null {
+    if (!obj || typeof obj !== 'object') return null;
+    const urlPattern = /^(rtmp|rtsp|https?|ftp):\/\/[^\s"'<>]+/i;
+    for (const value of Object.values(obj)) {
+      if (typeof value === 'string' && urlPattern.test(value)) {
+        // Reject obvious non-media URLs (e.g. referer/user-agent info pages).
+        // Accept if URL ends with media extensions OR has stream-like path.
+        if (
+          /\.(m3u8|mp4|flv|ts)(\?|$)/i.test(value) ||
+          /^rtmp:\/\//i.test(value) ||
+          /^rtsp:\/\//i.test(value) ||
+          value.includes('auth_key=') ||
+          value.includes('token=')
+        ) {
+          return value;
+        }
+      }
+    }
+    return null;
   }
 
   async listMethods(): Promise<string[]> {

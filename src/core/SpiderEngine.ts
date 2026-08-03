@@ -91,6 +91,17 @@ const SITE_EXT_OVERRIDES: Array<{
     reason:
       '444421.xyz API 加密 key 与 ext 中的 #getapp@TMD@2025 不匹配（解密失败返回空）；替换为可用的 bk/9.txt (API http://103.236.72.182:3688 + 匹配 key)',
   },
+  {
+    // 厂长: www.czzy89.com 超时（域名失效）。Czsapp 是 HTML 爬虫，需要直接访问 HTML 首页。
+    // cz01.vip/czzy.site 只是导航页（无 vod 内容）；4kcz.com 是真实内容站点，但有 SafeLine WAF。
+    // 先尝试 4kcz.com，让 spider 自带的 headers 处理 WAF。
+    api: 'csp_Czsapp',
+    contains: 'https://www.czzy89.com',
+    replaceFrom: 'https://www.czzy89.com',
+    replaceTo: 'https://www.4kcz.com',
+    reason:
+      'www.czzy89.com 超时；cz01.vip/czzy.site 是导航页无内容；4kcz.com 是真实内容站，依赖 spider headers 绕过 WAF',
+  },
 ];
 
 function applyExtOverride(source: SourceBean): {
@@ -435,7 +446,8 @@ export class SpiderEngine {
     return this.spiderCache.get(key) ?? null;
   }
 
-  clear(key: string): void {
+  async clear(key: string): Promise<void> {
+    const clearPromises: Promise<unknown>[] = [];
     for (const [cacheKey, spider] of this.spiderCache.entries()) {
       if (cacheKey.startsWith(key + '-')) {
         try {
@@ -448,12 +460,17 @@ export class SpiderEngine {
 
         try {
           const ipc = window.electronIPC || require('electron').ipcRenderer;
-          ipc.invoke('jar:clearSpiderCache', cacheKey).catch(() => {});
+          // Await in-memory + file cache clear so the next getSpider() gets
+          // a fresh instance with the current ext (not stale state).
+          clearPromises.push(
+            ipc.invoke('jar:clearSpiderCache', cacheKey).catch(() => {}),
+          );
         } catch {
           /* ignore */
         }
       }
     }
+    await Promise.all(clearPromises);
   }
 
   clearAll(): void {
