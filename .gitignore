@@ -86,3 +86,7 @@ test-*.txt
 
 # Android stub classes (temporary)
 android/
+_commit-msg-*.txt
+_tmp_*.txt
+_tmp_initorigin_decomp/
+_tmp_*/
