@@ -1,0 +1,71 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.tvbox.spiderserver'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.tvbox.spiderserver"
+        minSdk 24
+        targetSdk 36
+        versionCode 1
+        versionName "1.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        // Docker redroid x86_64 容器: 只打包 arm64-v8a。
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+
+    // NanoHTTPD for HTTP server
+    implementation 'org.nanohttpd:nanohttpd:2.3.1'
+
+    // JSON processing
+    implementation 'com.google.code.gson:gson:2.10.1'
+
+    // ZXing core — some spider JARs generate QR codes (e.g. config center
+    // spiders). Without this, ClassNotFoundException for
+    // com.google.zxing.EncodeHintType crashes the spider process.
+    implementation 'com.google.zxing:core:3.5.3'
+
+    // catvod library — provides com.github.catvod.crawler.Spider base class,
+    // com.github.catvod.Init.context() (used by merge.* classes in spider JARs),
+    // OkHttp wrapper, Path/Util utilities. Mirrors FongMi/TV's :catvod module.
+    implementation project(':catvod')
+
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+}

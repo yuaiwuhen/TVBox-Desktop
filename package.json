@@ -18,11 +18,7 @@
     "build:installer": "vite build && electron-builder --publish never",
     "icon": "node scripts/generate-icon.mjs",
     "preview": "vite preview",
-    "test": "vitest run",
-    "docker:build": "cd docker && docker-compose build",
-    "docker:up": "cd docker && docker-compose up -d",
-    "docker:down": "cd docker && docker-compose down",
-    "docker:logs": "docker logs tvbox-spider"
+    "test": "vitest run"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
@@ -81,6 +77,10 @@
           "token.txt",
           "kk.txt"
         ]
+      },
+      {
+        "from": "android-app/app/build/outputs/apk/debug/app-debug.apk",
+        "to": "spider/app-debug.apk"
       }
     ],
     "directories": {

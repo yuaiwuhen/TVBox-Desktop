@@ -1,17 +1,18 @@
 /**
  * JarSpider - JAR Spider implementation for renderer process
  *
- * 使用HTTP与Docker容器中的Spider服务器通信
+ * 使用HTTP与MuMu 模拟器内的 Spider 服务器通信
  * 替代原有的IPC + java-bridge方式
  */
 
 import type { ISpider } from './models';
 import { useLoading } from '../composables/useLoading';
+import { getSpiderApiBaseUrl } from './ConfigParser';
 import axios from 'axios';
 
-// HTTP客户端实例
+// HTTP客户端实例 — base URL is configurable (MuMu adb forward default).
 const httpClient = axios.create({
-  baseURL: 'http://127.0.0.1:19978',
+  baseURL: getSpiderApiBaseUrl(),
   timeout: 120000,
   headers: {
     'Content-Type': 'application/json',
@@ -234,11 +235,6 @@ export class JarSpider implements ISpider {
           requestData.flag = args[0] || '';
           requestData.id = args[1] || '';
           requestData.vipFlags = args[2] || [];
-          // Cookies are NOT injected from PC localStorage anymore.
-          // The JAR's SpiderManager reads credentials from SharedPreferences
-          // (populated via /spider/saveLogin) — spiders that read
-          // SharedPreferences (e.g. csp_Duopan for Quark/UC/Baidu) find
-          // the logged-in state directly. The PC never touches credentials.
           break;
 
         default:

@@ -7,8 +7,7 @@
  *
  * NOTE: All pan-related functionality that previously relied on the Java
  * bridge will now return empty/null results. These features are temporarily
- * disabled and should be re-implemented to use the Docker HTTP API
- * (see SpiderProxyService.ts).
+ * disabled. JAR proxy execution is handled on the Android side (MuMu).
  */
 
 const stubJava = {

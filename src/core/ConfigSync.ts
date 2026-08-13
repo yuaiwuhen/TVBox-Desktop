@@ -1,7 +1,7 @@
 /**
  * ConfigSync - 配置文件持久化（渲染进程侧）
  *
- * 将关键配置（配置URL、网盘登录、播放设置等）从 localStorage 同步到
+ * 将关键配置（配置URL、播放设置等）从 localStorage 同步到
  * userData/config.json 文件，确保应用重装或 localStorage 损坏后配置不丢失。
  *
  * 工作流程：
@@ -58,12 +58,6 @@ const PERSISTED_KEYS = [
   'tvbox_live_auto_switch',
   // Search
   'tvbox_search_history',
-  // Pan login (cookies/tokens)
-  'pan_login_quark',
-  'pan_login_uc',
-  'pan_login_aliyun',
-  'pan_login_baidu',
-  'pan_login_bili',
 ];
 
 function getIPC(): any {
@@ -86,9 +80,6 @@ function getIPC(): any {
  * 从文件恢复配置到 localStorage。
  * 仅在 localStorage 中没有对应 key 时写入（不覆盖已有值），
  * 这样如果用户在当前会话中已修改配置，不会被文件中的旧值覆盖。
- *
- * 但对于登录信息（pan_login_*），如果 localStorage 中有值则保留，
- * 否则从文件恢复。
  */
 export async function restoreFromFile(): Promise<{
   restored: string[];

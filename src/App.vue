@@ -193,14 +193,14 @@
       </div>
     </transition>
 
-    <!-- Docker Installation Guide Dialog -->
-    <DockerInstallGuide v-if="showDockerInstallGuide" @close="showDockerInstallGuide = false" />
+    <!-- MuMu Setup Guide Dialog -->
+    <MuMuSetupGuide v-if="showMuMuSetupGuide" @close="showMuMuSetupGuide = false" />
   </div>
 </template>
 
 <script setup lang="ts">
 import LoadingToast from './components/LoadingToast.vue'
-import DockerInstallGuide from './components/DockerInstallGuide.vue'
+import MuMuSetupGuide from './components/MuMuSetupGuide.vue'
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -211,7 +211,6 @@ import { AdBlocker } from './core/AdBlocker'
 import { VideoParseRuler } from './core/VideoParseRuler'
 import { configParser } from './core/ConfigParser'
 import { spiderEngine } from './core/SpiderEngine'
-import { PanLogin } from './core/PanLogin'
 import { restoreFromFile, saveToFile, flushSave } from './core/ConfigSync'
 import type { RemoteControlHandler } from './core/RemoteServer'
 import {
@@ -467,41 +466,34 @@ const remoteHandler: RemoteControlHandler = {
   },
 }
 
-// Docker status tracking
-const dockerStatus = ref({
+// MuMu status tracking
+const muMuStatus = ref({
   installed: false,
   running: false,
-  containerRunning: false,
+  booted: false,
+  serviceReady: false,
   message: ''
 });
-const showDockerInstallGuide = ref(false);
+const showMuMuSetupGuide = ref(false);
 
 onMounted(async () => {
   console.log('[App] Starting initialization...')
   
-  // Listen for Docker status updates from main process
+  // Listen for MuMu status updates from main process
   const { ipcRenderer } = window.require('electron')
-  ipcRenderer.on('docker:status', (_event: any, data: any) => {
-    console.log('[Renderer] Docker status received:', data);
-    dockerStatus.value = data;
+  ipcRenderer.on('mumu:status', (_event: any, data: any) => {
+    console.log('[Renderer] MuMu status received:', data);
+    muMuStatus.value = data;
     
-    // Show appropriate message
     if (!data.installed) {
-      showDockerInstallGuide.value = true;
-    } else if (!data.running) {
-      ElMessage.warning(data.message || 'Docker未运行，请启动Docker Desktop');
-      showDockerInstallGuide.value = false;
-    } else if (!data.containerRunning && data.error) {
-      ElMessage.error(data.message || 'Spider服务启动失败');
-      showDockerInstallGuide.value = false;
-    } else if (data.containerRunning) {
-      ElMessage.success(data.message || 'Docker服务运行正常');
-      showDockerInstallGuide.value = false;
+      showMuMuSetupGuide.value = true;
+    } else if (data.serviceReady) {
+      showMuMuSetupGuide.value = false;
     }
   });
 
   // Restore config from file BEFORE any other initialization.
-  // This ensures configUrl, pan login info, and settings are available
+  // This ensures configUrl and settings are available
   // even if localStorage was cleared or the app was reinstalled.
   try {
     const result = await restoreFromFile()
@@ -529,15 +521,6 @@ onMounted(async () => {
 
   AdBlocker.loadDefault()
   localProxy.setDohIndex(store.dohIndex)
-
-  // Refresh in-memory login status cache from the JAR on startup.
-  // The JAR is the single source of truth — credentials live in
-  // SharedPreferences inside the Docker container, not on the PC.
-  try {
-    await PanLogin.refreshAllStatuses()
-  } catch (e) {
-    console.error('[App] PanLogin.refreshAllStatuses failed:', e)
-  }
 
   if (store.configUrl) {
     console.log(`[App] Loading config from: ${store.configUrl}`)

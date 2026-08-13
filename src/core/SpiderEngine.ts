@@ -6,9 +6,6 @@ import { JarSpider } from './JarSpider';
 import { XbpqSpider } from './XbpqSpider';
 import { XyqhikerSpider } from './XyqhikerSpider';
 // DrpySpider no longer used — drpy spiders are handled by JsSpider
-// PanLogin no longer used here — bili cookie injection is handled JAR-side
-// (SpiderManager.initSpider reads Wex_bili_cookie from SharedPreferences
-// and injects it into ext.cookie before calling spider.init()).
 
 export class SpiderEngine {
   private spiderCache: Map<string, ISpider> = new Map();
@@ -103,7 +100,7 @@ export class SpiderEngine {
     const api = source.api || '';
 
     // For JAR spiders (csp_ prefix), we return the JAR URL, not the api field
-    // The actual class name is in the api field (e.g., "csp_Duopan")
+    // The actual class name is in the api field
     if (api.startsWith('csp_')) {
       return this.resolveJarUrl(source);
     }
@@ -191,9 +188,8 @@ export class SpiderEngine {
     const hasJarUrl = !!this.resolveJarUrl(source);
     const apiStr = source.api || '';
 
-    // The JAR's SpiderManager.initSpider handles bili cookie injection
-    // (reads Wex_bili_cookie from SharedPreferences and injects into ext).
-    // The PC no longer touches credentials — JAR is the single source of truth.
+    // The JAR's SpiderManager.initSpider is the single source of truth for
+    // spider setup — the PC only passes through the config ext.
     const effectiveExt = source.ext || '';
 
     // Check for drpy spider (api contains drpy library URL or key starts with drpy_js_)

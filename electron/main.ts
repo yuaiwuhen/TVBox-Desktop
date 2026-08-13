@@ -15,19 +15,12 @@ import http from 'http';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { registerJarLoaderIPC, jarLoader } from './JarLoader';
-import { registerDockerIPC, dockerManager } from './DockerIPC';
-import { QuarkPanService } from './QuarkPanService';
-import { UCPanService } from './UCPanService';
-import { AliyunPanService } from './AliyunPanService';
-import { BaiduPanService } from './BaiduPanService';
-import { Pan123Service } from './Pan123Service';
-import { Pan139Service } from './Pan139Service';
-import { Pan189Service } from './Pan189Service';
-import { Pan115Service } from './Pan115Service';
-import { PanLoginService } from './PanLoginService';
-import { proxyServer } from './ProxyServer';
+import { registerMuMuIPC } from './MuMuIPC';
+import {
+  applyConfiguredSpiderBaseUrl,
+  spiderAPIClient,
+} from './SpiderAPIClient';
 import { loadConfigFromFile, saveConfigToFile } from './ConfigPersistence';
-import { SpiderAPIClient, spiderAPIClient } from './SpiderAPIClient';
 import {
   AutoInstallManager,
   autoInstallManager,
@@ -123,244 +116,18 @@ ipcMain.handle('debug:stopLogCapture', () => {
   return logs;
 });
 
-// Check Docker environment on startup - Enhanced version with auto-deploy
-async function checkDockerEnvironment(): Promise<void> {
-  try {
-    console.log('[Main] Checking Docker environment...');
-
-    // Import DockerManager
-    const DockerIPC = await import('./DockerIPC');
-    const dockerManager = DockerIPC.dockerManager;
-
-    // Check if Docker is installed and running
-    const status = await dockerManager.checkDockerRunning();
-
-    if (!status.installed) {
-      console.log('[Main] Docker not installed');
-      const win = BrowserWindow.getAllWindows()[0];
-      if (win) {
-        win.webContents.send('docker:status', {
-          installed: false,
-          running: false,
-          message: 'Docker未安装，请先安装Docker Desktop',
-        });
-      }
-      return;
-    }
-
-    if (!status.running) {
-      console.log('[Main] Docker installed but not running');
-      const win = BrowserWindow.getAllWindows()[0];
-      if (win) {
-        win.webContents.send('docker:status', {
-          installed: true,
-          running: false,
-          message: 'Docker已安装但未运行，正在尝试启动...',
-        });
-      }
-
-      // Try to start Docker service
-      try {
-        await dockerManager.startDockerService();
-        console.log('[Main] Docker service started successfully');
-      } catch (error: any) {
-        console.error('[Main] Failed to start Docker service:', error);
-        const win = BrowserWindow.getAllWindows()[0];
-        if (win) {
-          win.webContents.send('docker:status', {
-            installed: true,
-            running: false,
-            error: error.message,
-            message: 'Docker服务启动失败，请手动启动Docker Desktop',
-          });
-        }
-        return;
-      }
-    }
-
-    console.log('[Main] Docker is running, version:', status.version);
-
-    // Notify renderer that Docker is ready
-    let win = BrowserWindow.getAllWindows()[0];
-    if (win) {
-      win.webContents.send('docker:status', {
-        installed: true,
-        running: true,
-        message: 'Docker运行正常，正在准备Spider服务...',
-      });
-    }
-
-    // Check and pull/build Docker image
-    try {
-      const imageExists = await dockerManager.imageExists();
-      if (!imageExists) {
-        console.log('[Main] Spider image not found, pulling/building...');
-
-        win = BrowserWindow.getAllWindows()[0];
-        if (win) {
-          win.webContents.send('docker:status', {
-            installed: true,
-            running: true,
-            pullingImage: true,
-            message: '正在下载Spider服务镜像，首次运行需要几分钟...',
-          });
-        }
-
-        // Try to build image using docker-compose
-        const { promisify } = await import('util');
-        const { exec: execCallback } = await import('child_process');
-        const exec = promisify(execCallback);
-
-        try {
-          const projectRoot = path.resolve(__dirname, '..');
-          await exec('pnpm docker:build', {
-            cwd: projectRoot,
-            timeout: 600000, // 10分钟超时
-          });
-          console.log('[Main] Spider image built successfully');
-        } catch (buildError: any) {
-          console.error('[Main] Failed to build image:', buildError);
-          throw new Error(`镜像构建失败: ${buildError.message}`);
-        }
-      } else {
-        console.log('[Main] Spider image already exists');
-      }
-    } catch (error: any) {
-      console.error('[Main] Failed to prepare Docker image:', error);
-      win = BrowserWindow.getAllWindows()[0];
-      if (win) {
-        win.webContents.send('docker:status', {
-          installed: true,
-          running: true,
-          error: error.message,
-          message: 'Spider镜像准备失败: ' + error.message,
-        });
-      }
-      return;
-    }
-
-    // Check if Spider container is running
-    const containerStatus = await dockerManager.getContainerStatus();
-    if (!containerStatus.running) {
-      console.log('[Main] Spider container not running, starting...');
-
-      win = BrowserWindow.getAllWindows()[0];
-      if (win) {
-        win.webContents.send('docker:status', {
-          installed: true,
-          running: true,
-          startingContainer: true,
-          message: '正在启动Spider服务容器...',
-        });
-      }
-
-      // Try to start the container
-      try {
-        await dockerManager.startContainer();
-        console.log('[Main] Spider container started successfully');
-      } catch (error: any) {
-        console.error('[Main] Failed to start Spider container:', error);
-        win = BrowserWindow.getAllWindows()[0];
-        if (win) {
-          win.webContents.send('docker:status', {
-            installed: true,
-            running: true,
-            containerRunning: false,
-            error: error.message,
-            message: 'Spider容器启动失败: ' + error.message,
-          });
-        }
-        return;
-      }
-    } else {
-      console.log('[Main] Spider container is running');
-    }
-
-    // Wait for Spider service to be ready
-    console.log('[Main] Waiting for Spider service to be ready...');
-    win = BrowserWindow.getAllWindows()[0];
-    if (win) {
-      win.webContents.send('docker:status', {
-        installed: true,
-        running: true,
-        containerRunning: true,
-        initializing: true,
-        message: 'Spider容器已启动，等待服务就绪...',
-      });
-    }
-
-    // Check service health
-    try {
-      const axios = (await import('axios')).default;
-      let retries = 0;
-      const maxRetries = 30; // 30次，每次2秒，总共60秒
-
-      while (retries < maxRetries) {
-        try {
-          const response = await axios.get('http://127.0.0.1:19978/health', {
-            timeout: 3000,
-          });
-
-          if (response.data && response.data.success) {
-            console.log('[Main] Spider service is ready');
-
-            win = BrowserWindow.getAllWindows()[0];
-            if (win) {
-              win.webContents.send('docker:status', {
-                installed: true,
-                running: true,
-                containerRunning: true,
-                serviceReady: true,
-                message: 'Spider服务已就绪，可以正常使用',
-              });
-            }
-            return;
-          }
-        } catch {
-          // Service not ready yet, retry
-          retries++;
-          if (retries < maxRetries) {
-            await new Promise((resolve) => setTimeout(resolve, 2000));
-          }
-        }
-      }
-
-      // If we get here, service didn't become ready
-      throw new Error('服务启动超时。可能需要手动安装Spider APK');
-    } catch (error: any) {
-      console.error('[Main] Spider service not ready:', error);
-      win = BrowserWindow.getAllWindows()[0];
-      if (win) {
-        win.webContents.send('docker:status', {
-          installed: true,
-          running: true,
-          containerRunning: true,
-          serviceReady: false,
-          error: error.message,
-          message: 'Spider服务未就绪: ' + error.message,
-        });
-      }
-    }
-  } catch (error: any) {
-    console.error('[Main] Docker check failed:', error);
-    const win = BrowserWindow.getAllWindows()[0];
-    if (win) {
-      win.webContents.send('docker:status', {
-        error: error.message,
-        message: 'Docker环境检查失败: ' + error.message,
-      });
-    }
-  }
-}
-
 /**
  * 初始化Spider服务
+ *
+ * 不加载任何默认配置：用户需自行填写配置地址。
+ * 这里只检查 Spider 服务是否可用；配置由渲染进程按用户输入加载。
  */
 async function initializeSpiderService(): Promise<void> {
   try {
     console.log('[Main] Initializing Spider service...');
 
-    const CONFIG_URL = 'https://9280.kstore.vip/newwex.json';
+    // Apply user-configured Spider API base URL before any requests.
+    applyConfiguredSpiderBaseUrl();
 
     // 检查Spider服务是否可用（最多等待3次）
     let isHealthy = false;
@@ -373,44 +140,16 @@ async function initializeSpiderService(): Promise<void> {
     if (!isHealthy) {
       console.error(
         '[Main] Spider service not available — refusing to load mock data. ' +
-          'Please ensure the Docker container (tvbox-spider) is running.',
+          'Please ensure the MuMu emulator + spider service is running.',
       );
       win?.webContents.send('spider:error', {
         message:
-          'Spider服务不可用，请确认 Docker 容器 (tvbox-spider) 已启动。不会显示示例数据。',
+          'Spider服务不可用，请确认 MuMu 模拟器与 Spider 服务已启动。不会显示示例数据。',
       });
       return;
     }
 
     console.log('[Main] Spider service is healthy');
-
-    // 加载配置文件
-    await spiderAPIClient.loadSpidersFromConfig(CONFIG_URL);
-
-    // 获取首页数据
-    const firstSpiderKey = spiderAPIClient
-      .getLoadedSpiders()
-      .keys()
-      .next().value;
-
-    if (firstSpiderKey) {
-      console.log('[Main] Getting home content for spider:', firstSpiderKey);
-      const homeContent = await spiderAPIClient.homeContent(
-        firstSpiderKey,
-        true,
-      );
-
-      console.log('[Main] Home content loaded:', {
-        classes: homeContent.classes?.length || 0,
-        items: homeContent.list?.length || 0,
-      });
-
-      // 发送首页数据到渲染进程
-      win?.webContents.send('spider:homeData', {
-        spiderKey: firstSpiderKey,
-        homeContent,
-      });
-    }
   } catch (error: any) {
     console.error('[Main] Failed to initialize Spider service:', error.message);
     win?.webContents.send('spider:error', {
@@ -445,21 +184,6 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => {
     win?.webContents.send('main-process-message', new Date().toLocaleString());
-    // Send the current ProxyServer port (if started) so the renderer can
-    // rewrite proxy:// URLs to the correct local proxy URL.
-    const proxyPort = proxyServer.getPort();
-    if (proxyPort > 0) {
-      win?.webContents.send('proxy-port-changed', proxyPort);
-    }
-  });
-
-  // Whenever the ProxyServer port changes (initial start, restart), notify
-  // the renderer so it can update its LOCAL_PROXY constant.
-  proxyServer.setPortCallback((port: number) => {
-    if (port > 0) {
-      console.log(`[Main] Notifying renderer of proxy port: ${port}`);
-      win?.webContents.send('proxy-port-changed', port);
-    }
   });
 
   // Register DevTools shortcut (F12)
@@ -488,7 +212,7 @@ function createWindow() {
   win.webContents.openDevTools({ mode: 'detach' });
 
   // Video header injection + anti-leech interceptor.
-  // Some Guard spiders (WexGuaZi) return direct video URLs (https://...) with
+  // Some spiders return direct video URLs (https://...) with
   // custom headers (User-Agent, Referer) that the browser cannot set:
   //   - User-Agent is a forbidden header in fetch/XHR
   //   - Referer is controlled by the browser
@@ -594,13 +318,6 @@ ipcMain.handle('window-toggle-maximize', () => {
 
 ipcMain.handle('window-is-maximized', () => {
   return win ? win.isMaximized() : false;
-});
-
-// Return the current ProxyServer listening port. Renderer uses this on
-// startup to rewrite proxy:// URLs to the correct local proxy URL, since
-// the port-changed event may fire before the renderer is ready to listen.
-ipcMain.handle('proxy:getPort', () => {
-  return proxyServer.getPort();
 });
 
 // Config persistence IPC handlers
@@ -753,7 +470,7 @@ ipcMain.handle(
           const status = res.statusCode || 0;
           const contentType = res.headers['content-type'] || '';
 
-          // For 415, ProxyServer returns JSON with directUrl
+          // For 415, proxy endpoint may return JSON with directUrl
           if (status === 415) {
             let body = '';
             res.on('data', (chunk: Buffer) => (body += chunk.toString()));
@@ -897,65 +614,6 @@ ipcMain.handle(
   },
 );
 
-// =============================================================================
-// Netdisk login credential management — JAR is the single source of truth.
-//
-// The PC client does NOT persist any netdisk credentials locally. After a
-// successful QR scan, the PC pushes credentials to the JAR via
-// spider:saveLogin; the JAR stores them in SharedPreferences. Login status
-// queries (spider:loginStatus) and logout (spider:logout) also go through
-// the JAR.
-// =============================================================================
-
-ipcMain.handle(
-  'spider:saveLogin',
-  async (
-    _event,
-    params: {
-      panType: string;
-      cookie?: string;
-      refreshToken?: string;
-      accessToken?: string;
-      userId?: string;
-      nickname?: string;
-    },
-  ) => {
-    try {
-      return await spiderAPIClient.saveLogin(params);
-    } catch (e: any) {
-      console.warn('[Main] spider:saveLogin failed:', e.message);
-      return { success: false, error: e.message };
-    }
-  },
-);
-
-ipcMain.handle('spider:loginStatus', async (_event, panType: string) => {
-  try {
-    return await spiderAPIClient.loginStatus(panType);
-  } catch (e: any) {
-    console.warn('[Main] spider:loginStatus failed:', e.message);
-    return { success: false, error: e.message };
-  }
-});
-
-ipcMain.handle('spider:logout', async (_event, panType: string) => {
-  try {
-    return await spiderAPIClient.logout(panType);
-  } catch (e: any) {
-    console.warn('[Main] spider:logout failed:', e.message);
-    return { success: false, error: e.message };
-  }
-});
-
-ipcMain.handle('spider:getLogin', async (_event, panType: string) => {
-  try {
-    return await spiderAPIClient.getLogin(panType);
-  } catch (e: any) {
-    console.warn('[Main] spider:getLogin failed:', e.message);
-    return { success: false, error: e.message };
-  }
-});
-
 // Show unsupported format dialog — sends event to renderer for modern UI
 ipcMain.handle(
   'show-unsupported-format-dialog',
@@ -1052,67 +710,34 @@ app.whenReady().then(async () => {
   // Register JarLoader IPC handlers
   registerJarLoaderIPC();
 
-  // Register Docker IPC handlers
-  registerDockerIPC();
+  // Register MuMu IPC handlers (auto-start emulator + spider service)
+  registerMuMuIPC();
 
   // Create window first
   createWindow();
 
-  // Start local proxy server BEFORE any spider calls.
-  // The spider's Proxy.a() probes ports 9978-9999 with `GET /proxy?do=ck`
-  // expecting "ok"; if the server is not up, playerContent returns URLs with
-  // port -1 and the video stream cannot be played.
+  // Auto-start MuMu emulator + spider service, then initialize Spider API.
   try {
-    const port = await proxyServer.start();
-    console.log(`[Main] ProxyServer started on port ${port}`);
-  } catch (e: any) {
-    console.error('[Main] ProxyServer failed to start:', e.message);
-  }
+    console.log('[Main] Starting MuMu + Spider service setup...');
 
-  // Auto-install and initialize Spider service
-  try {
-    console.log('[Main] Starting auto-install process...');
+    // On Windows, auto-manage the MuMu emulator. On Mac/Linux the user
+    // configures their own Android runtime and the Spider API address.
+    if (process.platform === 'win32') {
+      const envStatus = await autoInstallManager.checkEnvironment();
 
-    // Step 1: Ensure Docker Desktop is running (start it if needed)
-    // On Windows, Docker Desktop may not be running after a reboot.
-    // This check runs on every app startup.
-    if (
-      process.platform === 'win32' ||
-      process.platform === 'linux' ||
-      process.platform === 'darwin'
-    ) {
-      const dockerReady = await autoInstallManager.ensureDockerReady();
-      if (!dockerReady) {
-        console.warn(
-          '[Main] Docker is not ready — Spider service will not be available. ' +
-            'Please install or start Docker Desktop and restart the app.',
-        );
-      }
-    }
-
-    // Step 2: Check environment status and start container if needed
-    const envStatus = await autoInstallManager.checkEnvironment();
-
-    if (envStatus.status === InstallStatus.SUCCESS) {
-      console.log('[Main] Environment already ready');
-      // Even when the environment is ready, always reinstall the latest APK
-      // so the spider service stays in sync with the PC client.
-      try {
-        await autoInstallManager.setupSpiderApp();
-      } catch (e: any) {
-        console.warn('[Main] APK upgrade failed (non-fatal):', e.message);
+      if (envStatus.status === InstallStatus.SUCCESS) {
+        console.log('[Main] Spider service already ready');
+      } else {
+        console.log('[Main] MuMu env not ready, auto-starting emulator...');
+        try {
+          await autoInstallManager.autoInstall();
+          console.log('[Main] Auto-install completed');
+        } catch (installErr: any) {
+          console.error('[Main] Auto-install failed:', installErr.message);
+        }
       }
     } else {
-      console.log(
-        '[Main] Environment not ready, auto-starting Docker container...',
-      );
-      // 自动启动 Docker 容器（Windows/Linux 统一 Docker 方案）
-      try {
-        await autoInstallManager.autoInstall();
-        console.log('[Main] Auto-install completed');
-      } catch (installErr: any) {
-        console.error('[Main] Auto-install failed:', installErr.message);
-      }
+      await autoInstallManager.checkEnvironment();
     }
 
     // Initialize Spider service (errors out if service unavailable — no mock fallback)
@@ -1126,14 +751,4 @@ app.whenReady().then(async () => {
     );
     // Don't quit, allow user to use app without Spider
   }
-
-  QuarkPanService.init();
-  UCPanService.init();
-  AliyunPanService.init();
-  BaiduPanService.init();
-  Pan123Service.init();
-  Pan139Service.init();
-  Pan189Service.init();
-  Pan115Service.init();
-  PanLoginService.init();
 });

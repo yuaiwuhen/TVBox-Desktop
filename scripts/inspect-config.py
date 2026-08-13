@@ -6,7 +6,7 @@ import io
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
-config_path = r'd:\Code\TVBox-Pc-Docker\scripts\newwex-config.json'
+config_path = sys.argv[1] if len(sys.argv) > 1 else r'config.json'
 with open(config_path, encoding='utf-8') as f:
     c = json.load(f)
 

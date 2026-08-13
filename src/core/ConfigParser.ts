@@ -11,18 +11,21 @@ import type {
 
 // ---------- Constants ----------
 
-// Default port matches ProxyServer.PREFERRED_PORT. Updated at runtime via
-// the `proxy-port-changed` IPC event from the main process (see main.ts).
-// The ProxyServer probes ports 9979-9999 and picks the first available, so
-// this default is just a placeholder until the actual port arrives.
-let proxyPort: number = 19978;
+// Renderer-side LocalProxyServer port. It handles do=js/py/live/go/cache,
+// /file, /doh and /m3u8 (JS/Python spiders + live). JAR proxy execution no
+// longer runs here — it lives on the Android side, reached via port 19978
+// (adb forward → emulator's NanoHTTPD :9978).
+const RENDERER_PROXY_PORT = 19980;
+const ANDROID_PROXY_URL = 'http://127.0.0.1:19978';
 
-/** Get the current local proxy URL (e.g. "http://127.0.0.1:9979"). */
+let proxyPort: number = RENDERER_PROXY_PORT;
+
+/** Get the renderer LocalProxyServer URL (e.g. "http://127.0.0.1:19980"). */
 export function getLocalProxy(): string {
   return `http://127.0.0.1:${proxyPort}`;
 }
 
-/** Update the local proxy port. Called when main process notifies us. */
+/** Update the renderer LocalProxyServer port (called after it starts). */
 export function setLocalProxyPort(port: number): void {
   if (typeof port === 'number' && port > 0 && port !== proxyPort) {
     console.log(`[ConfigParser] local proxy port updated: ${proxyPort} → ${port}`);
@@ -34,6 +37,25 @@ export function setLocalProxyPort(port: number): void {
 // Use a getter so the current port is always resolved at call time.
 function LOCAL_PROXY(): string {
   return getLocalProxy();
+}
+
+/**
+ * Android Spider API base URL. Windows: http://127.0.0.1:19978 (adb forward →
+ * emulator NanoHTTPD :9978). Mac/Linux users set their own runtime address in
+ * Settings (stored under `tvbox_spider_api_url`).
+ */
+export function getSpiderApiBaseUrl(): string {
+  if (typeof localStorage !== 'undefined') {
+    const stored = localStorage.getItem('tvbox_spider_api_url');
+    if (stored && stored.trim()) return stored.trim().replace(/\/+$/, '');
+  }
+  return ANDROID_PROXY_URL;
+}
+
+export function setSpiderApiBaseUrl(url: string): void {
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem('tvbox_spider_api_url', url.trim().replace(/\/+$/, ''));
+  }
 }
 
 // Electron IPC bridge - available in renderer with contextIsolation=false
@@ -65,32 +87,6 @@ function getIPC(): Window['electronIPC'] {
     return undefined;
   }
 }
-
-// One-time bootstrap: subscribe to proxy-port-changed events and fetch the
-// current port from the main process. This runs as soon as this module is
-// imported (i.e. as soon as the renderer starts), so subsequent calls to
-// checkReplaceProxy()/getLocalProxy() return the correct URL.
-(function bootstrapProxyPort() {
-  if (typeof window === 'undefined') return;
-  const ipc = getIPC();
-  if (!ipc) return;
-  // Listen for future port changes
-  if (ipc.on) {
-    ipc.on('proxy-port-changed', (port: number) => {
-      setLocalProxyPort(Number(port));
-    });
-  }
-  // Fetch the current port (in case the port-changed event already fired
-  // before this module loaded)
-  ipc
-    .invoke('proxy:getPort')
-    .then((port: number) => {
-      if (typeof port === 'number' && port > 0) setLocalProxyPort(port);
-    })
-    .catch((e: any) => {
-      console.warn('[ConfigParser] failed to fetch proxy port:', e?.message || e);
-    });
-})();
 
 const DEFAULT_ADS: string[] = [
   'mimg.0c1q0l.cn',
@@ -332,43 +328,52 @@ function fixContentPath(url: string, content: string): string {
   return content.replace(/\.\//g, base);
 }
 
-/** Replace proxy:// with local proxy URL (mirrors Android DefaultConfig.checkReplaceProxy)
+/**
+ * Replace proxy:// with the Android JAR proxy URL (mirrors Android
+ * DefaultConfig.checkReplaceProxy).
  *
- * Also rewrites http://127.0.0.1:<port>/proxy?... URLs that spiders return
- * when their Proxy.a() probe found a port (or returned -1 on failure) inside
- * the Android container. Since the container's 127.0.0.1 != the host's
- * 127.0.0.1, the browser cannot reach these URLs directly. Route them all
- * through the PC's local ProxyServer (main process, port 9979-9999) instead.
+ * JAR spiders run inside the MuMu emulator, where Proxy.set(9978) makes them
+ * emit URLs like `http://127.0.0.1:9978/proxy?do=hxq&...` (or -1 on probe
+ * failure). The browser cannot reach the emulator's loopback, so these are
+ * rewritten to `http://127.0.0.1:19978/proxy?...` — the adb forward that maps
+ * to the emulator's NanoHTTPD :9978.
  *
- * Exception: URLs already pointing to port 19978 are left untouched, since
- * that's the renderer-side LocalProxyServer (handles do=js/live/py/go/cache).
- * JsSpider.ts and LiveParser.ts construct such URLs directly.
+ * Renderer-constructed URLs (JsSpider do=js, LiveParser do=live, ...) point
+ * at the LocalProxyServer on port 19980 and are left untouched. URLs already
+ * pointing at 19978 with do=js/live/py/go/cache are legacy constructions from
+ * the old single-port scheme and get moved to 19980.
  */
 export function checkReplaceProxy(url: string): string {
   if (url.startsWith('proxy://')) {
-    return url.replace('proxy://', LOCAL_PROXY() + '/proxy?');
+    return url.replace('proxy://', ANDROID_PROXY_URL + '/proxy?');
   }
-  // Skip URLs already pointing to the renderer LocalProxyServer (port 19978).
-  // These are constructed by JsSpider/LiveParser and must NOT be rerouted to
-  // the main process ProxyServer, which doesn't handle do=js/live/py/go/cache.
-  if (
-    /^https?:\/\/(?:127\.0\.0\.1|localhost):19978\/proxy\?/.test(url)
-  ) {
-    return url;
-  }
-  // Rewrite http(s)://127.0.0.1:<port>/proxy?... → LOCAL_PROXY()/proxy?...
+  // Rewrite http(s)://127.0.0.1:<port>/proxy?... → appropriate local target.
   // The spider's Proxy.getUrl() constructs URLs like
   //   http://127.0.0.1:<port>/proxy?do=hxq&url=...
-  // where <port> is whatever Proxy.a() probed inside the container (often -1
-  // when the host proxy is unreachable from the container's loopback, or 9978
-  // when it found the spider's own HTTP server).
-  // Re-point these to the PC's local proxy so the browser can fetch them.
+  // where <port> is what Proxy.a() probed inside the emulator (often -1 on
+  // probe failure, or 9978 when it found the spider's own HTTP server).
   // Port pattern allows optional minus sign to handle the -1 sentinel.
   const proxyHostMatch = url.match(
     /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::-?\d+)?\/proxy\?/,
   );
   if (proxyHostMatch) {
-    return url.replace(proxyHostMatch[0], LOCAL_PROXY() + '/proxy?');
+    const portMatch = url.match(
+      /^https?:\/\/(?:127\.0\.0\.1|localhost):(-?\d+)\/proxy\?/,
+    );
+    const port = portMatch ? parseInt(portMatch[1], 10) : null;
+    // Android JAR probe ports (9978-9999) or the -1 sentinel → Android proxy.
+    if (port !== null && (port === -1 || (port >= 9978 && port <= 9999))) {
+      return url.replace(proxyHostMatch[0], ANDROID_PROXY_URL + '/proxy?');
+    }
+    // Old renderer-LocalProxyServer URL (port 19978) with js/live/py/go/cache
+    // → new LocalProxyServer port. The Android API lives on 19978 now.
+    if (port === 19978) {
+      return url.replace(proxyHostMatch[0], LOCAL_PROXY() + '/proxy?');
+    }
+    // Port 19980 (current LocalProxyServer) — leave as-is.
+    if (port === RENDERER_PROXY_PORT) {
+      return url;
+    }
   }
   return url;
 }
@@ -553,8 +558,8 @@ function tryExtractConfig(bytes: Uint8Array): string | null {
   }
 
   // 2. [A-Za-z0-9]{8}** pattern → base64 decode
-  // Note: aowu and similar configs use an 8-char alphanumeric prefix (may
-  // include digits, e.g. "et9lLZSr") followed by "**" then base64 JSON.
+  // Some configs use an 8-char alphanumeric prefix (may include digits,
+  // e.g. "et9lLZSr") followed by "**" then base64 JSON.
   // The regex matches the LAST 8 alphanumeric chars before "**", so it works
   // for both 8-char prefixes and longer ones.
   const pattern = /[A-Za-z0-9]{8}\*\*/;
@@ -639,7 +644,7 @@ function tryExtractConfig(bytes: Uint8Array): string | null {
 
   // 5. WebP steganography: data after RIFF container
   // WebP files start with "RIFF" + 4-byte little-endian file size + "WEBP".
-  // Some configs (aowu) append encoded JSON after the RIFF container ends.
+  // Some configs append encoded JSON after the RIFF container ends.
   if (
     bytes.length >= 12 &&
     bytes[0] === 0x52 && // 'R'
@@ -660,7 +665,7 @@ function tryExtractConfig(bytes: Uint8Array): string | null {
       const after = new TextDecoder('utf-8', { fatal: false }).decode(
         bytes.slice(riffEnd),
       );
-      // Try pattern first (aowu uses 8-char prefix + ** + base64 JSON)
+      // Try pattern first (8-char prefix + ** + base64 JSON)
       const pm = pattern.exec(after);
       if (pm) {
         const b64 = after.substring(pm.index + 10);
@@ -1006,7 +1011,7 @@ export class ConfigParser {
       if (isJsonString(content)) return content;
 
       // Pattern: [A-Za-z0-9]{8}\*\* → strip the 10-char prefix, base64-decode the rest
-      // Note: some configs (aowu) use an 8-char alphanumeric prefix that may
+      // Note: some configs use an 8-char alphanumeric prefix that may
       // include digits (e.g. "et9lLZSr"). The regex matches the last 8
       // alphanumeric chars before "**", so it works for both 8-char prefixes
       // and longer ones.

@@ -360,27 +360,19 @@ const initPlayer = async () => {
     }
 
     // Detect URL type: m3u8 HLS stream vs direct video file (mp4/mkv/ etc).
-    // Quark/UC/Baidu pan CDNs return direct mp4 URLs (not m3u8), which hls.js
-    // cannot handle — hls.js expects a manifest playlist. For non-m3u8 URLs,
-    // use native video.src which works for mp4 and most video formats.
-    // For proxy URLs (http://127.0.0.1:port/proxy?do=xxx&url=...), check the
-    // do= parameter: do=m3u8/mxn/proxy with m3u8 content uses hls.js;
-    // do=quarkDirect/ucDirect/baiduDirect are direct mp4 streams.
+    // For non-m3u8 URLs, use native video.src which works for mp4 and most
+    // video formats. For proxy URLs (http://127.0.0.1:port/proxy?do=xxx&url=...),
+    // check the do= parameter: do=m3u8/mxn/hls/hxq/proxy with m3u8 content
+    // uses hls.js; do=ali or other direct-stream types use native video.src.
     const urlLower = props.url.toLowerCase();
-    // do=ali is a special proxy type for pan resolvers (quark/uc/baidu/aliyun)
-    // that returns direct video files (mp4/mkv/etc). Use native video.src for
-    // proper handling of non-m3u8 content.
     const isM3u8Url =
       urlLower.includes('.m3u8') ||
       urlLower.includes('do=m3u8') ||
       urlLower.includes('do=mxn') ||
       urlLower.includes('do=hls') ||
       urlLower.includes('do=hxq') ||
-      (urlLower.includes('do=proxy') && !urlLower.includes('do=quarkdirect') && !urlLower.includes('do=ucdirect') && !urlLower.includes('do=baidudirect') && !urlLower.includes('do=ali'));
+      (urlLower.includes('do=proxy') && !urlLower.includes('do=ali'));
     const isDirectVideoUrl =
-      urlLower.includes('do=quarkdirect') ||
-      urlLower.includes('do=ucdirect') ||
-      urlLower.includes('do=baidudirect') ||
       urlLower.includes('do=ali') ||
       /\.(mp4|mkv|webm|avi|mov|flv|m4v)(\?|$)/i.test(props.url);
 

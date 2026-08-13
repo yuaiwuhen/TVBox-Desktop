@@ -205,7 +205,7 @@ export interface ISpider {
  * Browser cannot set these headers directly, so we route through proxy.
  * Returns the proxy URL if headers are embedded, otherwise the original URL.
  */
-export function processImageUrl(url: string | undefined, proxyPort: number = 19978): string {
+export function processImageUrl(url: string | undefined, proxyPort: number = 19980): string {
   if (!url) return '';
   // Check if URL contains embedded headers
   if (url.includes('@Referer=') || url.includes('@User-Agent=') || url.includes('@Cookie=')) {

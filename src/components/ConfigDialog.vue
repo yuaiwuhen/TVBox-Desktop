@@ -32,38 +32,6 @@
               </div>
             </template>
 
-            <!-- Multi-thread settings -->
-            <template v-else-if="configType === 'multithread'">
-              <div class="cfg-field">
-                <label>多线程状态</label>
-                <el-switch v-model="form.enabled" active-text="启用" inactive-text="关闭" />
-              </div>
-              <div class="cfg-field">
-                <label>线程数</label>
-                <el-input-number v-model="form.size" :min="1" :max="32" />
-              </div>
-              <div class="cfg-field">
-                <label>DNS</label>
-                <el-input v-model="form.dns" placeholder="例如：223.5.5.5 或留空" />
-              </div>
-            </template>
-
-            <!-- Generic config (boolean toggle) -->
-            <template v-else-if="configType === 'toggle'">
-              <div class="cfg-field">
-                <label>状态</label>
-                <el-switch v-model="form.value" active-text="启用" inactive-text="关闭" />
-              </div>
-            </template>
-
-            <!-- Generic config (text input) -->
-            <template v-else-if="configType === 'text'">
-              <div class="cfg-field">
-                <label>{{ fieldName || '值' }}</label>
-                <el-input v-model="form.text" :type="multiline ? 'textarea' : 'text'" :rows="multiline ? 4 : undefined" />
-              </div>
-            </template>
-
             <!-- Info-only -->
             <template v-else-if="configType === 'info'">
               <div class="cfg-info-box">
@@ -89,29 +57,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue';
+import { ref, watch } from 'vue';
 import { Close } from '@element-plus/icons-vue';
 import { ElMessage } from 'element-plus';
 
-function getIPC(): any {
-  if ((window as any).electronIPC) return (window as any).electronIPC;
-  try {
-    const { ipcRenderer } = require('electron');
-    return {
-      invoke: (channel: string, ...args: any[]) => ipcRenderer.invoke(channel, ...args),
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function setPref(key: string, value: string): Promise<void> {
-  const ipc = getIPC();
-  if (!ipc) throw new Error('IPC not available');
-  await ipc.invoke('spider-set-pref', { key, value });
-}
-
-type ConfigType = 'emby' | 'multithread' | 'toggle' | 'text' | 'info';
+type ConfigType = 'emby' | 'info';
 
 const props = defineProps<{
   visible: boolean;
@@ -131,71 +81,20 @@ const saving = ref(false);
 
 const form = ref<any>({
   name: '', url: '', username: '', password: '',
-  enabled: false, size: 4, dns: '',
-  value: false, text: '',
 });
 
 const configType = ref<ConfigType>('info');
 const title = ref('');
 const description = ref('');
-const fieldName = ref('');
-const multiline = ref(false);
 const infoLines = ref<string[]>([]);
-
-const prefKey = computed(() => {
-  const id = (props.vodId || '').toLowerCase();
-  // Map vod_id → SharedPreferences key used by WexConfigGuard
-  if (id === 'wexgozhuangtai' || id === 'wexgosize' || id === 'wexgodns') {
-    return {
-      zhuangtai: 'Wex_wexgo_zhuangtai',
-      size: 'Wex_wexgo_size',
-      dns: 'Wex_wexgo_dns',
-    };
-  }
-  if (id === 'danmubtn') return { value: 'Wex_danmu_auto' };
-  if (id === 'pankaiguan') return { value: 'Wex_pan_zhuanma' };
-  if (id === 'panpaixu') return { value: 'Wex_paixu' };
-  if (id === 'hongmeng') return { value: 'Wex_hongmeng' };
-  if (id === 'alistdiy') return { text: 'Wex_alist_diy' };
-  if (id === 'webdavdiy') return { text: 'Wex_webdav_diy' };
-  if (id === 'diyvod') return { text: 'Wex_diyvod' };
-  return null;
-});
-
-// Descriptions for aowu (csp_AAConfigAmns) config items.
-// These items don't have PC-side JAR HTTP endpoints, so we show an info
-// dialog with the current status (from remarks) and a note to use mobile.
-const AOWU_ITEM_INFO: Record<string, { desc: string; lines?: string[] }> = {
-  bili: { desc: '哔哩（B 站）相关配置，包括 Cookie、清晰度等。' },
-  kugou: { desc: '酷狗音乐配置，用于音乐源解析。' },
-  guanying: { desc: '观影配置，包括播放器、解码器等设置。' },
-  panlian: { desc: '网盘链路配置，用于网盘转码和解析。' },
-  shequ123: { desc: '123 社区入口（需登录账号后访问）。' },
-  shequgy: { desc: '光鸭·臻影社入口（需登录账号后访问）。' },
-  diyurl: { desc: '自定义解析接口 URL 配置。' },
-  backup: { desc: '备份当前配置数据到本地或云端。' },
-  restore: { desc: '从备份文件恢复配置数据。' },
-  login: {
-    desc: '网盘登录管理页，统一管理各网盘账号授权。',
-    lines: ['在此页面可查看/登录/退出各网盘账号。', 'PC 端请使用左侧配置列表中各网盘的单独登录入口。'],
-  },
-  switch: { desc: '网盘转码开关，控制是否启用网盘转码功能。' },
-  lineswitch: { desc: '线路开关，控制各播放线路的启用状态。' },
-  lineorder: { desc: '线路排序，调整播放线路的优先级顺序。' },
-  thread: { desc: '线程数设置，控制并发下载/解析线程数。' },
-  go: { desc: '弹幕服务（go 服务）运行状态。' },
-  danmu: { desc: '弹幕配置，包括弹幕显示、过滤等设置。' },
-  danmucolors: { desc: '弹幕颜色配置。' },
-  platform: { desc: '弹幕来源平台配置。' },
-};
 
 // Descriptions for feimao (csp_Config) go设置 items (numeric vod_ids).
 const FEIMAO_GO_INFO: Record<string, { desc: string; lines?: string[] }> = {
   '1': { desc: 'go 服务（弹幕/解析）当前运行状态。' },
   '2': { desc: '手动启动 go 服务。' },
   '4': {
-    desc: '夸克 Cookie 级别与复制操作。',
-    lines: ['查看当前夸克 Cookie 级别，或复制 Cookie 到剪贴板。'],
+    desc: 'Cookie 级别与复制操作。',
+    lines: ['查看当前 Cookie 级别，或复制 Cookie 到剪贴板。'],
   },
 };
 
@@ -210,8 +109,6 @@ function buildDialogMeta() {
   infoLines.value = [];
   form.value = {
     name: '', url: '', username: '', password: '',
-    enabled: false, size: 4, dns: '',
-    value: false, text: '',
   };
 
   if (id === 'editemby' || id === 'choseemby' || id === 'delemby' || id === 'clearemby' || id.includes('emby')) {
@@ -220,72 +117,6 @@ function buildDialogMeta() {
     if (id === 'delemby' || id === 'clearemby') {
       description.value = '此操作将清除已保存的 Emby 服务器配置。';
     }
-    return;
-  }
-  if (id === 'wexgozhuangtai' || id === 'wexgosize' || id === 'wexgodns') {
-    configType.value = 'multithread';
-    description.value = '多线程下载相关设置。修改后立即生效。';
-    // Parse current values from remarks
-    if (id === 'wexgosize' && remarks) {
-      const n = parseInt(remarks, 10);
-      if (!isNaN(n)) form.value.size = n;
-    }
-    if (id === 'wexgodns' && remarks && remarks !== '点击设置') {
-      form.value.dns = remarks;
-    }
-    if (id === 'wexgozhuangtai') {
-      form.value.enabled = remarks.includes('已启动');
-    }
-    return;
-  }
-  // 综合 settings — toggle-type
-  if (['danmubtn', 'pankaiguan', 'panpaixu', 'hongmeng'].includes(id)) {
-    configType.value = 'toggle';
-    description.value = `切换 ${name} 状态。`;
-    form.value.value = remarks.includes('已开启') || remarks.includes('已启用');
-    return;
-  }
-  // 综合 settings — text-type
-  if (['alistdiy', 'webdavdiy', 'diyvod'].includes(id)) {
-    configType.value = 'text';
-    fieldName.value = name;
-    multiline.value = true;
-    description.value = `请输入 ${name} 配置内容（JSON 格式）。`;
-    return;
-  }
-  if (id === 'beifenjiekou' || id === 'huifujiekou') {
-    configType.value = 'info';
-    infoLines.value = [
-      `${name}：${remarks}`,
-      '',
-      '此功能用于备份/恢复 TVBox 配置数据。',
-      'PC 端暂不支持此操作，请通过手机端配置中心执行。',
-    ];
-    return;
-  }
-  if (id === 'webconfig') {
-    configType.value = 'info';
-    infoLines.value = [
-      '配置中心 Web 地址：',
-      '在手机端浏览器或投影仪中打开以下地址进行配置：',
-      '',
-      'http://<本机IP>:9978/proxy?do=wexconfig',
-      '',
-      '提示：此地址需要与本机在同一局域网内访问。',
-    ];
-    return;
-  }
-  // aowu (csp_AAConfigAmns) — spider-specific config items
-  if (api.includes('aaconfigamns') && AOWU_ITEM_INFO[id]) {
-    const info = AOWU_ITEM_INFO[id];
-    configType.value = 'info';
-    description.value = info.desc;
-    infoLines.value = [
-      remarks ? `当前状态：${remarks}` : '',
-      '',
-      ...(info.lines || []),
-      'PC 端暂不支持此操作，请通过手机端配置中心设置。',
-    ].filter((l) => l !== null && l !== undefined);
     return;
   }
   // feimao (csp_Config) go设置 — numeric vod_ids
@@ -332,40 +163,6 @@ async function handleSave() {
     if (configType.value === 'emby') {
       ElMessage.info('Emby 服务器管理请通过手机端配置中心完成。PC 端暂不支持此操作。');
       emit('update:visible', false);
-      return;
-    }
-    if (configType.value === 'multithread') {
-      const keys = prefKey.value as any;
-      if (id === 'wexgozhuangtai') {
-        await setPref(keys.zhuangtai, form.value.enabled ? '1' : '0');
-      } else if (id === 'wexgosize') {
-        await setPref(keys.size, String(form.value.size));
-      } else if (id === 'wexgodns') {
-        await setPref(keys.dns, form.value.dns);
-      }
-      ElMessage.success('设置已保存');
-      emit('saved');
-      emit('update:visible', false);
-      return;
-    }
-    if (configType.value === 'toggle') {
-      const keys = prefKey.value as any;
-      if (keys.value) {
-        await setPref(keys.value, form.value.value ? '1' : '0');
-        ElMessage.success('设置已保存');
-        emit('saved');
-        emit('update:visible', false);
-      }
-      return;
-    }
-    if (configType.value === 'text') {
-      const keys = prefKey.value as any;
-      if (keys.text) {
-        await setPref(keys.text, form.value.text);
-        ElMessage.success('设置已保存');
-        emit('saved');
-        emit('update:visible', false);
-      }
       return;
     }
     // Default — just close

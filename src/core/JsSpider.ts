@@ -1281,7 +1281,7 @@ function t2s(text: string): string {
 // ─── Proxy helpers ──────────────────────────────────────────────────────────
 
 function getProxy(_local?: boolean): string {
-  return 'http://127.0.0.1:19978/proxy?do=js';
+  return 'http://127.0.0.1:19980/proxy?do=js';
 }
 
 function js2Proxy(
@@ -1291,7 +1291,7 @@ function js2Proxy(
   url: string,
   _headers?: Record<string, string>,
 ): string {
-  return `http://127.0.0.1:19978/proxy?do=js&siteKey=${encodeURIComponent(siteKey)}&url=${encodeURIComponent(url)}`;
+  return `http://127.0.0.1:19980/proxy?do=js&siteKey=${encodeURIComponent(siteKey)}&url=${encodeURIComponent(url)}`;
 }
 
 // ─── JsSpider ───────────────────────────────────────────────────────────────

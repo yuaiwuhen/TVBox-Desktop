@@ -215,15 +215,6 @@
           <div class="flex items-center justify-between mb-3">
             <span class="text-sm font-medium" style="color: var(--color-text-primary)">选集</span>
             <div class="flex items-center gap-2">
-              <!-- 直接访问 panLoginStates，Vue 可以正确追踪响应式依赖 -->
-              <template v-if="isPanSource(activePlaySource) && !panLoginStates[activePlaySource]">
-                <el-button size="small" type="warning" @click="showPanLogin = true">
-                  <el-icon>
-                    <Picture />
-                  </el-icon>
-                  扫码登录
-                </el-button>
-              </template>
               <el-button size="small" text @click="toggleSortOrder" style="color: var(--color-primary)">
                 {{ sortOrder === 'asc' ? '正序' : '倒序' }}
               </el-button>
@@ -266,23 +257,6 @@
               </div>
             </template>
           </template>
-        </div>
-
-        <!-- Pan Login Required Prompt -->
-        <div v-else-if="needPanLogin" class="mb-4 rounded-lg p-6 text-center"
-          style="background: var(--color-bg-surface)">
-          <el-icon :size="40" style="color: var(--color-warning)">
-            <WarningFilled />
-          </el-icon>
-          <p class="mt-3 text-sm" style="color: var(--color-text-secondary)">
-            该资源来自网盘，需登录对应网盘后方可播放
-          </p>
-          <p class="mt-1 text-xs" style="color: var(--color-text-tertiary)">
-            请到配置中心扫码登录夸克网盘或百度网盘
-          </p>
-          <el-button type="warning" size="small" class="mt-3" @click="goToConfigCenter">
-            去配置中心登录
-          </el-button>
         </div>
 
         <!-- msearch: aggregator result — show cross-source search results -->
@@ -413,26 +387,18 @@
         </div>
       </Transition>
     </Teleport>
-
-    <!-- QR Login Dialog -->
-    <QRLoginDialog v-if="currentPanType" v-model:visible="showPanLogin" :title="panLoginTitle"
-      :pan-type="currentPanType" @success="onPanLoginSuccess" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount, reactive } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ArrowLeft, Star, StarFilled, Film, Loading, Avatar, Picture, WarningFilled } from '@element-plus/icons-vue'
+import { ArrowLeft, Star, StarFilled, Film, Loading, Avatar, WarningFilled } from '@element-plus/icons-vue'
 import { useAppStore } from '../store/app'
 import { Database } from '../core/Database'
 import { SubtitleSearch, type SubtitleSearchResult } from '../core/SubtitleSearch'
-import { PanResolver, type PanType } from '../core/PanResolver'
-import { PanLogin } from '../core/PanLogin'
-import { QuarkPan } from '../core/QuarkPan'
 import VideoPlayer from '../components/VideoPlayer.vue'
-import QRLoginDialog from '../components/QRLoginDialog.vue'
 import { processImageUrl } from '../core/models'
 
 const route = useRoute()
@@ -499,14 +465,6 @@ const truncatedVodContent = computed(() => {
   if (text.length <= 200) return text
   return text.slice(0, 200) + '...'
 })
-const showPanLogin = ref(false)
-const pendingPlayAfterLogin = ref<{ flag: string; url: string } | null>(null)
-// Tracks the most recent playEpisode attempt so pan:loginExpired (fired by
-// the main process when Quark cookie expires mid-playback) can retry after
-// the user re-scans the QR code.
-const lastPlayAttempt = ref<{ flag: string; url: string } | null>(null)
-// Disposer for the pan:loginExpired IPC listener — called in onBeforeUnmount.
-let panLoginExpiredDisposer: (() => void) | null = null
 
 // Error state exposed by store — shown as inline prompts on the detail page.
 const detailError = computed(() => store.detailError)
@@ -524,11 +482,6 @@ async function retryLoadDetail() {
     await store.loadDetail(vodId)
     if (store.currentVod && playSources.value.length > 0) {
       activePlaySource.value = playSources.value[0].name
-      refreshPanLoginState(activePlaySource.value)
-      // Initialize login state for all sources
-      for (const source of playSources.value) {
-        refreshPanLoginState(source.name)
-      }
     }
   } catch {
     ElMessage.error('加载详情失败')
@@ -537,120 +490,11 @@ async function retryLoadDetail() {
   }
 }
 
-const currentPanType = computed<'quark' | 'uc' | 'aliyun' | 'baidu' | 'bili' | '115' | undefined>(() => {
-  const flag = activePlaySource.value
-  const url = getFirstEpisodeUrl(flag)
-  const type = PanResolver.detectPanType(flag, url)
-  return type === 'unknown' ? undefined : type
-})
-
-const panLoginTitle = computed(() => {
-  const type = currentPanType.value
-  switch (type) {
-    case 'quark':
-      return '夸克网盘登录'
-    case 'uc':
-      return 'UC网盘登录'
-    case 'aliyun':
-      return '阿里云盘登录'
-    case 'baidu':
-      return '百度网盘登录'
-    case 'bili':
-      return 'B站登录'
-    case '115':
-      return '115网盘登录'
-    default:
-      return '网盘登录'
-  }
-})
-
-function isPanSource(flag: string): boolean {
-  // Prioritize URL/domain-based detection (more accurate than name matching,
-  // which fails on obfuscated names like "B度" or renamed sources).
-  // Check the source's episode URLs first.
-  const source = playSources.value.find(s => s.name === flag)
-  if (source?.episodes?.length) {
-    const firstUrl = source.episodes[0].url || ''
-    const typeByUrl = PanResolver.detectPanTypeFromUrl(firstUrl)
-    if (typeByUrl !== 'unknown') {
-      console.log('[Detail] isPanSource: URL match:', { flag, type: typeByUrl, url: firstUrl.substring(0, 80) })
-      return true
-    }
-  }
-
-  // Fallback to name-based detection (handles obfuscated names like "B度"
-  // that the spider's vod_play_from uses despite the URL being a pan URL).
-  const typeByName = PanResolver.detectPanType(flag, '')
-  if (typeByName !== 'unknown') {
-    console.log('[Detail] isPanSource: name match:', { flag, type: typeByName })
-    return true
-  }
-
-  console.log('[Detail] isPanSource: no match:', { flag })
-  return false
-}
-
-// 网盘登录状态缓存（按 source name 存储，响应式对象保证模板能感知变化）
-const panLoginStates = reactive<Record<string, boolean>>({})
-
-/** Get the first episode URL for a source flag, for URL-based pan detection */
-function getFirstEpisodeUrl(flag: string): string {
-  const source = playSources.value.find(s => s.name === flag)
-  return source?.episodes?.[0]?.url || ''
-}
-
-function refreshPanLoginState(flag: string) {
-  const url = getFirstEpisodeUrl(flag)
-  const type = PanResolver.detectPanType(flag, url)
-  if (type === 'unknown' || type === '115') {
-    panLoginStates[flag] = false
-    return
-  }
-  panLoginStates[flag] = PanLogin.isLoggedIn(type as import('../core/PanLogin').PanType)
-}
-
-function isPanLoggedIn(flag: string): boolean {
-  return panLoginStates[flag] ?? false
-}
-
-// 登录状态轮询器：每2秒检查localStorage，解决跨组件响应式不可靠问题
-let loginPollTimer: ReturnType<typeof setInterval> | null = null
-
-function startLoginPolling() {
-  stopLoginPolling()
-  loginPollTimer = setInterval(() => {
-    if (!activePlaySource.value) return
-    const url = getFirstEpisodeUrl(activePlaySource.value)
-    const type = PanResolver.detectPanType(activePlaySource.value, url)
-    if (type === 'unknown' || type === '115') return
-    const newState = PanLogin.isLoggedIn(type as import('../core/PanLogin').PanType)
-    if (panLoginStates[activePlaySource.value] !== newState) {
-      panLoginStates[activePlaySource.value] = newState
-      console.log('[Detail] login poll updated:', { type, newState })
-    }
-  }, 2000)
-}
-
-function stopLoginPolling() {
-  if (loginPollTimer) {
-    clearInterval(loginPollTimer)
-    loginPollTimer = null
-  }
-}
-
 async function playEpisode(flag: string, url: string) {
   console.log('[Detail] playEpisode ENTER:', {
     flag,
     urlPreview: url.substring(0, 80),
-    isPan: isPanSource(flag),
-    loginState: panLoginStates[flag],
-    allLoginStates: { ...panLoginStates },
   })
-  // Remember this attempt so pan:loginExpired can retry after re-login.
-  lastPlayAttempt.value = { flag, url }
-  // 不再阻止网盘源播放。Spider 的 SharedPreferences 中保存的 cookie 跨重启持久化，
-  // 即使前端 localStorage 无登录数据，spider 仍可能持有有效 cookie。
-  // 让 spider 尝试播放；若失败且为网盘源，再弹登录二维码。
   pendingPlayUrl.value = url
   store.playError = ''
   const currentSource = playSources.value.find(s => s.name === flag)
@@ -659,110 +503,19 @@ async function playEpisode(flag: string, url: string) {
   try {
     await store.loadPlay(flag, url, epIndex >= 0 ? epIndex : 0, episodes)
     console.log('[Detail] playEpisode: loadPlay completed, currentPlayUrl=', store.currentPlayUrl?.substring(0, 80))
-    // 仅当播放失败且错误信息明确指向登录/鉴权时才弹登录框。
-    // 格式不支持、资源失效、网络错误等不应误报「请登录」。
-    if (!store.currentPlayUrl) {
-      const err = (store.playError || '').toLowerCase()
-      const needsLogin =
-        /登录|login|未登录|auth|expired|cookie|令牌|token/.test(err) ||
-        /Quark login expired|UC login expired/i.test(store.playError || '')
-      if (needsLogin) {
-        // 即使 isPanSource 未匹配（如源名使用变体"B度"），
-        // 也从错误信息中检测网盘类型
-        if (!isPanSource(flag)) {
-          const panType = detectPanTypeFromError(store.playError || '', flag)
-          if (panType) {
-            console.log('[Detail] playEpisode: detected pan from error:', panType)
-          }
-        }
-        console.log('[Detail] playEpisode: auth failure, showing login dialog')
-        pendingPlayAfterLogin.value = { flag, url }
-        showPanLogin.value = true
-      } else if (isPanSource(flag)) {
-        console.log(
-          '[Detail] playEpisode: pan play failed but not auth-related:',
-          store.playError,
-        )
-      }
-    }
   } catch (e: any) {
     console.error('[Detail] playEpisode: loadPlay failed:', e)
-    const msg = String(e?.message || e || '')
-    if (
-      /登录|login|未登录|expired|auth|cookie/i.test(msg)
-    ) {
-      // Fallback: if isPanSource doesn't catch but error mentions login
-      if (!isPanSource(flag)) {
-        const panType = detectPanTypeFromError(msg, flag)
-        if (panType) {
-          console.log('[Detail] playEpisode: detected pan from catch error:', panType)
-        }
-      }
-      pendingPlayAfterLogin.value = { flag, url }
-      showPanLogin.value = true
-    } else {
-      ElMessage.error(msg || '播放失败')
-    }
+    ElMessage.error(String(e?.message || e || '') || '播放失败')
   }
   finally { pendingPlayUrl.value = '' }
 }
 
-function onPanLoginSuccess() {
-  ElMessage.success('登录成功')
-  refreshPanLoginState(activePlaySource.value)
-  if (pendingPlayAfterLogin.value) {
-    const { flag, url } = pendingPlayAfterLogin.value
-    pendingPlayAfterLogin.value = null
-    playEpisode(flag, url)
-  }
-}
-
-/**
- * Fallback: detect pan type from error message and/or flag.
- * Used when isPanSource() doesn't catch the flag (e.g., obfuscated names like "B度").
- */
-function detectPanTypeFromError(error: string, flag: string): string | null {
-  const text = `${error} ${flag}`
-  const lower = text.toLowerCase()
-  if (text.includes('百度') || lower.includes('baidu') || text.includes('B度')) return 'baidu'
-  if (lower.includes('quark') || text.includes('夸克')) return 'quark'
-  if (text.includes('uc') || text.includes('UC')) return 'uc'
-  if (text.includes('阿里') || lower.includes('aliyun')) return 'aliyun'
-  if (text.includes('b站') || lower.includes('bili') || lower.includes('bilibili')) return 'bili'
-  if (text.includes('115')) return '115'
-  return null
-}
-
 /**
  * Format play error message to be more user-friendly.
- * Maps common pan source names to their display names.
  */
 function formatPlayError(error: string): string {
   if (!error) return ''
-
-  let formatted = error
-
-  return formatted
-}
-
-/**
- * Handle pan:loginExpired event from the main process.
- *
- * Fired when JarLoader detects Quark cookie expiry before playerContent, or
- * when ProxyServer.streamPanDirect gets a 412 from the Quark CDN. Shows a
- * warning, stashes the current play attempt for retry, and opens the QR
- * re-login dialog.
- */
-function onPanLoginExpired(panType: string) {
-  console.warn('[Detail] pan:loginExpired received, panType=', panType)
-  if (panType !== 'quark' && panType !== 'uc' && panType !== 'baidu') return
-  const labels: Record<string, string> = { uc: 'UC网盘', quark: '夸克网盘', baidu: '百度网盘' }
-  const label = labels[panType] || panType
-  ElMessage.warning(`${label}登录已失效，请重新扫码登录`)
-  if (lastPlayAttempt.value) {
-    pendingPlayAfterLogin.value = { ...lastPlayAttempt.value }
-  }
-  showPanLogin.value = true
+  return error
 }
 
 const playSources = computed(() => {
@@ -773,7 +526,6 @@ const playSources = computed(() => {
       hasUrl: !!vod?.vod_play_url,
       from: vod?.vod_play_from,
       url: vod?.vod_play_url,
-      needPanLogin: (vod as any)?.needPanLogin,
     })
     return []
   }
@@ -821,12 +573,7 @@ const currentEpisodeName = computed(() => {
   return ep?.name || ''
 })
 
-// Whether the current detail page needs pan login to show play data
-const needPanLogin = computed(() => {
-  return !!(store.currentVod as any)?.needPanLogin
-})
-
-// msearch: aggregator result — show cross-source search results as play sources
+// Whether the current detail page is an msearch aggregator result
 const isMsearchResult = computed(() => {
   return !!(store.currentVod as any)?.isMsearchResult
 })
@@ -847,37 +594,6 @@ function refreshMsearchSearch() {
 function goToSourceDetail(siteKey: string, vodId: string) {
   console.log('[Detail] goToSourceDetail:', siteKey, vodId)
   router.push({ name: 'detail', params: { sourceKey: siteKey, vodId } })
-}
-
-function goToConfigCenter() {
-  // Navigate to home page and force-select the config center
-  router.replace('/')
-  // Check if config center already exists in the site list, otherwise use hardcoded selection
-  setTimeout(() => {
-    const hasConfig = store.sites.some(s =>
-      (s.key?.toLowerCase() === 'config') ||
-      (s.name?.includes('配置')) ||
-      (s.api?.toLowerCase().includes('config'))
-    )
-    if (hasConfig) {
-      // Find the config site by key/name/api and select it
-      const configSite = store.sites.find(s =>
-        (s.key?.toLowerCase() === 'config') ||
-        (s.name?.includes('配置')) ||
-        (s.api?.toLowerCase().includes('config'))
-      )
-      if (configSite) {
-        const uniqueKey = store.getUniqueKey(configSite)
-        store.setActiveSite(uniqueKey)
-        console.log('[Detail] goToConfigCenter: selected existing config site', uniqueKey)
-      }
-    } else {
-      // No existing config site found — this should not happen in normal usage
-      // We can't call setActiveSite with an object directly, so we just leave it
-      // User will manually navigate to config center
-      console.log('[Detail] goToConfigCenter: no config site found in site list')
-    }
-  }, 100)
 }
 
 // Title shown in the detail hero: "剧名" or "剧名 - 第01集" when playing
@@ -935,13 +651,6 @@ watch([() => store.currentPlayUrl, playSources], () => {
   }
 })
 
-// Refresh pan login state when user switches source tab
-watch(activePlaySource, (newFlag) => {
-  if (newFlag) {
-    refreshPanLoginState(newFlag)
-  }
-})
-
 onMounted(async () => {
   const sourceKey = route.params.sourceKey as string
   const vodId = route.params.vodId as string
@@ -950,38 +659,11 @@ onMounted(async () => {
     return
   }
   store.setActiveSite(sourceKey)
-  // Refresh login status cache from JAR so pan-login checks are accurate.
-  // The JAR is the single source of truth — the PC never persists credentials.
-  try {
-    await PanLogin.refreshAllStatuses()
-  } catch (e: any) {
-    console.warn('[Detail] refreshAllStatuses failed:', e.message)
-  }
-  // Listen for pan:loginExpired from the main process (fired when Quark
-  // cookie expires mid-playback). Use the same ipcRenderer access pattern
-  // as PanLogin.ts for consistency.
-  try {
-    const { ipcRenderer } = require('electron')
-    const handler = (_event: any, panType: string) => onPanLoginExpired(panType)
-    ipcRenderer.on('pan:loginExpired', handler)
-    panLoginExpiredDisposer = () => {
-      ipcRenderer.removeListener('pan:loginExpired', handler)
-    }
-  } catch (e: any) {
-    console.warn('[Detail] Failed to register pan:loginExpired listener:', e.message)
-  }
   try {
     await store.loadDetail(vodId)
     if (store.currentVod && playSources.value.length > 0) {
       activePlaySource.value = playSources.value[0].name
-      refreshPanLoginState(activePlaySource.value)
-      // Initialize login state for all sources
-      for (const source of playSources.value) {
-        refreshPanLoginState(source.name)
-      }
     }
-    // 启动轮询，每2秒检测localStorage中的登录状态变化
-    startLoginPolling()
     if (store.currentVod) {
       isFavorited.value = await Database.isFavorite(sourceKey, vodId)
     }
@@ -993,11 +675,6 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  stopLoginPolling()
-  if (panLoginExpiredDisposer) {
-    panLoginExpiredDisposer()
-    panLoginExpiredDisposer = null
-  }
   // 清除播放状态，避免下一个视频显示错误的"播放到第X集"
   store.currentPlayUrl = ''
   store.currentPlayIndex = 0

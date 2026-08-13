@@ -21,12 +21,8 @@ import type {
 
 export const useAppStore = defineStore('app', () => {
   // ===== Config =====
-  // Default config URL is used if the user hasn't set one in localStorage.
-  // This ensures the homepage shows data on first launch without manual setup.
-  const DEFAULT_CONFIG_URL = 'https://9280.kstore.vip/newwex.json';
-  const configUrl = ref(
-    localStorage.getItem('tvbox_config_url') || DEFAULT_CONFIG_URL,
-  );
+  // The user must provide a config URL; there is no default.
+  const configUrl = ref(localStorage.getItem('tvbox_config_url') || '');
   const sites = ref<SourceBean[]>([]);
   const activeSiteKey = ref(localStorage.getItem('tvbox_active_site') || '');
   const parses = ref<ParseBean[]>([]);
@@ -908,33 +904,8 @@ export const useAppStore = defineStore('app', () => {
       };
       // 若返回了 vod 但没有播放源，给出更具体的提示
       if (!vod.vod_play_from || !vod.vod_play_url) {
-        // Prioritize URL/domain detection from the site's api URL.
-        // Falls back to key/name matching for sites without a URL-style api.
-        const apiLower = (activeSite.value.api || '').toLowerCase();
-        const keyLower = (activeSite.value.key || '').toLowerCase();
-        const nameLower = (activeSite.value.name || '').toLowerCase();
-        const isPan =
-          apiLower.includes('quark.cn') ||
-          apiLower.includes('drive.uc.cn') ||
-          apiLower.includes('pan.baidu.com') ||
-          apiLower.includes('alipan.com') ||
-          apiLower.includes('aliyundrive.com') ||
-          apiLower.includes('bilibili.com') ||
-          keyLower.includes('quark') ||
-          keyLower.includes('uc') ||
-          keyLower.includes('baidu') ||
-          keyLower.includes('ali') ||
-          nameLower.includes('夸克') ||
-          nameLower.includes('百度') ||
-          nameLower.includes('阿里') ||
-          (vod as any).needPanLogin;
-        if (isPan) {
-          // 触发 needPanLogin UI 分支
-          (currentVod.value as any).needPanLogin = true;
-        } else {
-          detailError.value =
-            '该资源暂无可播放的源，可能分享链接已失效或资源已下线';
-        }
+        detailError.value =
+          '该资源暂无可播放的源，可能分享链接已失效或资源已下线';
       }
     } catch (e: any) {
       if (e.name !== 'AbortError') {
@@ -1111,7 +1082,7 @@ export const useAppStore = defineStore('app', () => {
       // Convert proxy:// URLs (and http://127.0.0.1:<port>/proxy?... URLs
       // returned by spiders whose Proxy.a() probe ran inside the Android
       // container) to local proxy URLs.
-      // Spiders (e.g. BiliGuard, WexYueYue, WexHanXiaoQuan) return either:
+      // Spiders return either:
       //   proxy://do=bili&aid=...&cid=...
       //   http://127.0.0.1:-1/proxy?do=hxq&url=...  (probe failed in container)
       //   http://127.0.0.1:9978/proxy?do=...        (probe hit container's own port)
@@ -1184,6 +1155,18 @@ export const useAppStore = defineStore('app', () => {
         }
       }
 
+      // FongMi 返回模式：url 为空但 header 存在时，
+      // 表示应使用原始播放地址（id）并附加返回的请求头直接播放。
+      // 与 Android SourceViewModel 行为一致：空 url 时回退到原始 url，
+      // 并剥离播放器类型标记（如 |lzm3u8）。
+      if (!result.url && result.header && typeof id === 'string' && id.startsWith('http')) {
+        result.url = id.split('|')[0];
+        console.log(
+          '[Store] loadPlay: header-only response, using original id as play url:',
+          result.url.substring(0, 120),
+        );
+      }
+
       if (!result.url) {
         // 优先使用 spider 返回的具体错误信息
         const spiderMsg = (result as any).msg || (result as any).errMsg || '';
@@ -1229,13 +1212,7 @@ export const useAppStore = defineStore('app', () => {
       // 主动检测视频格式（在播放器弹出前）
       // 通过IPC让主进程发GET请求检测Content-Type
       // 这比文件名检测更可靠，因为使用实际的HTTP响应头
-      const isProxyUrl =
-        result.url.includes('/proxy?do=ali') ||
-        result.url.includes('/proxy?do=quarkDirect') ||
-        result.url.includes('/proxy?do=ucDirect') ||
-        result.url.includes('/proxy?do=baiduDirect') ||
-        result.url.includes('/proxy?do=aliyunDirect') ||
-        result.url.includes('/proxy?do=115Direct');
+      const isProxyUrl = result.url.includes('/proxy?');
 
       if (isProxyUrl) {
         console.log(
@@ -1560,9 +1537,9 @@ export const useAppStore = defineStore('app', () => {
     syncPlaybackSetting('skipOutro', String(v));
   }
   // Push a single playback preference to the Android spider server, which
-  // writes it into SharedPreferences so JAR spiders (e.g. Quark pan spider)
-  // can read the same value when constructing playerContent. Failures are
-  // non-fatal: PC-side playback still works via the local VideoPlayer.
+  // writes it into SharedPreferences so JAR spiders can read the same value
+  // when constructing playerContent. Failures are non-fatal: PC-side playback
+  // still works via the local VideoPlayer.
   async function syncPlaybackSetting(key: string, value: string) {
     try {
       const { ipcRenderer } = (window as any).require?.('electron') || {};

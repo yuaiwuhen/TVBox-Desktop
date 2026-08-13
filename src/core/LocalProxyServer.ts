@@ -126,7 +126,7 @@ class CacheStore {
 
 export class LocalProxyServer {
   private server: Server | null = null;
-  private port: number = 19978;
+  private port: number = 19980;
   private cacheStore: CacheStore | null = null;
   private dataDir: string = '';
   private dohIndex: number = 0;

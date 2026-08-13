@@ -355,6 +355,37 @@
         </div>
       </section>
 
+      <!-- SECTION 6b: Spider 服务设置 -->
+      <section class="settings-card">
+        <div class="flex items-center gap-2.5 mb-4">
+          <div class="w-8 h-8 flex items-center justify-center" style="background: var(--color-primary-soft); border-radius: var(--radius-sm, 6px);">
+            <el-icon :size="16" style="color: var(--color-primary)"><Cpu /></el-icon>
+          </div>
+          <h2 class="text-[15px] font-semibold" style="color: var(--color-text-primary)">Spider 服务</h2>
+        </div>
+        <div class="mb-4">
+          <span class="block text-[13px] mb-2" style="color: var(--color-text-secondary)">Spider API 地址</span>
+          <div class="flex gap-2">
+            <el-input v-model="spiderApiUrl" placeholder="http://127.0.0.1:19978" clearable class="flex-1" />
+            <el-button @click="saveSpiderApiUrl" :loading="spiderApiSaving">保存</el-button>
+          </div>
+          <p class="text-[12px] mt-1.5" style="color: var(--color-text-tertiary)">
+            Windows 默认 <code>http://127.0.0.1:19978</code>（adb 转发到 MuMu 模拟器）。
+            Mac/Linux 使用自带模拟器/设备时，改为对应地址。
+          </p>
+        </div>
+        <div>
+          <span class="block text-[13px] mb-2" style="color: var(--color-text-secondary)">MuMu 虚拟机编号</span>
+          <div class="flex gap-2">
+            <el-input-number v-model="mumuVmIndex" :min="0" :max="15" />
+            <el-button @click="saveMuMuVmIndex" :loading="mumuIndexSaving">保存</el-button>
+          </div>
+          <p class="text-[12px] mt-1.5" style="color: var(--color-text-tertiary)">
+            Windows 自动启动时使用的 MuMu 实例编号（默认 0 = 主实例）。
+          </p>
+        </div>
+      </section>
+
       <!-- SECTION 7: 主题设置 -->
       <section class="settings-card">
         <div class="flex items-center gap-2.5 mb-4">
@@ -533,19 +564,9 @@ const sourceListCollapsed = ref(false)
 // Each preset is verified to load JAR + have working csp_ sources.
 const configPresets = [
   {
-    name: 'newwex（默认）',
-    url: 'https://9280.kstore.vip/newwex.json',
-    desc: '88 个源，14 个首页可用，6 个直链播放，网盘源需登录',
-  },
-  {
     name: '肥猫',
     url: 'http://肥猫.net/tv',
     desc: '38 个源，11 个首页可用，4 个直链播放，网盘源需登录',
-  },
-  {
-    name: 'aowu',
-    url: 'http://itv666.cc/aowu/config.webp',
-    desc: '85 个源，12 个首页可用，3 个直链播放（Hxq 受 native 限制）',
   },
   {
     name: '欧歌多仓',
@@ -622,6 +643,49 @@ const dohOptions = [
   { label: 'Google DNS', value: 2 },
   { label: 'Cloudflare', value: 3 },
 ]
+
+// Spider service
+const spiderApiUrl = ref(localStorage.getItem('tvbox_spider_api_url') || 'http://127.0.0.1:19978')
+const spiderApiSaving = ref(false)
+const mumuVmIndex = ref(Number(localStorage.getItem('tvbox_mumu_vm_index') || '0'))
+const mumuIndexSaving = ref(false)
+
+async function saveSpiderApiUrl() {
+  spiderApiSaving.value = true
+  try {
+    localStorage.setItem('tvbox_spider_api_url', spiderApiUrl.value.trim().replace(/\/+$/, ''))
+    const { saveToFile } = await import('../core/ConfigSync')
+    saveToFile()
+    // Notify main process so MuMuManager/service clients pick up the new URL.
+    const ipc = (window as any).electronIPC
+    if (ipc?.invoke) {
+      await ipc.invoke('config:save', {
+        ...(await ipc.invoke('config:load').catch(() => ({}))),
+        spiderApiBaseUrl: spiderApiUrl.value.trim(),
+      })
+    }
+    ElMessage.success('Spider 接口地址已保存')
+  } finally {
+    spiderApiSaving.value = false
+  }
+}
+
+async function saveMuMuVmIndex() {
+  mumuIndexSaving.value = true
+  try {
+    localStorage.setItem('tvbox_mumu_vm_index', String(mumuVmIndex.value))
+    const ipc = (window as any).electronIPC
+    if (ipc?.invoke) {
+      await ipc.invoke('config:save', {
+        ...(await ipc.invoke('config:load').catch(() => ({}))),
+        mumuVmIndex: String(mumuVmIndex.value),
+      })
+    }
+    ElMessage.success('MuMu 虚拟机编号已保存')
+  } finally {
+    mumuIndexSaving.value = false
+  }
+}
 
 // Theme
 const darkModeValue = ref(theme.mode === 'dark')

@@ -76,5 +76,10 @@ tvbox-pc-redesign/
 _tmp_addctor/
 _tmp_enjarify_scan/
 _tmp_merge_scan/
-com/
+/com/
 *.txt
+
+# Android build artifacts
+android-app/.gradle/
+android-app/**/build/
+android-app/local.properties
