@@ -72,10 +72,7 @@ function transpileESM(code: string): string {
   );
 
   // 3c. import 'Y' (side-effect import)
-  out = out.replace(
-    /import\s+['"]([^'"]+)['"]\s*;?/g,
-    "__require__('$1');",
-  );
+  out = out.replace(/import\s+['"]([^'"]+)['"]\s*;?/g, "__require__('$1');");
 
   // 4. export default { ... } — replace with assignment to __exports__
   out = out.replace(/export\s+default\s+/g, '__exports_default__ = ');
@@ -1284,7 +1281,7 @@ function t2s(text: string): string {
 // ─── Proxy helpers ──────────────────────────────────────────────────────────
 
 function getProxy(_local?: boolean): string {
-  return 'http://127.0.0.1:9978/proxy?do=js';
+  return 'http://127.0.0.1:19978/proxy?do=js';
 }
 
 function js2Proxy(
@@ -1294,7 +1291,7 @@ function js2Proxy(
   url: string,
   _headers?: Record<string, string>,
 ): string {
-  return `http://127.0.0.1:9978/proxy?do=js&siteKey=${encodeURIComponent(siteKey)}&url=${encodeURIComponent(url)}`;
+  return `http://127.0.0.1:19978/proxy?do=js&siteKey=${encodeURIComponent(siteKey)}&url=${encodeURIComponent(url)}`;
 }
 
 // ─── JsSpider ───────────────────────────────────────────────────────────────
@@ -1416,9 +1413,7 @@ export class JsSpider implements ISpider {
     const rulesUrl = this.resolveUrl(this.ext);
     const libUrl = this.resolveUrl(this.api);
 
-    console.log(
-      `[JsSpider] drpy init: rulesUrl=${rulesUrl}, libUrl=${libUrl}`,
-    );
+    console.log(`[JsSpider] drpy init: rulesUrl=${rulesUrl}, libUrl=${libUrl}`);
 
     // 1. Fetch spider rules JS
     let rulesCode: string;
@@ -1479,7 +1474,9 @@ export class JsSpider implements ISpider {
     const wrapped = this.wrapCode(combinedCode);
     try {
       vm.runInContext(wrapped, this.context!, { timeout: 15000 });
-      console.log(`[JsSpider] drpy code evaluated successfully for ${this.key}`);
+      console.log(
+        `[JsSpider] drpy code evaluated successfully for ${this.key}`,
+      );
     } catch (e) {
       // If combined evaluation fails, try rules-only (the rules might already
       // implement the spider methods directly without needing the drpy library)
@@ -1489,9 +1486,7 @@ export class JsSpider implements ISpider {
       const rulesOnlyWrapped = this.wrapCode(rulesCode);
       try {
         vm.runInContext(rulesOnlyWrapped, this.context!, { timeout: 10000 });
-        console.log(
-          `[JsSpider] drpy rules-only evaluated for ${this.key}`,
-        );
+        console.log(`[JsSpider] drpy rules-only evaluated for ${this.key}`);
       } catch (e2) {
         throw new Error(
           `[JsSpider] Failed to evaluate drpy spider ${this.key}: ${e2}`,

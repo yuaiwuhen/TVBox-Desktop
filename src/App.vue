@@ -480,7 +480,8 @@ onMounted(async () => {
   console.log('[App] Starting initialization...')
   
   // Listen for Docker status updates from main process
-  window.electron.ipcRenderer.on('docker:status', (event: any, data: any) => {
+  const { ipcRenderer } = window.require('electron')
+  ipcRenderer.on('docker:status', (_event: any, data: any) => {
     console.log('[Renderer] Docker status received:', data);
     dockerStatus.value = data;
     
@@ -529,13 +530,13 @@ onMounted(async () => {
   AdBlocker.loadDefault()
   localProxy.setDohIndex(store.dohIndex)
 
-  // Re-sync all saved pan cookies to the JVM on startup.
-  // The JVM is fresh on each app launch; without this, the user would have
-  // to log in to each pan again before any pan-source video could play.
+  // Refresh in-memory login status cache from the JAR on startup.
+  // The JAR is the single source of truth — credentials live in
+  // SharedPreferences inside the Docker container, not on the PC.
   try {
-    await PanLogin.syncAllToJVM()
+    await PanLogin.refreshAllStatuses()
   } catch (e) {
-    console.error('[App] PanLogin.syncAllToJVM failed:', e)
+    console.error('[App] PanLogin.refreshAllStatuses failed:', e)
   }
 
   if (store.configUrl) {

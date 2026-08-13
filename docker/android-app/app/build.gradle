@@ -15,12 +15,28 @@ android {
         versionName "1.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        // Docker redroid x86_64 容器: 只打包 arm64-v8a。
+        // 系统会安装到 /data/app/<pkg>/lib/arm64/ 路径下，
+        // libhoudini.so 的 isSupported 回调按路径模式匹配 (含 /lib/arm64/)，
+        // 这样 ARM64 libwexguard.so 会被 libhoudini 翻译执行；
+        // x86_64 的 libdecjni.so / libwexproxy.so 放在 arm64-v8a 目录里，
+        // 系统仍会安装，dlopen() 直接成功（因为是 x86_64 ELF）。
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
     compileOptions {
@@ -43,6 +59,16 @@ dependencies {
 
     // JSON processing
     implementation 'com.google.code.gson:gson:2.10.1'
+
+    // ZXing core — required by spider JARs that generate QR codes
+    // (e.g. WexConfigGuard config center). Without this, ClassNotFoundException
+    // for com.google.zxing.EncodeHintType crashes the spider process.
+    implementation 'com.google.zxing:core:3.5.3'
+
+    // catvod library — provides com.github.catvod.crawler.Spider base class,
+    // com.github.catvod.Init.context() (used by merge.* classes in spider JARs),
+    // OkHttp wrapper, Path/Util utilities. Mirrors FongMi/TV's :catvod module.
+    implementation project(':catvod')
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'

@@ -56,10 +56,13 @@ export class AliYunPan {
     // 3. Fetch file list in the shared folder
     // 4. Get download/play URL for the video file
 
-    // *Placeholder for the complex Alibaba Cloud API flow*
-    // This usually requires ~300 lines of specific API handshakes
-    // to handle the share_id -> share_token -> file_id -> download_url flow.
-
-    return 'https://mock-aliyun-play-url.com/video.m3u8';
+    // TODO: Implement the full Alibaba Cloud API flow
+    // (share_id -> share_token -> file_id -> download_url).
+    // Returning null signals "no playable URL" so the caller can surface
+    // an appropriate error instead of a fake placeholder URL.
+    console.warn(
+      '[AliYunPan] resolveShareLink not implemented — returning null',
+    );
+    return null;
   }
 }

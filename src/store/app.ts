@@ -1,6 +1,6 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { ref, computed } from 'vue';
-import { configParser } from '../core/ConfigParser';
+import { configParser, checkReplaceProxy } from '../core/ConfigParser';
 import { spiderEngine } from '../core/SpiderEngine';
 import { ParseEngine } from '../core/ParseEngine';
 import {
@@ -8,7 +8,6 @@ import {
   type HistoryRecord,
   type FavoriteRecord,
 } from '../core/Database';
-import { PanLogin, type PanType } from '../core/PanLogin';
 import { saveToFile } from '../core/ConfigSync';
 import type {
   SourceBean,
@@ -20,48 +19,14 @@ import type {
   LiveChannelGroup,
 } from '../core/models';
 
-async function buildConfigCenterVodList(): Promise<Movie[]> {
-  const panTypes: PanType[] = ['quark', 'uc', 'aliyun', 'baidu', 'bili'];
-  const results = await Promise.all(
-    panTypes.map(async (panType) => {
-      const savedLoggedIn = PanLogin.isLoggedIn(panType);
-      const info = PanLogin.getLoginInfo(panType);
-      const capName = panType.charAt(0).toUpperCase() + panType.slice(1);
-      const actionPrefix = panType === 'aliyun' ? 'Ali' : capName;
-      // Verify token validity via API call (only for Quark currently)
-      let actualLoggedIn = savedLoggedIn;
-      if (savedLoggedIn) {
-        actualLoggedIn = await PanLogin.checkTokenValid(panType);
-        if (savedLoggedIn && !actualLoggedIn) {
-          console.log(
-            `[Store] buildConfigCenterVodList: ${panType} token expired, auto-logging out`,
-          );
-          PanLogin.logout(panType);
-        }
-      }
-      const action = actualLoggedIn
-        ? `del${actionPrefix}`
-        : `add${actionPrefix}`;
-      console.log(
-        `[Store] buildConfigCenterVodList: ${panType} savedLoggedIn=${savedLoggedIn} actualLoggedIn=${actualLoggedIn} action=${action}`,
-      );
-      return {
-        vod_id: action,
-        vod_name: PanLogin.getDisplayName(panType),
-        vod_pic: `/icons/${panType}.png`,
-        vod_remarks: actualLoggedIn
-          ? `已登录: ${info?.nickname || info?.userId || '未知'}`
-          : '点击扫码登录',
-        action,
-      };
-    }),
-  );
-  return results;
-}
-
 export const useAppStore = defineStore('app', () => {
   // ===== Config =====
-  const configUrl = ref(localStorage.getItem('tvbox_config_url') || '');
+  // Default config URL is used if the user hasn't set one in localStorage.
+  // This ensures the homepage shows data on first launch without manual setup.
+  const DEFAULT_CONFIG_URL = 'https://9280.kstore.vip/newwex.json';
+  const configUrl = ref(
+    localStorage.getItem('tvbox_config_url') || DEFAULT_CONFIG_URL,
+  );
   const sites = ref<SourceBean[]>([]);
   const activeSiteKey = ref(localStorage.getItem('tvbox_active_site') || '');
   const parses = ref<ParseBean[]>([]);
@@ -139,6 +104,19 @@ export const useAppStore = defineStore('app', () => {
   const searchViewMode = ref(
     Number(localStorage.getItem('tvbox_search_view') || '1'),
   );
+  // Playback settings (reference FongMi/TV Playback settings).
+  // Persisted so the same speed/scale survives across videos & restarts.
+  const playSpeed = ref(
+    Number(localStorage.getItem('tvbox_play_speed') || '1'),
+  ); // 0.5 - 3.0
+  const scaleType = ref(localStorage.getItem('tvbox_scale_type') || 'default'); // default / 16:9 / 4:3 / fill / original / crop
+  const hardDecode = ref(localStorage.getItem('tvbox_hard_decode') !== 'false'); // hardware-accelerated decoding
+  const skipIntro = ref(
+    Number(localStorage.getItem('tvbox_skip_intro') || '0'),
+  ); // seconds to skip at start
+  const skipOutro = ref(
+    Number(localStorage.getItem('tvbox_skip_outro') || '0'),
+  ); // seconds before end to trigger next ep
 
   function getUniqueKey(source: SourceBean): string {
     return `${source.key}-${source.name}`;
@@ -464,15 +442,7 @@ export const useAppStore = defineStore('app', () => {
     );
 
     if (isConfigCenter) {
-      console.log('[Store] loadHome: config center (hardcoded)');
-      try {
-        classes.value = [];
-        filters.value = {};
-        homeVodList.value = await buildConfigCenterVodList();
-      } finally {
-        homeLoading.value = false;
-      }
-      return;
+      console.log('[Store] loadHome: config center — using spider homeContent');
     }
 
     try {
@@ -497,7 +467,19 @@ export const useAppStore = defineStore('app', () => {
           2,
         ),
       );
-      const homeResult = JSON.parse(rawHome);
+      // Parse homeContent response. If the response is empty or invalid JSON,
+      // treat it as empty data so the fallback chain (homeVideoContent,
+      // categoryContent, searchContent) can still run.
+      let homeResult: any = { list: [] };
+      if (rawHome && rawHome.trim()) {
+        try {
+          homeResult = JSON.parse(rawHome);
+        } catch (e) {
+          console.warn(
+            '[Store] loadHome: homeContent returned invalid JSON, treating as empty',
+          );
+        }
+      }
       console.log(
         '[Store] loadHome parsed response:',
         JSON.stringify(
@@ -579,6 +561,80 @@ export const useAppStore = defineStore('app', () => {
             2,
           ),
         );
+      }
+
+      // Fallback: if homeContent returned classes (categories) but no videos,
+      // try calling categoryContent for the first few classes. Common for
+      // csp_AppRJ / csp_AppXGS / AppYingTong etc. — they only populate list
+      // via categoryContent, not homeContent.
+      if (homeVodList.value.length === 0 && classes.value.length > 0) {
+        for (const cls of classes.value.slice(0, 5)) {
+          const tid = String(cls.type_id || '');
+          console.log(
+            `[Store] loadHome: empty list with classes — trying categoryContent(${tid})`,
+          );
+          try {
+            const rawCat = await spider.categoryContent(tid, 1, true, {});
+            if (rawCat) {
+              let catResult: any = { list: [] };
+              try {
+                catResult = JSON.parse(rawCat);
+              } catch {
+                /* keep empty */
+              }
+              const catList = catResult.list || [];
+              if (catList.length > 0) {
+                homeVodList.value = catList;
+                activeCategory.value = tid;
+                console.log(
+                  `[Store] loadHome: categoryContent fallback (${tid}) returned ${catList.length} items`,
+                );
+                break;
+              }
+            }
+          } catch (e) {
+            console.warn(
+              `[Store] loadHome: categoryContent fallback failed:`,
+              e,
+            );
+          }
+        }
+      }
+
+      // Fallback: if homeContent and homeVideoContent both returned empty
+      // (common for search-only sources like BookShiJie, Music163, bilibili,
+      // SoHaiYin, etc.), perform a default search to populate the homepage.
+      // Only attempt if site is searchable (searchable !== 0).
+      if (homeVodList.value.length === 0 && activeSite.value.searchable !== 0) {
+        console.log(
+          '[Store] loadHome: empty home — falling back to default search',
+        );
+        const defaultKeywords = ['热门', '2024', '2025', '电影'];
+        for (const kw of defaultKeywords) {
+          try {
+            const rawSearch = await spider.searchContent(kw, false, '1');
+            if (!rawSearch) continue;
+            let searchResult: any = { list: [] };
+            try {
+              searchResult = JSON.parse(rawSearch);
+            } catch {
+              continue;
+            }
+            const list = searchResult.list || [];
+            if (list.length > 0) {
+              homeVodList.value = list;
+              console.log(
+                `[Store] loadHome: search fallback "${kw}" returned ${list.length} items`,
+              );
+              break;
+            }
+          } catch (e) {
+            console.warn(
+              `[Store] loadHome: search fallback "${kw}" failed:`,
+              e,
+            );
+          }
+        }
       }
     } catch (e) {
       console.error('[Store] loadHome failed:', e);
@@ -692,6 +748,40 @@ export const useAppStore = defineStore('app', () => {
       }
       categoryPage.value = parseInt(result.page || pg);
       categoryPageCount.value = parseInt(result.pagecount || '1');
+
+      // Fallback: if categoryContent returned empty on page 1 and the site
+      // is searchable, run a search using the category's type_name as
+      // keyword. This handles search-only sources (BookShiJie, Music163,
+      // bilibili, etc.) whose categoryContent always returns empty.
+      if (
+        pg === '1' &&
+        categoryVodList.value.length === 0 &&
+        activeSite.value.searchable !== 0 &&
+        tid !== '__recommend__'
+      ) {
+        const cat = classes.value.find((c: any) => c.type_id === tid);
+        const kw = cat?.type_name || tid;
+        console.log(
+          `[Store] loadCategory: empty list — falling back to search "${kw}"`,
+        );
+        try {
+          const rawSearch = await spider.searchContent(kw, false, pg);
+          if (rawSearch) {
+            let sres: any = { list: [] };
+            try {
+              sres = JSON.parse(rawSearch);
+            } catch {}
+            if (Array.isArray(sres.list) && sres.list.length > 0) {
+              categoryVodList.value = sres.list;
+              console.log(
+                `[Store] loadCategory: search fallback returned ${sres.list.length} items`,
+              );
+            }
+          }
+        } catch (e) {
+          console.warn(`[Store] loadCategory: search fallback failed:`, e);
+        }
+      }
     } catch (e) {
       console.error('loadCategory failed:', e);
     } finally {
@@ -716,6 +806,69 @@ export const useAppStore = defineStore('app', () => {
         detailLoading.value = false;
         detailError.value = '无法加载源，请稍后重试';
         return;
+      }
+
+      // FongMi/TV behavior: vod_ids starting with "msearch:" are virtual
+      // ids produced by aggregator spiders (e.g. NewDouBan). The spider's
+      // detailContent returns empty for these — the real playable sources
+      // are discovered by searching the movie title across all searchable
+      // spiders. Mirror that flow: populate currentVod from the home list,
+      // then kick off a cross-source search whose results are shown as
+      // alternative play sources on the detail page.
+      if (typeof vodId === 'string' && vodId.startsWith('msearch:')) {
+        // msearch vod_ids are virtual ids produced by aggregator spiders
+        // (e.g. NewDouBan). The spider's detailContent returns empty for
+        // these — the real playable sources are discovered by searching
+        // the movie title across all searchable spiders. Look up the
+        // movie in homeVodList OR categoryVodList to get its vod_name.
+        if (
+          homeVodList.value.length === 0 &&
+          categoryVodList.value.length === 0
+        ) {
+          console.log(
+            '[Store] loadDetail: msearch id but both lists empty — loading home first',
+          );
+          await loadHome(true).catch((e) =>
+            console.warn('[Store] loadDetail: loadHome failed:', e),
+          );
+        }
+        const fromHome = homeVodList.value.find((m) => m.vod_id === vodId);
+        const fromCategory = !fromHome
+          ? categoryVodList.value.find((m) => m.vod_id === vodId)
+          : null;
+        const msearchVod = fromHome || fromCategory;
+        if (msearchVod) {
+          currentVod.value = {
+            ...msearchVod,
+            sourceKey: activeSite.value.key,
+          } as any;
+          console.log(
+            '[Store] loadDetail: msearch id detected, auto-searching for:',
+            msearchVod.vod_name,
+            fromHome ? '(from home)' : '(from category)',
+          );
+          // Mark as msearch so Detail.vue shows search results as sources.
+          (currentVod.value as any).isMsearchResult = true;
+          // Trigger search in the background (don't await — results stream in).
+          doSearch(msearchVod.vod_name).catch((e) =>
+            console.warn('[Store] msearch auto-search failed:', e),
+          );
+          detailLoading.value = false;
+          return;
+        }
+        // Movie not in any list — we can't get the vod_name to search.
+        // Show a clear error instead of falling through to detailContent
+        // (which returns empty for msearch ids).
+        if (!msearchVod) {
+          console.warn(
+            '[Store] loadDetail: msearch id not found in home or category list:',
+            vodId,
+          );
+          detailError.value =
+            '无法获取该资源的标题信息，请从首页或分类列表进入详情页';
+          detailLoading.value = false;
+          return;
+        }
       }
 
       const rawResult = await spider.detailContent([vodId]);
@@ -862,6 +1015,91 @@ export const useAppStore = defineStore('app', () => {
         playError.value = '播放地址解析失败，可能资源已下线';
         return;
       }
+
+      // Some spiders (e.g. BiliGuard) return url as an array of [name, url, name, url, ...] pairs
+      // instead of a single URL string. Extract the first URL (index 1) and merge headers.
+      // Mirrors Android SourceViewModel.java handling of multi-quality play URLs.
+      if (Array.isArray((result as any).url)) {
+        const urlArray = (result as any).url as any[];
+        console.log(
+          '[Store] loadPlay: url is array, length=',
+          urlArray.length,
+          'first pairs=',
+          urlArray.slice(0, 4),
+        );
+        // Find first element that looks like a URL (starts with http/proxy/magnet)
+        let pickedUrl = '';
+        for (let i = 1; i < urlArray.length; i += 2) {
+          const candidate = String(urlArray[i] || '');
+          if (
+            candidate.startsWith('http') ||
+            candidate.startsWith('proxy://') ||
+            candidate.startsWith('magnet:')
+          ) {
+            pickedUrl = candidate;
+            break;
+          }
+        }
+        // Fallback: scan all elements for a URL
+        if (!pickedUrl) {
+          for (const item of urlArray) {
+            const s = String(item || '');
+            if (
+              s.startsWith('http') ||
+              s.startsWith('proxy://') ||
+              s.startsWith('magnet:')
+            ) {
+              pickedUrl = s;
+              break;
+            }
+          }
+        }
+        (result as any).url = pickedUrl;
+        console.log(
+          '[Store] loadPlay: picked URL from array:',
+          pickedUrl.substring(0, 120),
+        );
+      } else if (typeof (result as any).url === 'string') {
+        // Some spiders return url as a comma-separated "name,url,name,url,..." string
+        // (or a single url with trailing comma). Parse it the same way as the array
+        // case: pick the first token that looks like a URL.
+        const raw = (result as any).url as string;
+        if (raw.includes(',')) {
+          const tokens = raw.split(',').map((t) => t.trim()).filter(Boolean);
+          let pickedUrl = '';
+          for (let i = 1; i < tokens.length; i += 2) {
+            const candidate = tokens[i] || '';
+            if (
+              candidate.startsWith('http') ||
+              candidate.startsWith('proxy://') ||
+              candidate.startsWith('magnet:')
+            ) {
+              pickedUrl = candidate;
+              break;
+            }
+          }
+          if (!pickedUrl) {
+            for (const t of tokens) {
+              if (
+                t.startsWith('http') ||
+                t.startsWith('proxy://') ||
+                t.startsWith('magnet:')
+              ) {
+                pickedUrl = t;
+                break;
+              }
+            }
+          }
+          if (pickedUrl && pickedUrl !== raw) {
+            console.log(
+              '[Store] loadPlay: parsed comma-separated url string, picked:',
+              pickedUrl.substring(0, 120),
+            );
+            (result as any).url = pickedUrl;
+          }
+        }
+      }
+
       console.log('[Store] loadPlay parsed result:', {
         hasUrl: !!result.url,
         hasHeader: !!result.header,
@@ -869,6 +1107,28 @@ export const useAppStore = defineStore('app', () => {
         urlPreview: result.url ? result.url.substring(0, 100) : '(none)',
         error: (result as any).error,
       });
+
+      // Convert proxy:// URLs (and http://127.0.0.1:<port>/proxy?... URLs
+      // returned by spiders whose Proxy.a() probe ran inside the Android
+      // container) to local proxy URLs.
+      // Spiders (e.g. BiliGuard, WexYueYue, WexHanXiaoQuan) return either:
+      //   proxy://do=bili&aid=...&cid=...
+      //   http://127.0.0.1:-1/proxy?do=hxq&url=...  (probe failed in container)
+      //   http://127.0.0.1:9978/proxy?do=...        (probe hit container's own port)
+      // All must be rewritten to http://127.0.0.1:<ProxyServer port>/proxy?do=...
+      // so the browser reaches the PC's local ProxyServer (main process,
+      // port 9979-9999). Port is resolved dynamically via IPC — see
+      // ConfigParser.getLocalProxy(). Mirrors Android DefaultConfig.checkReplaceProxy.
+      if (result.url) {
+        const rewritten = checkReplaceProxy(result.url);
+        if (rewritten !== result.url) {
+          console.log('[Store] loadPlay: rewritten proxy URL:', {
+            from: result.url.substring(0, 80),
+            to: rewritten.substring(0, 80),
+          });
+          result.url = rewritten;
+        }
+      }
 
       // 检查是否是 UNSUPPORTED_FORMAT 错误（由 ProxyServer 返回）
       if ((result as any).error === 'UNSUPPORTED_FORMAT') {
@@ -1265,6 +1525,53 @@ export const useAppStore = defineStore('app', () => {
     localStorage.setItem('tvbox_epg_url', v);
     saveToFile();
   }
+  // Playback settings (mirror FongMi/TV Playback settings). Each setter
+  // persists to localStorage so the value survives restarts, and also
+  // pushes the change to the Android side via the spider server so that
+  // JAR-based players (ExoPlayer in redroid) honor the same settings.
+  function setPlaySpeed(v: number) {
+    playSpeed.value = v;
+    localStorage.setItem('tvbox_play_speed', String(v));
+    saveToFile();
+    syncPlaybackSetting('playSpeed', String(v));
+  }
+  function setScaleType(v: string) {
+    scaleType.value = v;
+    localStorage.setItem('tvbox_scale_type', v);
+    saveToFile();
+    syncPlaybackSetting('scaleType', v);
+  }
+  function setHardDecode(v: boolean) {
+    hardDecode.value = v;
+    localStorage.setItem('tvbox_hard_decode', String(v));
+    saveToFile();
+    syncPlaybackSetting('hardDecode', String(v));
+  }
+  function setSkipIntro(v: number) {
+    skipIntro.value = v;
+    localStorage.setItem('tvbox_skip_intro', String(v));
+    saveToFile();
+    syncPlaybackSetting('skipIntro', String(v));
+  }
+  function setSkipOutro(v: number) {
+    skipOutro.value = v;
+    localStorage.setItem('tvbox_skip_outro', String(v));
+    saveToFile();
+    syncPlaybackSetting('skipOutro', String(v));
+  }
+  // Push a single playback preference to the Android spider server, which
+  // writes it into SharedPreferences so JAR spiders (e.g. Quark pan spider)
+  // can read the same value when constructing playerContent. Failures are
+  // non-fatal: PC-side playback still works via the local VideoPlayer.
+  async function syncPlaybackSetting(key: string, value: string) {
+    try {
+      const { ipcRenderer } = (window as any).require?.('electron') || {};
+      if (!ipcRenderer) return;
+      await ipcRenderer.invoke('spider-set-pref', { key, value });
+    } catch (e) {
+      console.warn('[Store] syncPlaybackSetting failed:', e);
+    }
+  }
 
   return {
     configUrl,
@@ -1313,6 +1620,12 @@ export const useAppStore = defineStore('app', () => {
     autoPlayNext,
     dohIndex,
     searchViewMode,
+    // Playback settings (FongMi/TV Playback)
+    playSpeed,
+    scaleType,
+    hardDecode,
+    skipIntro,
+    skipOutro,
     activeSite,
     activeParse,
     setConfigUrl,
@@ -1344,6 +1657,11 @@ export const useAppStore = defineStore('app', () => {
     setSearchViewMode,
     setLiveUrl,
     setEpgUrl,
+    setPlaySpeed,
+    setScaleType,
+    setHardDecode,
+    setSkipIntro,
+    setSkipOutro,
     resetHome,
   };
 });

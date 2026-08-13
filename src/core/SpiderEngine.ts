@@ -6,6 +6,9 @@ import { JarSpider } from './JarSpider';
 import { XbpqSpider } from './XbpqSpider';
 import { XyqhikerSpider } from './XyqhikerSpider';
 // DrpySpider no longer used — drpy spiders are handled by JsSpider
+// PanLogin no longer used here — bili cookie injection is handled JAR-side
+// (SpiderManager.initSpider reads Wex_bili_cookie from SharedPreferences
+// and injects it into ext.cookie before calling spider.init()).
 
 export class SpiderEngine {
   private spiderCache: Map<string, ISpider> = new Map();
@@ -188,6 +191,11 @@ export class SpiderEngine {
     const hasJarUrl = !!this.resolveJarUrl(source);
     const apiStr = source.api || '';
 
+    // The JAR's SpiderManager.initSpider handles bili cookie injection
+    // (reads Wex_bili_cookie from SharedPreferences and injects into ext).
+    // The PC no longer touches credentials — JAR is the single source of truth.
+    const effectiveExt = source.ext || '';
+
     // Check for drpy spider (api contains drpy library URL or key starts with drpy_js_)
     // drpy spiders are JS-based — route to JsSpider which has full VM + pdfh/pdfa/cheerio
     if (
@@ -228,7 +236,8 @@ export class SpiderEngine {
         console.log(
           `[SpiderEngine] Creating JarSpider: key=${uniqueKey}, api=${apiStr}, jarUrl=${jarUrl}`,
         );
-        spider = new JarSpider(uniqueKey, apiStr, jarUrl, source.ext);
+        // effectiveExt already has Bilibili cookie injected (if applicable)
+        spider = new JarSpider(uniqueKey, apiStr, jarUrl, effectiveExt);
       }
     } else if (api && /\.js(\?|$)/i.test(api)) {
       spider = new JsSpider(key, api, source.ext);
@@ -265,7 +274,7 @@ export class SpiderEngine {
     }
 
     try {
-      await spider.init(source.ext || '');
+      await spider.init(effectiveExt);
       console.log(`[SpiderEngine] Spider initialized successfully: ${key}`);
     } catch (e) {
       console.error(`[SpiderEngine] Failed to init spider ${key}:`, e);

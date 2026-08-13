@@ -22,6 +22,22 @@
           <el-button type="primary" :loading="configLoading" @click="loadConfig" class="shrink-0">加载</el-button>
           <el-dropdown trigger="click" class="shrink-0">
             <el-button class="flex items-center gap-1.5">
+              <span>推荐</span>
+              <el-icon class="w-3.5 h-3.5"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item v-for="p in configPresets" :key="p.url" @click="selectPresetUrl(p.url)">
+                  <div class="flex flex-col">
+                    <span>{{ p.name }}</span>
+                    <span class="text-[11px]" style="color: var(--color-text-tertiary)">{{ p.desc }}</span>
+                  </div>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <el-dropdown trigger="click" class="shrink-0">
+            <el-button class="flex items-center gap-1.5">
               <span>历史</span>
               <el-icon class="w-3.5 h-3.5"><ArrowDown /></el-icon>
             </el-button>
@@ -165,6 +181,63 @@
                 class="flex-1"
               />
               <el-button @click="selectVlcPath" size="default">浏览</el-button>
+            </div>
+          </div>
+          <!-- Playback speed -->
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-[13px]" style="color: var(--color-text-secondary)">播放速度</span>
+              <span class="text-[13px] tabular-nums font-medium" style="color: var(--color-text-primary)">{{ playSpeedValue.toFixed(2) }}x</span>
+            </div>
+            <el-slider
+              v-model="playSpeedValue"
+              :min="0.5"
+              :max="3.0"
+              :step="0.25"
+              :marks="{ 0.5: '0.5x', 1: '1x', 1.5: '1.5x', 2: '2x', 3: '3x' }"
+              @change="onPlaySpeedChange"
+            />
+          </div>
+          <!-- Scale type -->
+          <div class="flex items-center justify-between">
+            <span class="text-[13px]" style="color: var(--color-text-secondary)">播放尺度</span>
+            <el-select v-model="scaleTypeValue" @change="onScaleTypeChange" style="width: 160px">
+              <el-option v-for="opt in scaleTypeOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+            </el-select>
+          </div>
+          <!-- Hard decode -->
+          <div class="flex items-center justify-between">
+            <div class="flex flex-col gap-0.5">
+              <span class="text-[13px]" style="color: var(--color-text-secondary)">硬解码</span>
+              <span class="text-[11px]" style="color: var(--color-text-tertiary)">使用硬件加速解码，关闭可解决部分花屏问题</span>
+            </div>
+            <el-switch v-model="hardDecodeValue" @change="onHardDecodeChange" />
+          </div>
+          <!-- Skip intro / outro -->
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-[13px] mb-2" style="color: var(--color-text-secondary)">跳过片头（秒）</label>
+              <el-input-number
+                v-model="skipIntroValue"
+                :min="0"
+                :max="300"
+                :step="5"
+                controls-position="right"
+                class="w-full"
+                @change="onSkipIntroChange"
+              />
+            </div>
+            <div>
+              <label class="block text-[13px] mb-2" style="color: var(--color-text-secondary)">跳过片尾（秒）</label>
+              <el-input-number
+                v-model="skipOutroValue"
+                :min="0"
+                :max="300"
+                :step="5"
+                controls-position="right"
+                class="w-full"
+                @change="onSkipOutroChange"
+              />
             </div>
           </div>
         </div>
@@ -456,6 +529,40 @@ const configLoading = ref(false)
 const configUrlHistory = ref<string[]>([])
 const sourceListCollapsed = ref(false)
 
+// Preset config URLs — curated from web-shared TVBox configs.
+// Each preset is verified to load JAR + have working csp_ sources.
+const configPresets = [
+  {
+    name: 'newwex（默认）',
+    url: 'https://9280.kstore.vip/newwex.json',
+    desc: '88 个源，14 个首页可用，6 个直链播放，网盘源需登录',
+  },
+  {
+    name: '肥猫',
+    url: 'http://肥猫.net/tv',
+    desc: '38 个源，11 个首页可用，4 个直链播放，网盘源需登录',
+  },
+  {
+    name: 'aowu',
+    url: 'http://itv666.cc/aowu/config.webp',
+    desc: '85 个源，12 个首页可用，3 个直链播放（Hxq 受 native 限制）',
+  },
+  {
+    name: '欧歌多仓',
+    url: 'http://tv.nxog.top/m/',
+    desc: '93 个源，8 个直链播放（热播/农民/大鹅/三六零/骚火/金牌/爱看/1905）',
+  },
+  {
+    name: '应用多多聚合',
+    url: 'https://jihulab.com/duomv/apps/-/raw/main/fast.json',
+    desc: '多仓聚合（4 个子仓），资源全面',
+  },
+]
+
+function selectPresetUrl(url: string) {
+  inputUrl.value = url
+}
+
 // Multi-config - 用 computed 直接绑定 store 状态，确保同步
 const activeSubConfigUrl = computed(() => {
   if (store.activeSubConfigIndex >= 0 && store.subConfigs[store.activeSubConfigIndex]) {
@@ -474,6 +581,20 @@ const mergeSubConfigsValue = computed({
 const autoPlayNext = ref(true)
 const screenDisplayValue = ref(true)
 const vlcPathValue = ref(localStorage.getItem('tvbox_vlc_path') || '')
+// Playback settings (mirror FongMi/TV Playback)
+const playSpeedValue = ref(1)
+const scaleTypeValue = ref('default')
+const hardDecodeValue = ref(true)
+const skipIntroValue = ref(0)
+const skipOutroValue = ref(0)
+const scaleTypeOptions = [
+  { label: '默认', value: 'default' },
+  { label: '16:9', value: '16:9' },
+  { label: '4:3', value: '4:3' },
+  { label: '填充', value: 'fill' },
+  { label: '原始', value: 'original' },
+  { label: '裁剪', value: 'crop' },
+]
 
 // Subtitle
 const subtitleSizeValue = ref(24)
@@ -542,6 +663,12 @@ onMounted(() => {
   // Playback
   autoPlayNext.value = store.autoPlayNext
   screenDisplayValue.value = localStorage.getItem('tvbox_screen_display') !== 'false'
+  // Playback settings (mirror FongMi/TV)
+  playSpeedValue.value = store.playSpeed
+  scaleTypeValue.value = store.scaleType
+  hardDecodeValue.value = store.hardDecode
+  skipIntroValue.value = store.skipIntro
+  skipOutroValue.value = store.skipOutro
 
   // Subtitle
   subtitleSizeValue.value = Number(localStorage.getItem('tvbox_subtitle_size') || '24')
@@ -636,6 +763,22 @@ function onAutoPlayNextChange(val: boolean) {
 
 function onScreenDisplayChange(val: boolean) {
   localStorage.setItem('tvbox_screen_display', String(val))
+}
+
+function onPlaySpeedChange(val: number) {
+  store.setPlaySpeed(val)
+}
+function onScaleTypeChange(val: string) {
+  store.setScaleType(val)
+}
+function onHardDecodeChange(val: boolean) {
+  store.setHardDecode(val)
+}
+function onSkipIntroChange(val: number) {
+  store.setSkipIntro(val || 0)
+}
+function onSkipOutroChange(val: number) {
+  store.setSkipOutro(val || 0)
 }
 
 function onVlcPathChange(val: string) {

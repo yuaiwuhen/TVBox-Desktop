@@ -11,12 +11,47 @@ import axios from 'axios';
 
 // HTTP客户端实例
 const httpClient = axios.create({
-  baseURL: 'http://localhost:9978',
-  timeout: 30000,
+  baseURL: 'http://127.0.0.1:19978',
+  timeout: 120000,
   headers: {
     'Content-Type': 'application/json',
+    // Note: Chrome blocks setting "Connection: close" from renderer fetch,
+    // so we rely on postWithRetry below to ride out ECONNRESET errors
+    // rather than forcing connection close.
   },
 });
+
+/**
+ * Retry wrapper — NanoHTTPD occasionally resets connections when the
+ * Android process is busy (e.g. loading DEX classes). Retry up to 3 times
+ * with a short delay to ride through transient ECONNRESET / Network Error.
+ */
+async function postWithRetry(
+  endpoint: string,
+  data: any,
+  retries = 3,
+): Promise<any> {
+  let lastError: any;
+  for (let i = 1; i <= retries; i++) {
+    try {
+      return await httpClient.post(endpoint, data);
+    } catch (error: any) {
+      lastError = error;
+      const msg = error.message || '';
+      const isConnReset =
+        error.code === 'ECONNRESET' ||
+        msg.includes('ECONNRESET') ||
+        msg.includes('socket hang up') ||
+        msg.includes('Network Error');
+      if (!isConnReset || i === retries) throw error;
+      console.warn(
+        `[JarSpider] POST ${endpoint} attempt ${i} failed (${msg}), retrying...`,
+      );
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  throw lastError;
+}
 
 export class JarSpider implements ISpider {
   private key: string;
@@ -69,25 +104,19 @@ export class JarSpider implements ISpider {
         });
 
         if (!loadResult?.success) {
-          const errorMsg =
-            loadResult?.error || `Failed to load JAR: ${this.jarUrl}`;
-          console.error('[JarSpider] JAR load failed:', errorMsg);
-          loading.fail(taskId, errorMsg);
-          throw new Error(`[JarSpider] ${errorMsg}`);
+          throw new Error(
+            loadResult?.error || `Failed to load JAR: ${this.jarUrl}`,
+          );
         }
       } catch (error: any) {
-        // If Spider service is not available, use mock data for development
-        if (
-          error.code === 'ECONNREFUSED' ||
-          error.message?.includes('Network Error')
-        ) {
-          console.warn(
-            '[JarSpider] Spider service not available, using mock data for development',
-          );
-          this.initialized = true;
-          loading.success(taskId, '爬虫加载成功（开发模式）');
-          return;
-        }
+        // Spider service unavailable — do NOT fall back to mock data.
+        // Surface the error so the UI can show a proper failure message
+        // instead of fake placeholder videos.
+        console.error(
+          '[JarSpider] Spider service not available:',
+          error.message || error,
+        );
+        loading.fail(taskId, `Spider服务不可用: ${error.message || error}`);
         throw error;
       }
 
@@ -101,11 +130,9 @@ export class JarSpider implements ISpider {
       });
 
       if (!initResult?.success) {
-        const errorMsg =
-          initResult?.error || `Failed to init spider: ${this.className}`;
-        console.error('[JarSpider] Spider init failed:', errorMsg);
-        loading.fail(taskId, errorMsg);
-        throw new Error(`[JarSpider] ${errorMsg}`);
+        throw new Error(
+          initResult?.error || `Failed to init spider: ${this.className}`,
+        );
       }
 
       this.initialized = true;
@@ -124,7 +151,7 @@ export class JarSpider implements ISpider {
    */
   private async postRequest(endpoint: string, data: any): Promise<any> {
     try {
-      const response = await httpClient.post(endpoint, data);
+      const response = await postWithRetry(endpoint, data);
       return response.data;
     } catch (error: any) {
       console.error(
@@ -136,107 +163,6 @@ export class JarSpider implements ISpider {
         error: error.message || 'Request failed',
       };
     }
-  }
-
-  /**
-   * Get mock data for development when Spider service is not available
-   */
-  private getMockData(method: string, args: any[]): string {
-    console.log('[JarSpider] Returning mock data for method:', method);
-
-    // Mock home content
-    if (method === 'homeContent') {
-      return JSON.stringify({
-        classes: [
-          { type_id: '1', type_name: '电影' },
-          { type_id: '2', type_name: '电视剧' },
-          { type_id: '3', type_name: '综艺' },
-          { type_id: '4', type_name: '动漫' },
-        ],
-        list: [
-          {
-            vod_id: 'mock1',
-            vod_name: '示例电影1（开发模式）',
-            vod_pic: 'https://via.placeholder.com/200x300?text=Movie+1',
-            vod_remarks: 'HD',
-            vod_year: '2024',
-            type_id: '1',
-          },
-          {
-            vod_id: 'mock2',
-            vod_name: '示例电视剧（开发模式）',
-            vod_pic: 'https://via.placeholder.com/200x300?text=TV+Show',
-            vod_remarks: '更新至第10集',
-            vod_year: '2024',
-            type_id: '2',
-          },
-          {
-            vod_id: 'mock3',
-            vod_name: '示例综艺（开发模式）',
-            vod_pic: 'https://via.placeholder.com/200x300?text=Variety',
-            vod_remarks: '第20240101期',
-            vod_year: '2024',
-            type_id: '3',
-          },
-        ],
-      });
-    }
-
-    // Mock category content
-    if (method === 'categoryContent') {
-      return JSON.stringify({
-        list: [
-          {
-            vod_id: 'mock_cat1',
-            vod_name: `分类内容示例 ${args[1] || '1'}`,
-            vod_pic: 'https://via.placeholder.com/200x300?text=Category',
-            vod_remarks: 'HD',
-            vod_year: '2024',
-          },
-        ],
-        page: args[1] || '1',
-        pagecount: '10',
-      });
-    }
-
-    // Mock detail content
-    if (method === 'detailContent') {
-      return JSON.stringify({
-        list: [
-          {
-            vod_id: args[0]?.[0] || 'mock1',
-            vod_name: '详情内容示例（开发模式）',
-            vod_pic: 'https://via.placeholder.com/300x400?text=Detail',
-            vod_content:
-              '这是一个Mock数据，用于开发测试。Spider服务不可用时会显示此内容。',
-            vod_play_from: '线路1$线路2',
-            vod_play_url:
-              '第01集#https://example.com/video1.mp4$第02集#https://example.com/video2.mp4',
-            vod_year: '2024',
-            vod_area: '中国',
-            vod_director: '导演名',
-            vod_actor: '演员1,演员2',
-          },
-        ],
-      });
-    }
-
-    // Mock search content
-    if (method === 'searchContent') {
-      return JSON.stringify({
-        list: [
-          {
-            vod_id: 'search_mock1',
-            vod_name: `搜索结果: ${args[0]}`,
-            vod_pic: 'https://via.placeholder.com/200x300?text=Search+Result',
-            vod_remarks: 'HD',
-          },
-        ],
-      });
-    }
-
-    // Default empty response
-    return JSON.stringify({});
   }
 
   /**
@@ -308,24 +234,11 @@ export class JarSpider implements ISpider {
           requestData.flag = args[0] || '';
           requestData.id = args[1] || '';
           requestData.vipFlags = args[2] || [];
-
-          // 添加额外的cookies（如果需要）
-          const extraCookies: Record<string, string> = {};
-          const panTypes = ['quark', 'uc', 'aliyun', 'baidu', 'bili'];
-          for (const pt of panTypes) {
-            try {
-              const saved = localStorage.getItem(`pan_login_${pt}`);
-              if (saved) {
-                const parsed = JSON.parse(saved);
-                if (parsed.cookie) {
-                  extraCookies[pt] = parsed.cookie;
-                }
-              }
-            } catch {}
-          }
-          if (Object.keys(extraCookies).length > 0) {
-            requestData.extraCookies = extraCookies;
-          }
+          // Cookies are NOT injected from PC localStorage anymore.
+          // The JAR's SpiderManager reads credentials from SharedPreferences
+          // (populated via /spider/saveLogin) — spiders that read
+          // SharedPreferences (e.g. csp_Duopan for Quark/UC/Baidu) find
+          // the logged-in state directly. The PC never touches credentials.
           break;
 
         default:
@@ -347,10 +260,35 @@ export class JarSpider implements ISpider {
       }
 
       if (!response.success) {
+        const errMsg = String(response.error || '');
+        // "Spider not found" means the spider was evicted from the server's
+        // cache — most commonly because the Android process restarted after
+        // a native crash (e.g. libhoudini SIGSEGV when translating ARM64
+        // instructions in sources like MusicLiYuan / AnimeFanShu).
+        //
+        // If we already initialized successfully and now see this error, the
+        // spider has crashed on the server side. Falling back to mock data
+        // would show the user fake videos (placeholder URLs that don't play).
+        // Instead, return an empty JSON so the UI shows "暂无数据" and the
+        // user is not misled.
+        const isSpiderCrashed =
+          this.initialized && errMsg.includes('Spider not found');
+        if (isSpiderCrashed) {
+          console.warn(
+            `[JarSpider] ${method}: spider crashed on server (init was OK, now "${errMsg}") — returning empty data instead of mock`,
+          );
+          // Mark as needing re-init on next call (will be re-attempted, but
+          // crash-prone sources will likely crash again — libhoudini limit).
+          this.initialized = false;
+          return '{}';
+        }
         console.warn(
           `[JarSpider] ${method} failed:`,
           response.error || 'Unknown error',
         );
+        // Return empty data so the PC端 loadHome fallback chain can try
+        // homeVideoContent / categoryContent / searchContent. Returning mock
+        // data here would show fake videos and block the fallback chain.
         return '{}';
       }
 
@@ -361,6 +299,13 @@ export class JarSpider implements ISpider {
         console.warn(`[JarSpider] callMethod ${method} failed:`, e.message);
       } else {
         console.warn(`[JarSpider] callMethod ${method} aborted`);
+      }
+      // Return empty data on any exception (except abort) so the PC端
+      // fallback chain can try alternative methods.
+      if (e.name !== 'AbortError') {
+        console.warn(
+          `[JarSpider] ${method}: returning empty data due to exception`,
+        );
       }
       return '{}';
     }

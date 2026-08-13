@@ -147,6 +147,25 @@ export class QuarkPanService {
   }
 
   /**
+   * Cache the Quark cookie in memory after a successful QR login.
+   * The JAR has already persisted it to SharedPreferences; this cache
+   * lets the ProxyServer inject it into spider params without round-tripping
+   * to the JAR on every play request. Pass `null` to clear.
+   */
+  static setSyncedCookie(cookie: string | null): void {
+    this.syncedCookie = cookie;
+    if (cookie) {
+      console.log(
+        `[QuarkPanService] setSyncedCookie: cached cookie (len=${cookie.length})`,
+      );
+    } else {
+      this.playUrlCache.clear();
+      this.shareFidTokenCache.clear();
+      this.tvboxFolderFid = null;
+    }
+  }
+
+  /**
    * Clear all in-memory login state. Called by PanLoginService.pan:logout.
    * Also clears the playUrlCache so a re-login doesn't reuse stale URLs
    * bound to the previous __puus.
@@ -1929,7 +1948,9 @@ export class QuarkPanService {
 
         console.log('[QuarkPanService] Login success:', nickname);
 
-        this.syncCookieToJVM(cookie);
+        // Cache cookie in-memory for ProxyServer. JAR-side persistence is
+        // handled by the renderer via spider:saveLogin.
+        this.syncedCookie = cookie || null;
 
         return {
           success: true,
@@ -2037,112 +2058,19 @@ export class QuarkPanService {
     }
   }
 
-  // 改为 public static，允许 PanLoginService 调用
+  /**
+   * Cache the cookie in-memory for the ProxyServer fallback.
+   *
+   * JAR-side SharedPreferences persistence is handled exclusively by the
+   * renderer via spider:saveLogin → /spider/saveLogin. The PC no longer
+   * writes credentials to disk or touches SharedPreferences directly.
+   */
   public static async syncCookieToJVM(cookie: string): Promise<void> {
     console.log(
-      '[QuarkPanService] syncCookieToJVM called, cookie length:',
+      '[QuarkPanService] syncCookieToJVM: caching in-memory only, cookie length:',
       cookie?.length || 0,
     );
-    console.log(
-      '[QuarkPanService] syncCookieToJVM cookie preview:',
-      cookie?.substring(0, 100) || 'empty',
-    );
-    console.log(
-      '[QuarkPanService] syncCookieToJVM has __puus:',
-      cookie?.includes('__puus') || false,
-    );
-    console.log(
-      '[QuarkPanService] syncCookieToJVM has __pus:',
-      cookie?.includes('__pus') || false,
-    );
-    // Cache for ProxyServer to inject into spider params
     this.syncedCookie = cookie || null;
-    // Persist to temp file for diagnostic scripts
-    try {
-      const fs = await import('fs');
-      const path = await import('path');
-      const os = await import('os');
-      const cookiePath = path.join(os.tmpdir(), 'quark_cookie_debug.txt');
-      fs.writeFileSync(cookiePath, cookie || '', 'utf-8');
-      console.log('[QuarkPanService] Cookie persisted to:', cookiePath);
-    } catch (e) {
-      // ignore
-    }
-    try {
-      if (!jarLoader || !jarLoader.java) {
-        console.warn('[QuarkPanService] JVM not ready, skipping cookie sync');
-        return;
-      }
-
-      // Spider 期望的 SharedPreferences 名字 = <packageName>_preferences
-      // packageName 来自 Context.getPackageName() = "com.github.catvod.tvbox"
-      const PREFS_NAME = 'com.github.catvod.tvbox_preferences';
-      const XOR_KEY = 'miwudi';
-
-      // 加密 cookie：每个字符 XOR "miwudi"（循环）→ UTF-8 bytes → Base64
-      // 对应 e_1.g() 方法的加密逻辑（key: "miwudi" 来自 e_1 类的静态字段 a）
-      const encryptedCookie = this.encryptQuarkCookie(cookie, XOR_KEY);
-      console.log(
-        '[QuarkPanService] Encrypted cookie length:',
-        encryptedCookie.length,
-      );
-
-      // 通过 Init.context() 获取 Application Context
-      const InitClass = jarLoader.java.importClass(
-        'com.github.catvod.spider.Init',
-      );
-      const ctx = InitClass.contextSync();
-      if (!ctx) {
-        console.warn('[QuarkPanService] Init.context() returned null');
-        return;
-      }
-
-      // 获取 SharedPreferences（不存在则创建）
-      const prefs = ctx.getSharedPreferencesSync(PREFS_NAME, 0);
-      if (!prefs) {
-        console.warn(
-          `[QuarkPanService] Failed to get SharedPreferences: ${PREFS_NAME}`,
-        );
-        return;
-      }
-
-      // 写入：
-      // - mi.quark = 加密后的 cookie（spider 优先读取，e_1.b() 会解密）
-      // - .quark   = 明文 cookie（fallback，e_1.b() 在解密失败时使用）
-      const editor = prefs.editSync();
-      editor.putStringSync('mi.quark', encryptedCookie);
-      editor.putStringSync('.quark', cookie);
-      editor.applySync();
-
-      console.log(
-        `[QuarkPanService] Synced cookie to ${PREFS_NAME} (mi.quark encrypted + .quark plain)`,
-      );
-
-      // Guard spider (NewJuTou/NewErXiao/etc.) reads quark cookie from a
-      // DIFFERENT SharedPreferences: NewWexFnw_preferences, key Wex_quark_cookie.
-      // Without this, PlayUrlBuilder's AsyncTask cannot resolve pan links and
-      // detailContent returns placeholder text ("没有资源") instead of play URLs.
-      const GUARD_PREFS = 'NewWexFnw_preferences';
-      try {
-        const guardPrefs = ctx.getSharedPreferencesSync(GUARD_PREFS, 0);
-        const guardEditor = guardPrefs.editSync();
-        guardEditor.putStringSync('Wex_quark_cookie', cookie);
-        guardEditor.applySync();
-        console.log(
-          `[QuarkPanService] Synced cookie to ${GUARD_PREFS} (Wex_quark_cookie)`,
-        );
-      } catch (guardErr: any) {
-        console.warn(
-          `[QuarkPanService] Failed to sync to ${GUARD_PREFS}:`,
-          guardErr.message,
-        );
-      }
-    } catch (e: any) {
-      console.warn(
-        '[QuarkPanService] Failed to sync cookie to JVM:',
-        e.message,
-      );
-    }
   }
 
   // 夸克 cookie 加密：XOR "miwudi" + Base64

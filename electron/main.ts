@@ -27,6 +27,12 @@ import { Pan115Service } from './Pan115Service';
 import { PanLoginService } from './PanLoginService';
 import { proxyServer } from './ProxyServer';
 import { loadConfigFromFile, saveConfigToFile } from './ConfigPersistence';
+import { SpiderAPIClient, spiderAPIClient } from './SpiderAPIClient';
+import {
+  AutoInstallManager,
+  autoInstallManager,
+  InstallStatus,
+} from './AutoInstallManager';
 
 // Enable HEVC/H.265 hardware decoding in Chromium.
 // On Windows, this uses Media Foundation's HEVC decoder (requires HEVC Video
@@ -38,9 +44,13 @@ app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport');
 // Enable remote debugging for CDP (Chrome DevTools Protocol) access.
 // Used by test scripts to inspect renderer state (HEVC support, playback).
 // Port can be overridden via command line: --remote-debugging-port=XXXX
+// Note: Default port changed to 9223 to avoid conflict with another
+// TVBox-PC project at D:\Code\TVBOXDesktop\TVBox-PC which uses 9222.
 if (!process.argv.some((arg) => arg.startsWith('--remote-debugging-port'))) {
-  app.commandLine.appendSwitch('remote-debugging-port', '9222');
+  app.commandLine.appendSwitch('remote-debugging-port', '9223');
 }
+// Allow CDP WebSocket connections from any origin (for inspection scripts).
+app.commandLine.appendSwitch('remote-allow-origins', '*');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -112,22 +122,6 @@ ipcMain.handle('debug:stopLogCapture', () => {
   logBuffer.length = 0;
   return logs;
 });
-
-// Check whether the Visual C++ Redistributable 2015+ runtime is installed.
-// java-bridge's native nodejar.node links against vcruntime140.dll. Without
-// it, requiring java-bridge throws "The specified module could not be found"
-// which is hard to debug from the user's perspective. Show a friendly error
-// instead and link to the official Microsoft download.
-function isVcredistInstalled(): boolean {
-  const sysRoot = process.env.SystemRoot || 'C:\\Windows';
-  // vcruntime140.dll lives in System32 on 64-bit Windows. We check both
-  // System32 (x64) and SysWOW64 (x86) to be safe.
-  const targets = [
-    path.join(sysRoot, 'System32', 'vcruntime140.dll'),
-    path.join(sysRoot, 'SysWOW64', 'vcruntime140.dll'),
-  ];
-  return targets.some((p) => fs.existsSync(p));
-}
 
 // Check Docker environment on startup - Enhanced version with auto-deploy
 async function checkDockerEnvironment(): Promise<void> {
@@ -303,7 +297,7 @@ async function checkDockerEnvironment(): Promise<void> {
 
       while (retries < maxRetries) {
         try {
-          const response = await axios.get('http://localhost:9978/health', {
+          const response = await axios.get('http://127.0.0.1:19978/health', {
             timeout: 3000,
           });
 
@@ -359,6 +353,72 @@ async function checkDockerEnvironment(): Promise<void> {
   }
 }
 
+/**
+ * 初始化Spider服务
+ */
+async function initializeSpiderService(): Promise<void> {
+  try {
+    console.log('[Main] Initializing Spider service...');
+
+    const CONFIG_URL = 'https://9280.kstore.vip/newwex.json';
+
+    // 检查Spider服务是否可用（最多等待3次）
+    let isHealthy = false;
+    for (let i = 0; i < 3; i++) {
+      isHealthy = await spiderAPIClient.healthCheck();
+      if (isHealthy) break;
+      if (i < 2) await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+
+    if (!isHealthy) {
+      console.error(
+        '[Main] Spider service not available — refusing to load mock data. ' +
+          'Please ensure the Docker container (tvbox-spider) is running.',
+      );
+      win?.webContents.send('spider:error', {
+        message:
+          'Spider服务不可用，请确认 Docker 容器 (tvbox-spider) 已启动。不会显示示例数据。',
+      });
+      return;
+    }
+
+    console.log('[Main] Spider service is healthy');
+
+    // 加载配置文件
+    await spiderAPIClient.loadSpidersFromConfig(CONFIG_URL);
+
+    // 获取首页数据
+    const firstSpiderKey = spiderAPIClient
+      .getLoadedSpiders()
+      .keys()
+      .next().value;
+
+    if (firstSpiderKey) {
+      console.log('[Main] Getting home content for spider:', firstSpiderKey);
+      const homeContent = await spiderAPIClient.homeContent(
+        firstSpiderKey,
+        true,
+      );
+
+      console.log('[Main] Home content loaded:', {
+        classes: homeContent.classes?.length || 0,
+        items: homeContent.list?.length || 0,
+      });
+
+      // 发送首页数据到渲染进程
+      win?.webContents.send('spider:homeData', {
+        spiderKey: firstSpiderKey,
+        homeContent,
+      });
+    }
+  } catch (error: any) {
+    console.error('[Main] Failed to initialize Spider service:', error.message);
+    win?.webContents.send('spider:error', {
+      message: `Spider服务初始化失败: ${error.message}`,
+    });
+  }
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1280,
@@ -366,14 +426,18 @@ function createWindow() {
     minWidth: 960,
     minHeight: 600,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: true,
       contextIsolation: false,
+      sandbox: false,
       webSecurity: false,
     },
     show: false,
     menu: null,
   });
+
+  // 设置AutoInstallManager的窗口引用
+  autoInstallManager.setWindow(win);
 
   win.once('ready-to-show', () => {
     win?.show();
@@ -381,6 +445,21 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => {
     win?.webContents.send('main-process-message', new Date().toLocaleString());
+    // Send the current ProxyServer port (if started) so the renderer can
+    // rewrite proxy:// URLs to the correct local proxy URL.
+    const proxyPort = proxyServer.getPort();
+    if (proxyPort > 0) {
+      win?.webContents.send('proxy-port-changed', proxyPort);
+    }
+  });
+
+  // Whenever the ProxyServer port changes (initial start, restart), notify
+  // the renderer so it can update its LOCAL_PROXY constant.
+  proxyServer.setPortCallback((port: number) => {
+    if (port > 0) {
+      console.log(`[Main] Notifying renderer of proxy port: ${port}`);
+      win?.webContents.send('proxy-port-changed', port);
+    }
   });
 
   // Register DevTools shortcut (F12)
@@ -515,6 +594,13 @@ ipcMain.handle('window-toggle-maximize', () => {
 
 ipcMain.handle('window-is-maximized', () => {
   return win ? win.isMaximized() : false;
+});
+
+// Return the current ProxyServer listening port. Renderer uses this on
+// startup to rewrite proxy:// URLs to the correct local proxy URL, since
+// the port-changed event may fire before the renderer is ready to listen.
+ipcMain.handle('proxy:getPort', () => {
+  return proxyServer.getPort();
 });
 
 // Config persistence IPC handlers
@@ -796,6 +882,80 @@ ipcMain.handle(
   },
 );
 
+// Sync a playback preference (playSpeed / scaleType / hardDecode /
+// skipIntro / skipOutro) to the Android spider server. The server writes
+// it into SharedPreferences so JAR-based players honor the same value.
+ipcMain.handle(
+  'spider-set-pref',
+  async (_event, { key, value }: { key: string; value: string }) => {
+    try {
+      return { success: await spiderAPIClient.setPref(key, value) };
+    } catch (e: any) {
+      console.warn('[Main] spider-set-pref failed:', e.message);
+      return { success: false, error: e.message };
+    }
+  },
+);
+
+// =============================================================================
+// Netdisk login credential management — JAR is the single source of truth.
+//
+// The PC client does NOT persist any netdisk credentials locally. After a
+// successful QR scan, the PC pushes credentials to the JAR via
+// spider:saveLogin; the JAR stores them in SharedPreferences. Login status
+// queries (spider:loginStatus) and logout (spider:logout) also go through
+// the JAR.
+// =============================================================================
+
+ipcMain.handle(
+  'spider:saveLogin',
+  async (
+    _event,
+    params: {
+      panType: string;
+      cookie?: string;
+      refreshToken?: string;
+      accessToken?: string;
+      userId?: string;
+      nickname?: string;
+    },
+  ) => {
+    try {
+      return await spiderAPIClient.saveLogin(params);
+    } catch (e: any) {
+      console.warn('[Main] spider:saveLogin failed:', e.message);
+      return { success: false, error: e.message };
+    }
+  },
+);
+
+ipcMain.handle('spider:loginStatus', async (_event, panType: string) => {
+  try {
+    return await spiderAPIClient.loginStatus(panType);
+  } catch (e: any) {
+    console.warn('[Main] spider:loginStatus failed:', e.message);
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('spider:logout', async (_event, panType: string) => {
+  try {
+    return await spiderAPIClient.logout(panType);
+  } catch (e: any) {
+    console.warn('[Main] spider:logout failed:', e.message);
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('spider:getLogin', async (_event, panType: string) => {
+  try {
+    return await spiderAPIClient.getLogin(panType);
+  } catch (e: any) {
+    console.warn('[Main] spider:getLogin failed:', e.message);
+    return { success: false, error: e.message };
+  }
+});
+
 // Show unsupported format dialog — sends event to renderer for modern UI
 ipcMain.handle(
   'show-unsupported-format-dialog',
@@ -877,30 +1037,6 @@ app.on('window-all-closed', () => {
 });
 
 app.whenReady().then(async () => {
-  // VC++ Redistributable check — only on Windows. java-bridge's native
-  // nodejar.node links against vcruntime140.dll on Windows. Linux/Mac
-  // don't need this (they use system libc/libobjc instead).
-  if (process.platform === 'win32' && !isVcredistInstalled()) {
-    const choice = dialog.showMessageBoxSync({
-      type: 'error',
-      title: '缺少 Visual C++ Redistributable',
-      message: 'TVBox-PC 缺少运行时依赖',
-      detail:
-        'TVBox-PC 需要 Visual C++ Redistributable 2015+ 才能运行 Java spider。\n\n' +
-        '请前往微软官网下载安装：\n' +
-        'https://aka.ms/vs/17/release/vc_redist.x64.exe\n\n' +
-        '安装完成后重新启动 TVBox-PC。',
-      buttons: ['打开下载页面', '退出'],
-      defaultId: 0,
-      cancelId: 1,
-    });
-    if (choice === 0) {
-      shell.openExternal('https://aka.ms/vs/17/release/vc_redist.x64.exe');
-    }
-    app.quit();
-    return;
-  }
-
   Menu.setApplicationMenu(null);
 
   // DoH (DNS over HTTPS) - prevents ISP DNS hijacking
@@ -919,18 +1055,8 @@ app.whenReady().then(async () => {
   // Register Docker IPC handlers
   registerDockerIPC();
 
-  // Check Docker environment on startup
-  checkDockerEnvironment();
-
-  QuarkPanService.init();
-  UCPanService.init();
-  AliyunPanService.init();
-  BaiduPanService.init();
-  Pan123Service.init();
-  Pan139Service.init();
-  Pan189Service.init();
-  Pan115Service.init();
-  PanLoginService.init();
+  // Create window first
+  createWindow();
 
   // Start local proxy server BEFORE any spider calls.
   // The spider's Proxy.a() probes ports 9978-9999 with `GET /proxy?do=ck`
@@ -943,5 +1069,71 @@ app.whenReady().then(async () => {
     console.error('[Main] ProxyServer failed to start:', e.message);
   }
 
-  createWindow();
+  // Auto-install and initialize Spider service
+  try {
+    console.log('[Main] Starting auto-install process...');
+
+    // Step 1: Ensure Docker Desktop is running (start it if needed)
+    // On Windows, Docker Desktop may not be running after a reboot.
+    // This check runs on every app startup.
+    if (
+      process.platform === 'win32' ||
+      process.platform === 'linux' ||
+      process.platform === 'darwin'
+    ) {
+      const dockerReady = await autoInstallManager.ensureDockerReady();
+      if (!dockerReady) {
+        console.warn(
+          '[Main] Docker is not ready — Spider service will not be available. ' +
+            'Please install or start Docker Desktop and restart the app.',
+        );
+      }
+    }
+
+    // Step 2: Check environment status and start container if needed
+    const envStatus = await autoInstallManager.checkEnvironment();
+
+    if (envStatus.status === InstallStatus.SUCCESS) {
+      console.log('[Main] Environment already ready');
+      // Even when the environment is ready, always reinstall the latest APK
+      // so the spider service stays in sync with the PC client.
+      try {
+        await autoInstallManager.setupSpiderApp();
+      } catch (e: any) {
+        console.warn('[Main] APK upgrade failed (non-fatal):', e.message);
+      }
+    } else {
+      console.log(
+        '[Main] Environment not ready, auto-starting Docker container...',
+      );
+      // 自动启动 Docker 容器（Windows/Linux 统一 Docker 方案）
+      try {
+        await autoInstallManager.autoInstall();
+        console.log('[Main] Auto-install completed');
+      } catch (installErr: any) {
+        console.error('[Main] Auto-install failed:', installErr.message);
+      }
+    }
+
+    // Initialize Spider service (errors out if service unavailable — no mock fallback)
+    await initializeSpiderService();
+
+    console.log('[Main] Spider service initialized successfully');
+  } catch (error: any) {
+    console.error(
+      '[Main] Spider service initialization failed:',
+      error.message,
+    );
+    // Don't quit, allow user to use app without Spider
+  }
+
+  QuarkPanService.init();
+  UCPanService.init();
+  AliyunPanService.init();
+  BaiduPanService.init();
+  Pan123Service.init();
+  Pan139Service.init();
+  Pan189Service.init();
+  Pan115Service.init();
+  PanLoginService.init();
 });

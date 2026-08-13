@@ -46,6 +46,11 @@ export default defineConfig({
             rollupOptions: {
               output: {
                 format: 'cjs',
+                // Output as .cjs so Node.js treats it as CommonJS regardless
+                // of the root package.json's "type":"module" setting.
+                // Without this, Electron fails to load preload with:
+                //   "require() of ES Module ... not supported"
+                entryFileNames: 'preload.cjs',
               },
             },
           },

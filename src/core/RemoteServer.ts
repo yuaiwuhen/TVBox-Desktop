@@ -1,11 +1,17 @@
 import type { SourceBean, Movie } from './models';
 
-const _require =
-  typeof require !== 'undefined'
-    ? require
-    : (m: string) => {
-        throw new Error(`Cannot require ${m}`);
-      };
+// Use dynamic property access on globalThis so Vite's ESM transform doesn't
+// statically replace `typeof require` with `false`.
+const g = globalThis as any;
+const _require: NodeRequire =
+  g.__non_webpack_require__ ||
+  g.require ||
+  (typeof window !== 'undefined' ? (window as any).require : undefined) ||
+  ((m: string) => {
+    throw new Error(
+      `Cannot require ${m} — running in browser without nodeIntegration`,
+    );
+  });
 const http = _require('http');
 const { URL } = _require('url');
 

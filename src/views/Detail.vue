@@ -285,6 +285,58 @@
           </el-button>
         </div>
 
+        <!-- msearch: aggregator result — show cross-source search results -->
+        <div v-else-if="isMsearchResult" class="mb-4">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-sm font-medium" style="color: var(--color-text-primary)">
+              {{ store.searchLoading ? '正在搜索可播放源...' : `搜索到 ${msearchTotalCount} 个源可播放` }}
+            </span>
+            <el-button size="small" text @click="refreshMsearchSearch" style="color: var(--color-primary)">
+              重新搜索
+            </el-button>
+          </div>
+          <div v-if="store.searchLoading && msearchSearchGroups.length === 0" class="rounded-lg p-6 text-center"
+            style="background: var(--color-bg-surface)">
+            <el-icon class="is-loading" :size="28" style="color: var(--color-text-tertiary)">
+              <Loading />
+            </el-icon>
+            <p class="mt-2 text-sm" style="color: var(--color-text-secondary)">搜索中...</p>
+          </div>
+          <div v-else-if="msearchSearchGroups.length === 0" class="rounded-lg p-6 text-center"
+            style="background: var(--color-bg-surface)">
+            <el-icon :size="40" style="color: var(--color-text-tertiary)">
+              <WarningFilled />
+            </el-icon>
+            <p class="mt-3 text-sm" style="color: var(--color-text-secondary)">
+              未搜索到可播放的源
+            </p>
+            <el-button class="mt-3" size="small" @click="refreshMsearchSearch">重新搜索</el-button>
+          </div>
+          <template v-else>
+            <div v-for="group in msearchSearchGroups" :key="group.siteKey" class="mb-3">
+              <div class="text-xs font-medium mb-2 px-1" style="color: var(--color-text-tertiary)">
+                {{ group.siteName }} ({{ group.list.length }})
+              </div>
+              <div class="msearch-grid">
+                <button v-for="item in group.list" :key="item.vod_id"
+                  class="msearch-card"
+                  @click="goToSourceDetail(group.siteKey, item.vod_id)">
+                  <img v-if="item.vod_pic" :src="processImageUrl(item.vod_pic)" class="msearch-card-poster" />
+                  <div v-else class="msearch-card-poster msearch-card-poster-placeholder">
+                    <el-icon :size="20" style="color: var(--color-text-tertiary)">
+                      <Film />
+                    </el-icon>
+                  </div>
+                  <div class="msearch-card-info">
+                    <div class="msearch-card-title">{{ item.vod_name }}</div>
+                    <div v-if="item.vod_remarks" class="msearch-card-remarks">{{ item.vod_remarks }}</div>
+                  </div>
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+
         <!-- No Play Sources (unknown reason) -->
         <div v-else class="mb-4 rounded-lg p-6 text-center" style="background: var(--color-bg-surface)">
           <el-icon :size="40" style="color: var(--color-text-tertiary)">
@@ -774,6 +826,29 @@ const needPanLogin = computed(() => {
   return !!(store.currentVod as any)?.needPanLogin
 })
 
+// msearch: aggregator result — show cross-source search results as play sources
+const isMsearchResult = computed(() => {
+  return !!(store.currentVod as any)?.isMsearchResult
+})
+
+const msearchSearchGroups = computed(() => store.searchResults)
+
+const msearchTotalCount = computed(() => {
+  return store.searchResults.reduce((sum, g) => sum + g.list.length, 0)
+})
+
+function refreshMsearchSearch() {
+  if (!store.currentVod?.vod_name) return
+  store.doSearch(store.currentVod.vod_name).catch((e) => {
+    console.warn('[Detail] refreshMsearchSearch failed:', e)
+  })
+}
+
+function goToSourceDetail(siteKey: string, vodId: string) {
+  console.log('[Detail] goToSourceDetail:', siteKey, vodId)
+  router.push({ name: 'detail', params: { sourceKey: siteKey, vodId } })
+}
+
 function goToConfigCenter() {
   // Navigate to home page and force-select the config center
   router.replace('/')
@@ -875,6 +950,13 @@ onMounted(async () => {
     return
   }
   store.setActiveSite(sourceKey)
+  // Refresh login status cache from JAR so pan-login checks are accurate.
+  // The JAR is the single source of truth — the PC never persists credentials.
+  try {
+    await PanLogin.refreshAllStatuses()
+  } catch (e: any) {
+    console.warn('[Detail] refreshAllStatuses failed:', e.message)
+  }
   // Listen for pan:loginExpired from the main process (fired when Quark
   // cookie expires mid-playback). Use the same ipcRenderer access pattern
   // as PanLogin.ts for consistency.
@@ -1144,6 +1226,68 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 0.75rem;
+}
+
+/* msearch cross-source search results grid */
+.msearch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.75rem;
+}
+
+.msearch-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  background: var(--color-bg-glass);
+  border: var(--color-border);
+  border-radius: var(--radius-md, 10px);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: left;
+}
+
+.msearch-card:hover {
+  background: var(--color-bg-glass-heavy);
+  border-color: var(--color-primary-border);
+  transform: translateY(-2px);
+}
+
+.msearch-card-poster {
+  width: 100%;
+  aspect-ratio: 2/3;
+  object-fit: cover;
+  border-radius: var(--radius-sm, 6px);
+  background: var(--color-bg-elevated);
+}
+
+.msearch-card-poster-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.msearch-card-info {
+  min-width: 0;
+}
+
+.msearch-card-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.msearch-card-remarks {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 @media (min-width: 640px) {

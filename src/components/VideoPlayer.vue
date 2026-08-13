@@ -10,6 +10,7 @@ import axios from 'axios';
 import { HEVCDecoder } from '@hevcjs/core';
 import { SubtitleEngine, type SubtitleCue } from '../core/SubtitleEngine';
 import { DanmuEngine, type DanmuItem } from '../core/DanmuEngine';
+import { useAppStore } from '../store/app';
 import {
   ChatDotRound,
   Setting,
@@ -83,7 +84,11 @@ const duration = ref(0);
 const buffered = ref(0);
 const volume = ref(1);
 const isMuted = ref(false);
-const playbackRate = ref(1);
+// Pinia store — kept in sync with the Settings page so that playback
+// preferences changed in one place (Settings page or in-player menu)
+// propagate to the other, and also push to the Android spider server.
+const appStore = useAppStore();
+const playbackRate = ref(appStore.playSpeed);
 const isLoading = ref(true);
 const hasError = ref(false);
 const errorMessage = ref('');
@@ -111,7 +116,7 @@ let subtitleUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 let wasPlayingBeforeSeek = false;
 
 // Aspect ratio
-const aspectRatio = ref('default');
+const aspectRatio = ref(appStore.scaleType);
 const aspectRatios = [
   { label: '默认', value: 'default' },
   { label: '16:9', value: '16:9' },
@@ -124,9 +129,10 @@ const aspectRatios = [
 // Time step
 const timeStep = ref(Number(localStorage.getItem('tvbox_time_step') || '10'));
 
-// Skip intro/outro
-const skipIntro = ref(Number(localStorage.getItem('tvbox_skip_intro') || '0'));
-const skipOutro = ref(Number(localStorage.getItem('tvbox_skip_outro') || '0'));
+// Skip intro/outro — initialized from the store so Settings page and
+// in-player long-press menu stay in sync.
+const skipIntro = ref(appStore.skipIntro);
+const skipOutro = ref(appStore.skipOutro);
 const skipIndicator = ref('');
 
 // Screen lock
@@ -735,6 +741,8 @@ const setPlaybackRate = (rate: number) => {
 
   playbackRate.value = rate;
   videoElement.value.playbackRate = rate;
+  // Persist + sync to Android via store setter
+  appStore.setPlaySpeed(rate);
   console.log('[VideoPlayer-hevc] 设置播放速度:', rate);
 };
 
@@ -852,6 +860,7 @@ const setTimeStep = (step: number) => {
 
 const changeAspectRatio = (mode: string) => {
   aspectRatio.value = mode;
+  appStore.setScaleType(mode);
   if (!videoElement.value) return;
 
   switch (mode) {
@@ -888,7 +897,7 @@ const toggleSkipIntro = () => {
   } else {
     skipIntro.value = Math.floor(currentTime.value);
   }
-  localStorage.setItem('tvbox_skip_intro', String(skipIntro.value));
+  appStore.setSkipIntro(skipIntro.value);
 };
 
 const toggleSkipOutro = () => {
@@ -898,7 +907,7 @@ const toggleSkipOutro = () => {
     const remaining = duration.value - currentTime.value;
     skipOutro.value = Math.floor(remaining);
   }
-  localStorage.setItem('tvbox_skip_outro', String(skipOutro.value));
+  appStore.setSkipOutro(skipOutro.value);
 };
 
 const skipToIntroEnd = () => {
@@ -983,6 +992,16 @@ const onLoadedMetadata = () => {
   duration.value = videoElement.value.duration;
   isLoading.value = false;
   console.log('[VideoPlayer-hevc] ✅ 视频信息加载完成, duration=', duration.value);
+
+  // Apply persisted playback settings (speed / aspect ratio) so they take
+  // effect on the freshly-loaded media element.
+  try {
+    videoElement.value.playbackRate = playbackRate.value;
+  } catch (e) {
+    console.warn('[VideoPlayer-hevc] apply playbackRate failed:', e);
+  }
+  changeAspectRatio(aspectRatio.value);
+
   emit('loadedmetadata');
 
   // 设置HEVC解码
@@ -1348,6 +1367,42 @@ function formatTime(seconds: number): string {
   if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
+
+// ==================== Store <-> Local sync watchers ====================
+// When playback settings change on the Settings page (or via another
+// component), reflect the new value into the local refs that the in-player
+// UI binds to. We avoid loops by only writing when the value actually
+// differs from the local ref.
+watch(
+  () => appStore.playSpeed,
+  (v) => {
+    if (Math.abs(v - playbackRate.value) > 1e-3) {
+      playbackRate.value = v;
+      if (videoElement.value) videoElement.value.playbackRate = v;
+    }
+  },
+);
+watch(
+  () => appStore.scaleType,
+  (v) => {
+    if (v !== aspectRatio.value) {
+      aspectRatio.value = v;
+      changeAspectRatio(v);
+    }
+  },
+);
+watch(
+  () => appStore.skipIntro,
+  (v) => {
+    if (v !== skipIntro.value) skipIntro.value = v;
+  },
+);
+watch(
+  () => appStore.skipOutro,
+  (v) => {
+    if (v !== skipOutro.value) skipOutro.value = v;
+  },
+);
 
 // ==================== Lifecycle ====================
 onMounted(() => {

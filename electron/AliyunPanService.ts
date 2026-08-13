@@ -1,5 +1,4 @@
 import axios from 'axios';
-import { ipcMain } from 'electron';
 
 /**
  * AliyunPanService - 阿里云盘 share resolver.
@@ -8,17 +7,20 @@ import { ipcMain } from 'electron';
  * different from Quark/UC's cookie-based auth.
  *
  * Flow:
- *   1. Refresh access_token via /token/refresh (using refresh_token saved
- *      during QR login).
- *   2. resolveShareToFiles: get_share_by_anonymous → list (recursive)
- *   3. resolveDownloadUrl: save share file to user's drive → get_download_url
+ *   1. Fetch refresh_token from JAR via /spider/getLogin (JAR is the sole
+ *      credential store — PC never persists tokens).
+ *   2. Refresh access_token via /token/refresh.
+ *   3. resolveShareToFiles: get_share_by_anonymous → list (recursive)
+ *   4. resolveDownloadUrl: save share file to user's drive → get_download_url
  *      → return signed download_url (works without Cookie/Referer).
  *
  * Aliyun's download_url is signed and works for ~15 minutes. No transfer-
  * then-play needed (no per-file size limit for free accounts on Aliyun).
  */
 export class AliyunPanService {
-  private static refreshToken: string = '';
+  // Short-lived in-memory cache of the access_token (expires in ~2h).
+  // The refresh_token is NEVER stored on the PC — it is fetched from the
+  // JAR on demand each time the access_token needs refreshing.
   private static accessToken: string = '';
   private static driveId: string = '';
   private static tokenExpiresAt: number = 0;
@@ -36,49 +38,54 @@ export class AliyunPanService {
   >();
 
   static init(): void {
-    ipcMain.handle('aliyun:setLoginInfo', async (_event, info: any) => {
-      this.refreshToken = info?.refreshToken || '';
-      this.accessToken = info?.accessToken || '';
-      this.driveId = info?.driveId || '';
-      this.tokenExpiresAt = Date.now() + 100 * 60 * 1000; // assume valid 100min
-      console.log(
-        '[AliyunPanService] setLoginInfo: refreshToken len=',
-        this.refreshToken.length,
-        'accessToken len=',
-        this.accessToken.length,
-      );
-      return { success: true };
-    });
-    console.log('[AliyunPanService] Initialized');
+    // No IPC handlers — the PC does not persist Aliyun credentials.
+    // The JAR's /spider/saveLogin (called by the renderer after QR scan) is
+    // the only writer; /spider/getLogin is the only reader.
+    console.log('[AliyunPanService] Initialized (JAR-backed, no local storage)');
   }
 
-  static setLoginInfo(info: {
-    refreshToken?: string;
-    accessToken?: string;
-  }): void {
-    if (info.refreshToken) this.refreshToken = info.refreshToken;
-    if (info.accessToken) {
-      this.accessToken = info.accessToken;
-      this.tokenExpiresAt = Date.now() + 100 * 60 * 1000;
+  /**
+   * Fetch the refresh_token from the JAR. The JAR stores it in
+   * SharedPreferences (written by /spider/saveLogin after QR scan).
+   * Returns '' if not logged in.
+   */
+  private static async fetchRefreshTokenFromJAR(): Promise<string> {
+    try {
+      // Lazy import to avoid circular dependency at module load time.
+      const { spiderAPIClient } = await import('./SpiderAPIClient');
+      const result = await spiderAPIClient.getLogin('aliyun');
+      if (result.success && result.data?.loggedIn && result.data.refreshToken) {
+        return result.data.refreshToken;
+      }
+      return '';
+    } catch (e: any) {
+      console.warn(
+        '[AliyunPanService] fetchRefreshTokenFromJAR failed:',
+        e.message,
+      );
+      return '';
     }
   }
 
   /**
-   * Refresh the access_token using the saved refresh_token.
+   * Refresh the access_token using the refresh_token fetched from the JAR.
    * Aliyun access_tokens expire after 2 hours; refresh_tokens last ~30 days.
    */
   private static async ensureAccessToken(): Promise<string | null> {
     if (this.accessToken && Date.now() < this.tokenExpiresAt) {
       return this.accessToken;
     }
-    if (!this.refreshToken) {
-      console.warn('[AliyunPanService] ensureAccessToken: no refresh_token');
+    const refreshToken = await this.fetchRefreshTokenFromJAR();
+    if (!refreshToken) {
+      console.warn(
+        '[AliyunPanService] ensureAccessToken: no refresh_token in JAR (not logged in)',
+      );
       return null;
     }
     try {
       const resp = await axios.post(
         'https://api.aliyundrive.com/token/refresh',
-        { refresh_token: this.refreshToken },
+        { refresh_token: refreshToken },
         {
           headers: { 'Content-Type': 'application/json' },
           timeout: 15000,
@@ -86,7 +93,6 @@ export class AliyunPanService {
       );
       if (resp.data?.access_token) {
         this.accessToken = resp.data.access_token;
-        this.refreshToken = resp.data.refresh_token || this.refreshToken;
         this.driveId = resp.data.default_drive_id || this.driveId;
         // Tokens expire in 7200s; refresh 5 min before.
         this.tokenExpiresAt = Date.now() + (7200 - 300) * 1000;

@@ -130,7 +130,7 @@ async function testDockerIntegration() {
     log('[Test 5/5] Testing Spider API endpoint...', colors.yellow);
     try {
       const { default: axios } = await import('axios');
-      const response = await axios.get('http://localhost:9978/health', { timeout: 5000 });
+      const response = await axios.get('http://localhost:19978/health', { timeout: 5000 });
       
       if (response.data.success) {
         log('  ✓ Spider API is responding\n', colors.green);

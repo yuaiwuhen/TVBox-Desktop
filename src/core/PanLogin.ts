@@ -1,13 +1,38 @@
 /**
  * PanLogin - 网盘扫码登录统一封装（渲染进程）
  *
- * 通过 IPC 调用主进程的 PanLoginService，管理 localStorage 中的 token/cookie。
- * 支持夸克、UC、阿里云盘、百度网盘、B站 的扫码登录。
+ * Division of labor between PC and JAR:
+ *   - PC: generates the QR code image locally from the scan URL returned
+ *     by the JAR (via the `qrcode` npm package in PanLoginService) and
+ *     displays it to the user. For Baidu, the JAR returns a server-rendered
+ *     QR image URL which the PC displays directly.
+ *   - JAR: handles the login process — fetches the QR token from the
+ *     netdisk API, polls the login status, extracts credentials, and
+ *     persists them to SharedPreferences via SpiderManager.saveLogin.
+ *
+ * The PC never touches credentials. Login status queries
+ * (/spider/loginStatus) and logout (/spider/logout) also go through the
+ * JAR. The PC keeps a small in-memory cache of {loggedIn, userId,
+ * nickname} for synchronous UI access; this cache contains no credentials
+ * and is refreshed from the JAR.
  */
 
-import { saveToFile } from './ConfigSync';
-
-export type PanType = 'quark' | 'uc' | 'aliyun' | 'baidu' | 'bili';
+export type PanType =
+  | 'quark'
+  | 'uc'
+  | 'aliyun'
+  | 'baidu'
+  | 'bili'
+  // Extended panTypes — these don't support QR scan on PC, but the user
+  // can paste a cookie/token manually via the input login dialog. The
+  // JAR's SpiderManager.saveLogin persists them under Wex_<pan>_* keys.
+  | 'tianyi'
+  | 'pan123'
+  | '115'
+  | '115safe'
+  | 'ydyun'
+  | 'guangya'
+  | 'leijing';
 
 export interface PanLoginInfo {
   panType: PanType;
@@ -17,6 +42,14 @@ export interface PanLoginInfo {
   userId?: string;
   nickname?: string;
   loginTime: number;
+}
+
+/** In-memory login status cache (NO credentials — safe to keep in memory). */
+export interface PanLoginStatus {
+  loggedIn: boolean;
+  userId?: string;
+  nickname?: string;
+  loginTime?: number;
 }
 
 export interface QrCodeResult {
@@ -36,21 +69,34 @@ export interface PollResult {
   rawData?: string;
 }
 
-const STORAGE_KEYS: Record<PanType, string> = {
-  quark: 'pan_login_quark',
-  uc: 'pan_login_uc',
-  aliyun: 'pan_login_aliyun',
-  baidu: 'pan_login_baidu',
-  bili: 'pan_login_bili',
-};
-
 const DISPLAY_NAMES: Record<PanType, string> = {
   quark: '夸克网盘',
   uc: 'UC网盘',
   aliyun: '阿里云盘',
   baidu: '百度网盘',
   bili: 'B站',
+  tianyi: '天翼网盘',
+  pan123: '123网盘',
+  '115': '115网盘',
+  '115safe': '115安全码',
+  ydyun: '移动网盘',
+  guangya: '光鸭网盘',
+  leijing: '雷鲸网盘',
 };
+
+/** PanTypes that support QR scan login on PC (via JAR PanLoginManager). */
+const QR_SUPPORTED_PANS: ReadonlySet<PanType> = new Set([
+  'quark',
+  'uc',
+  'aliyun',
+  'baidu',
+  'bili',
+]);
+
+/** Whether the given panType supports QR scan login (vs. input-only). */
+export function isQrSupportedPan(panType: PanType): boolean {
+  return QR_SUPPORTED_PANS.has(panType);
+}
 
 function getIPC(): any {
   if ((window as any).electronIPC) {
@@ -74,84 +120,135 @@ function getIPC(): any {
   }
 }
 
+// In-memory login status cache (no credentials).
+// Refreshed from JAR on startup, after QR success, and after logout.
+const statusCache: Partial<Record<PanType, PanLoginStatus>> = {};
+
 export class PanLogin {
   static getDisplayName(panType: PanType): string {
     return DISPLAY_NAMES[panType] || panType;
   }
 
+  /**
+   * Synchronous check against the in-memory cache. The cache is refreshed
+   * from the JAR via refreshStatus(). For an authoritative answer, call
+   * refreshStatus() first.
+   */
   static isLoggedIn(panType: PanType): boolean {
-    const info = this.getLoginInfo(panType);
-    return !!(info?.cookie || info?.refreshToken || info?.accessToken);
+    return !!statusCache[panType]?.loggedIn;
+  }
+
+  static getStatus(panType: PanType): PanLoginStatus | null {
+    return statusCache[panType] || null;
   }
 
   /**
-   * Check if the saved login token is actually still valid by calling
-   * the main process API.
+   * Refresh the in-memory status cache for a single panType by querying
+   * the JAR (/spider/loginStatus). The JAR reads SharedPreferences — the
+   * PC never sees the cookie itself.
    */
-  static async checkTokenValid(panType: PanType): Promise<boolean> {
-    const info = this.getLoginInfo(panType);
-    if (!info) {
-      return false;
-    }
-    // Only Quark has token validation implemented for now
-    if (panType !== 'quark') {
-      return true;
-    }
+  static async refreshStatus(panType: PanType): Promise<PanLoginStatus> {
     const ipc = getIPC();
     if (!ipc) {
-      return true; // assume valid if IPC is not available
+      return { loggedIn: false };
     }
     try {
-      const result = await ipc.invoke('quark:checkTokenValid');
-      return result.valid;
-    } catch (e) {
-      console.warn(`[PanLogin] checkTokenValid failed for ${panType}:`, e);
-      return true; // assume valid on network error
+      const result = await ipc.invoke('spider:loginStatus', panType);
+      const status: PanLoginStatus = {
+        loggedIn: !!result?.data?.loggedIn,
+        userId: result?.data?.info?.userId,
+        nickname: result?.data?.info?.nickname,
+        loginTime: result?.data?.info?.loginTime,
+      };
+      statusCache[panType] = status;
+      console.log(`[PanLogin] refreshStatus ${panType}:`, status);
+      return status;
+    } catch (e: any) {
+      console.warn(
+        `[PanLogin] refreshStatus failed for ${panType}:`,
+        e.message,
+      );
+      return { loggedIn: false };
     }
   }
 
-  static getLoginInfo(panType: PanType): PanLoginInfo | null {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEYS[panType]);
-      if (!saved) return null;
-      return JSON.parse(saved) as PanLoginInfo;
-    } catch (e) {
-      console.warn(`[PanLogin] Failed to load ${panType} login info:`, e);
-      return null;
-    }
+  /**
+   * Refresh status for all supported panTypes. Called on app startup and
+   * after login/logout to keep the UI in sync.
+   */
+  static async refreshAllStatuses(): Promise<void> {
+    const pans: PanType[] = [
+      'quark',
+      'uc',
+      'aliyun',
+      'baidu',
+      'bili',
+      'tianyi',
+      'pan123',
+      '115',
+      '115safe',
+      'ydyun',
+      'guangya',
+      'leijing',
+    ];
+    await Promise.all(pans.map((p) => this.refreshStatus(p)));
   }
 
-  static saveLoginInfo(info: PanLoginInfo): void {
-    localStorage.setItem(STORAGE_KEYS[info.panType], JSON.stringify(info));
-    saveToFile();
-    console.log(`[PanLogin] Saved login info for ${info.panType}:`, {
-      panType: info.panType,
-      nickname: info.nickname,
-      userId: info.userId,
-      cookieLength: info.cookie?.length || 0,
-      refreshToken: info.refreshToken ? '***' : undefined,
-      accessToken: info.accessToken ? '***' : undefined,
-      loginTime: info.loginTime,
-    });
-  }
-
-  static logout(panType: PanType): void {
-    const key = STORAGE_KEYS[panType];
-    const beforeRemove = localStorage.getItem(key);
-    console.log(
-      `[PanLogin] logout ${panType}, key=${key}, hadData=${!!beforeRemove}`,
-    );
-    localStorage.removeItem(key);
-    saveToFile();
-    const afterRemove = localStorage.getItem(key);
-    console.log(`[PanLogin] logout ${panType}, after remove: ${!!afterRemove}`);
+  /**
+   * Save a cookie/token entered manually by the user (for panTypes that
+   * don't support QR scan). The JAR persists it via /spider/saveLogin,
+   * storing under Wex_<pan>_* SharedPreferences keys. The PC never
+   * persists the credential locally.
+   */
+  static async saveLoginInput(
+    panType: PanType,
+    cookie: string,
+    extra?: { userId?: string; nickname?: string },
+  ): Promise<void> {
     const ipc = getIPC();
-    if (ipc) {
-      ipc.invoke('pan:logout', panType).catch((e) => {
-        console.warn(`[PanLogin] logout IPC failed for ${panType}:`, e);
-      });
+    if (!ipc) {
+      throw new Error('IPC not available');
     }
-    console.log(`[PanLogin] Logged out ${panType}`);
+    await ipc.invoke('spider:saveLogin', {
+      panType,
+      cookie,
+      refreshToken: '',
+      accessToken: '',
+      userId: extra?.userId || '',
+      nickname: extra?.nickname || '',
+    });
+    // Refresh in-memory cache after save
+    await this.refreshStatus(panType);
+  }
+
+  /**
+   * Logout — clears credentials from JAR SharedPreferences via
+   * /spider/logout. Also clears the PC-side in-memory caches (e.g.
+   * AliyunPanService.accessToken) via pan:logout, and the local status cache.
+   * The PC never persisted anything to disk, so this only clears memory.
+   */
+  static async logout(panType: PanType): Promise<void> {
+    const ipc = getIPC();
+    if (!ipc) {
+      delete statusCache[panType];
+      return;
+    }
+    try {
+      await ipc.invoke('spider:logout', panType);
+      console.log(`[PanLogin] logout ${panType}: JAR credentials cleared`);
+    } catch (e: any) {
+      console.warn(
+        `[PanLogin] spider:logout failed for ${panType}:`,
+        e.message,
+      );
+    }
+    // Clear PC-side in-memory state (e.g. AliyunPanService access tokens).
+    try {
+      await ipc.invoke('pan:logout', panType);
+    } catch (e: any) {
+      console.warn(`[PanLogin] pan:logout failed for ${panType}:`, e.message);
+    }
+    delete statusCache[panType];
   }
 
   static async generateQRCode(panType: PanType): Promise<{
@@ -197,6 +294,11 @@ export class PanLogin {
   /**
    * 轮询二维码扫码状态
    * status: waiting=等待扫码, scanned=已扫码待确认, confirmed=已确认登录成功, expired=已过期
+   *
+   * On confirmed, the JAR auto-saves the credentials to SharedPreferences
+   * (via SpiderManager.saveLogin inside PanLoginManager.pollQRLogin). The PC
+   * never sees the cookie — the small loginInfo echoed back contains only
+   * userId/nickname for UI display.
    */
   static async pollQRCode(
     panType: PanType,
@@ -226,11 +328,16 @@ export class PanLogin {
     );
 
     if (result.success && result.status === 'confirmed' && result.loginInfo) {
-      this.saveLoginInfo(result.loginInfo);
-      console.log(`[PanLogin] ${panType} login status saved to localStorage:`, {
+      // JAR has already persisted credentials. Update in-memory status cache.
+      statusCache[panType] = {
+        loggedIn: true,
+        userId: result.loginInfo.userId,
+        nickname: result.loginInfo.nickname,
+        loginTime: Date.now(),
+      };
+      console.log(`[PanLogin] ${panType} login status cached in memory:`, {
         nickname: result.loginInfo.nickname,
         userId: result.loginInfo.userId,
-        cookieLength: result.loginInfo.cookie?.length || 0,
       });
     } else if (result.status === 'confirmed') {
       console.error(
@@ -244,12 +351,6 @@ export class PanLogin {
 
   /**
    * 从 action 名识别网盘类型
-   * addQuark/delQuark → quark
-   * addUc/delUc → uc
-   * addUctv/delUctv → uctv
-   * addAli/delAli/addAliyun/delAliyun → aliyun
-   * addBaidu/delBaidu → baidu
-   * addBili/delBili → bili
    */
   static detectPanTypeFromAction(action: string): PanType | null {
     const lower = action.toLowerCase();
@@ -267,60 +368,5 @@ export class PanLogin {
 
   static isDelAction(action: string): boolean {
     return action.toLowerCase().startsWith('del');
-  }
-
-  /**
-   * Sync all saved pan login info from localStorage to the main process.
-   *
-   * Different pans need different auth:
-   *   - Quark/UC/Baidu: cookie string (Cookie header value)
-   *   - Aliyun: refreshToken + accessToken (Bearer auth)
-   *
-   * On app restart, the main process is fresh and has no cached auth — the
-   * user would have to log in again to play any pan video. This method is
-   * called on app startup to re-sync all saved login info, so previously
-   * logged-in pans continue to work after restart.
-   */
-  static async syncAllToJVM(): Promise<{
-    success: boolean;
-    synced: PanType[];
-    error?: string;
-  }> {
-    const ipc = getIPC();
-    if (!ipc) {
-      console.warn('[PanLogin] syncAllToJVM: IPC not available');
-      return { success: false, synced: [], error: 'IPC not available' };
-    }
-
-    // Send full loginInfo objects keyed by panType. The main process extracts
-    // the fields each pan service needs.
-    const loginInfoData: Record<string, PanLoginInfo> = {};
-    const synced: PanType[] = [];
-    for (const panType of Object.keys(STORAGE_KEYS) as PanType[]) {
-      const info = this.getLoginInfo(panType);
-      if (info && (info.cookie || info.refreshToken || info.accessToken)) {
-        loginInfoData[panType] = info;
-        synced.push(panType);
-      }
-    }
-
-    if (synced.length === 0) {
-      console.log('[PanLogin] syncAllToJVM: no saved login info to sync');
-      return { success: true, synced: [] };
-    }
-
-    console.log('[PanLogin] syncAllToJVM: syncing pans:', synced);
-    try {
-      const result = await ipc.invoke('pan:syncAllCookies', loginInfoData);
-      console.log('[PanLogin] syncAllToJVM result:', result);
-      return {
-        success: result?.success !== false,
-        synced,
-        error: result?.error,
-      };
-    } catch (e: any) {
-      console.error('[PanLogin] syncAllToJVM failed:', e.message);
-      return { success: false, synced, error: e.message };
-    }
   }
 }

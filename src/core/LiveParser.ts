@@ -126,9 +126,9 @@ export class EpgLoader {
 
 /**
  * Wrap a live URL into proxy format like Android TVBox:
- * base64Encode(url) → http://127.0.0.1:9978/proxy?do=live&type=txt&ext={base64}
+ * base64Encode(url) → http://127.0.0.1:19978/proxy?do=live&type=txt&ext={base64}
  */
-export function wrapLiveUrl(liveUrl: string, port: number = 9978): string {
+export function wrapLiveUrl(liveUrl: string, port: number = 19978): string {
   const ext = urlSafeBase64Encode(liveUrl);
   return `http://127.0.0.1:${port}/proxy?do=live&type=txt&ext=${ext}`;
 }

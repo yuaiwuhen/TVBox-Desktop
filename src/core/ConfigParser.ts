@@ -11,13 +11,37 @@ import type {
 
 // ---------- Constants ----------
 
-const LOCAL_PROXY = 'http://127.0.0.1:9978';
+// Default port matches ProxyServer.PREFERRED_PORT. Updated at runtime via
+// the `proxy-port-changed` IPC event from the main process (see main.ts).
+// The ProxyServer probes ports 9979-9999 and picks the first available, so
+// this default is just a placeholder until the actual port arrives.
+let proxyPort: number = 19978;
+
+/** Get the current local proxy URL (e.g. "http://127.0.0.1:9979"). */
+export function getLocalProxy(): string {
+  return `http://127.0.0.1:${proxyPort}`;
+}
+
+/** Update the local proxy port. Called when main process notifies us. */
+export function setLocalProxyPort(port: number): void {
+  if (typeof port === 'number' && port > 0 && port !== proxyPort) {
+    console.log(`[ConfigParser] local proxy port updated: ${proxyPort} → ${port}`);
+    proxyPort = port;
+  }
+}
+
+// Backward-compatible alias for code that still references LOCAL_PROXY.
+// Use a getter so the current port is always resolved at call time.
+function LOCAL_PROXY(): string {
+  return getLocalProxy();
+}
 
 // Electron IPC bridge - available in renderer with contextIsolation=false
 declare global {
   interface Window {
     electronIPC?: {
       invoke: (channel: string, ...args: any[]) => Promise<any>;
+      on?: (channel: string, listener: (...args: any[]) => void) => () => void;
     };
   }
 }
@@ -31,11 +55,42 @@ function getIPC(): Window['electronIPC'] {
     return {
       invoke: (channel: string, ...args: any[]) =>
         ipcRenderer.invoke(channel, ...args),
+      on: (channel: string, listener: (...args: any[]) => void) => {
+        const wrapped = (_e: any, ...args: any[]) => listener(...args);
+        ipcRenderer.on(channel, wrapped);
+        return () => ipcRenderer.removeListener(channel, wrapped);
+      },
     };
   } catch {
     return undefined;
   }
 }
+
+// One-time bootstrap: subscribe to proxy-port-changed events and fetch the
+// current port from the main process. This runs as soon as this module is
+// imported (i.e. as soon as the renderer starts), so subsequent calls to
+// checkReplaceProxy()/getLocalProxy() return the correct URL.
+(function bootstrapProxyPort() {
+  if (typeof window === 'undefined') return;
+  const ipc = getIPC();
+  if (!ipc) return;
+  // Listen for future port changes
+  if (ipc.on) {
+    ipc.on('proxy-port-changed', (port: number) => {
+      setLocalProxyPort(Number(port));
+    });
+  }
+  // Fetch the current port (in case the port-changed event already fired
+  // before this module loaded)
+  ipc
+    .invoke('proxy:getPort')
+    .then((port: number) => {
+      if (typeof port === 'number' && port > 0) setLocalProxyPort(port);
+    })
+    .catch((e: any) => {
+      console.warn('[ConfigParser] failed to fetch proxy port:', e?.message || e);
+    });
+})();
 
 const DEFAULT_ADS: string[] = [
   'mimg.0c1q0l.cn',
@@ -247,7 +302,7 @@ function m3u8IsAd(regex: string): boolean {
 /** Convert clan:// URL to http:// address */
 function clanToAddress(clanUrl: string): string {
   if (clanUrl.startsWith('clan://localhost/')) {
-    return clanUrl.replace('clan://localhost/', LOCAL_PROXY + '/file/');
+    return clanUrl.replace('clan://localhost/', LOCAL_PROXY() + '/file/');
   }
   const link = clanUrl.substring(7); // strip "clan://"
   const slashIdx = link.indexOf('/');
@@ -277,10 +332,43 @@ function fixContentPath(url: string, content: string): string {
   return content.replace(/\.\//g, base);
 }
 
-/** Replace proxy:// with local proxy URL (mirrors Android DefaultConfig.checkReplaceProxy) */
-function checkReplaceProxy(url: string): string {
+/** Replace proxy:// with local proxy URL (mirrors Android DefaultConfig.checkReplaceProxy)
+ *
+ * Also rewrites http://127.0.0.1:<port>/proxy?... URLs that spiders return
+ * when their Proxy.a() probe found a port (or returned -1 on failure) inside
+ * the Android container. Since the container's 127.0.0.1 != the host's
+ * 127.0.0.1, the browser cannot reach these URLs directly. Route them all
+ * through the PC's local ProxyServer (main process, port 9979-9999) instead.
+ *
+ * Exception: URLs already pointing to port 19978 are left untouched, since
+ * that's the renderer-side LocalProxyServer (handles do=js/live/py/go/cache).
+ * JsSpider.ts and LiveParser.ts construct such URLs directly.
+ */
+export function checkReplaceProxy(url: string): string {
   if (url.startsWith('proxy://')) {
-    return url.replace('proxy://', LOCAL_PROXY + '/proxy?');
+    return url.replace('proxy://', LOCAL_PROXY() + '/proxy?');
+  }
+  // Skip URLs already pointing to the renderer LocalProxyServer (port 19978).
+  // These are constructed by JsSpider/LiveParser and must NOT be rerouted to
+  // the main process ProxyServer, which doesn't handle do=js/live/py/go/cache.
+  if (
+    /^https?:\/\/(?:127\.0\.0\.1|localhost):19978\/proxy\?/.test(url)
+  ) {
+    return url;
+  }
+  // Rewrite http(s)://127.0.0.1:<port>/proxy?... → LOCAL_PROXY()/proxy?...
+  // The spider's Proxy.getUrl() constructs URLs like
+  //   http://127.0.0.1:<port>/proxy?do=hxq&url=...
+  // where <port> is whatever Proxy.a() probed inside the container (often -1
+  // when the host proxy is unreachable from the container's loopback, or 9978
+  // when it found the spider's own HTTP server).
+  // Re-point these to the PC's local proxy so the browser can fetch them.
+  // Port pattern allows optional minus sign to handle the -1 sentinel.
+  const proxyHostMatch = url.match(
+    /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::-?\d+)?\/proxy\?/,
+  );
+  if (proxyHostMatch) {
+    return url.replace(proxyHostMatch[0], LOCAL_PROXY() + '/proxy?');
   }
   return url;
 }
@@ -444,9 +532,10 @@ function base64ToText(b64: string): string {
 /**
  * Try to extract a config JSON from raw bytes. Handles:
  *  1. Direct lenient JSON
- *  2. [A-Za-z]{8}** prefix → base64 decode
+ *  2. [A-Za-z0-9]{8}** prefix → base64 decode
  *  3. JPEG steganography (data after FFD8...FFD9)
  *  4. PNG steganography (data after IEND)
+ *  5. WebP steganography (data after RIFF container)
  * Returns the decoded text (not yet parsed) or null.
  */
 function tryExtractConfig(bytes: Uint8Array): string | null {
@@ -463,8 +552,12 @@ function tryExtractConfig(bytes: Uint8Array): string | null {
     return utf8Text;
   }
 
-  // 2. [A-Za-z]{8}** pattern → base64 decode
-  const pattern = /[A-Za-z]{8}\*\*/;
+  // 2. [A-Za-z0-9]{8}** pattern → base64 decode
+  // Note: aowu and similar configs use an 8-char alphanumeric prefix (may
+  // include digits, e.g. "et9lLZSr") followed by "**" then base64 JSON.
+  // The regex matches the LAST 8 alphanumeric chars before "**", so it works
+  // for both 8-char prefixes and longer ones.
+  const pattern = /[A-Za-z0-9]{8}\*\*/;
   const patternMatch = pattern.exec(utf8Text);
   if (patternMatch) {
     const b64 = utf8Text.substring(patternMatch.index + 10);
@@ -544,7 +637,46 @@ function tryExtractConfig(bytes: Uint8Array): string | null {
     }
   }
 
-  // 5. Fallback: try latin1 text directly (some configs have mixed encodings)
+  // 5. WebP steganography: data after RIFF container
+  // WebP files start with "RIFF" + 4-byte little-endian file size + "WEBP".
+  // Some configs (aowu) append encoded JSON after the RIFF container ends.
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 && // 'R'
+    bytes[1] === 0x49 && // 'I'
+    bytes[2] === 0x46 && // 'F'
+    bytes[3] === 0x46 && // 'F'
+    bytes[8] === 0x57 && // 'W'
+    bytes[9] === 0x45 && // 'E'
+    bytes[10] === 0x42 && // 'B'
+    bytes[11] === 0x50 // 'P'
+  ) {
+    // Read RIFF file size (little-endian, 4 bytes at offset 4)
+    const riffSize =
+      bytes[4] | (bytes[5] << 8) | (bytes[6] << 16) | (bytes[7] << 24);
+    // RIFF container ends at byte 8 + riffSize
+    const riffEnd = Math.min(8 + riffSize, bytes.length);
+    if (bytes.length > riffEnd) {
+      const after = new TextDecoder('utf-8', { fatal: false }).decode(
+        bytes.slice(riffEnd),
+      );
+      // Try pattern first (aowu uses 8-char prefix + ** + base64 JSON)
+      const pm = pattern.exec(after);
+      if (pm) {
+        const b64 = after.substring(pm.index + 10);
+        const decoded = base64ToText(b64);
+        if (decoded && lenientJsonParse(decoded)) {
+          return decoded;
+        }
+      }
+      // Try direct lenient JSON
+      if (lenientJsonParse(after)) {
+        return after;
+      }
+    }
+  }
+
+  // 6. Fallback: try latin1 text directly (some configs have mixed encodings)
   if (lenientJsonParse(text)) {
     return text;
   }
@@ -873,8 +1005,12 @@ export class ConfigParser {
       // Already valid JSON?
       if (isJsonString(content)) return content;
 
-      // Pattern: [A-Za-z0]{8}\*\* → strip the 10-char prefix, base64-decode the rest
-      const pattern = /[A-Za-z0]{8}\*\*/;
+      // Pattern: [A-Za-z0-9]{8}\*\* → strip the 10-char prefix, base64-decode the rest
+      // Note: some configs (aowu) use an 8-char alphanumeric prefix that may
+      // include digits (e.g. "et9lLZSr"). The regex matches the last 8
+      // alphanumeric chars before "**", so it works for both 8-char prefixes
+      // and longer ones.
+      const pattern = /[A-Za-z0-9]{8}\*\*/;
       const match = pattern.exec(content);
       if (match) {
         content = content.substring(content.indexOf(match[0]) + 10);
@@ -1065,7 +1201,7 @@ export class ConfigParser {
           try {
             const proxyUrl = new URL(parseUrl);
             proxyUrl.searchParams.get('ext') || '';
-            parseUrl = `${LOCAL_PROXY}/proxy?${proxyUrl.searchParams.toString()}`;
+            parseUrl = `${LOCAL_PROXY()}/proxy?${proxyUrl.searchParams.toString()}`;
           } catch {
             /* keep original */
           }
@@ -1212,7 +1348,7 @@ export class ConfigParser {
         }
         if (liveURL_final) {
           const encoded = base64UrlEncode(liveURL_final);
-          const proxyLiveUrl = `${LOCAL_PROXY}/proxy?do=live&type=txt&ext=${encoded}`;
+          const proxyLiveUrl = `${LOCAL_PROXY()}/proxy?do=live&type=txt&ext=${encoded}`;
           this.liveChannelGroupList.push({
             groupName: proxyLiveUrl,
             groupIndex: 0,

@@ -63,7 +63,7 @@ export class SpiderProxyService {
   private maxRetries: number = 3;
   private retryDelay: number = 1000;
 
-  constructor(baseUrl: string = 'http://localhost:9978') {
+  constructor(baseUrl: string = 'http://127.0.0.1:19978') {
     this.baseUrl = baseUrl;
     this.client = axios.create({
       baseURL: baseUrl,

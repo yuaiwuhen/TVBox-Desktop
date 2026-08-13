@@ -30,7 +30,11 @@ export class DockerManager {
   private static instance: DockerManager;
   private readonly containerName = 'tvbox-spider';
   private readonly imageName = 'tvbox-spider-server:latest';
-  private readonly servicePort = 9978;
+  // 宿主机暴露端口：19978（避开 Clash Verge 等代理软件占用 9978）。
+  // 容器内 spider 服务监听端口：9978（见 SpiderHttpService.DEFAULT_PORT）。
+  // docker-compose.yml 也使用 19978:9978 映射。
+  private readonly hostPort = 19978;
+  private readonly containerPort = 9978;
 
   private constructor() {}
 
@@ -147,7 +151,7 @@ export class DockerManager {
     try {
       const result = await execAsync(
         `docker ps -a --filter name=${this.containerName} --format {{.Names}}`,
-        { timeout: 5000 }
+        { timeout: 5000 },
       );
       return result.stdout.trim() === this.containerName;
     } catch {
@@ -162,7 +166,7 @@ export class DockerManager {
     try {
       const result = await execAsync(
         `docker ps --filter name=${this.containerName} --format {{.Status}}`,
-        { timeout: 5000 }
+        { timeout: 5000 },
       );
 
       const status = result.stdout.trim();
@@ -170,7 +174,7 @@ export class DockerManager {
         return {
           running: false,
           healthy: false,
-          port: this.servicePort,
+          port: this.hostPort,
         };
       }
 
@@ -181,14 +185,14 @@ export class DockerManager {
       return {
         running: isUp,
         healthy: isUp,
-        port: this.servicePort,
+        port: this.hostPort,
         uptime,
       };
     } catch (error: any) {
       return {
         running: false,
         healthy: false,
-        port: this.servicePort,
+        port: this.hostPort,
         error: error.message,
       };
     }
@@ -203,7 +207,7 @@ export class DockerManager {
     const cmd = `docker run -d \
       --name ${this.containerName} \
       --privileged \
-      -p ${this.servicePort}:${this.servicePort} \
+      -p ${this.hostPort}:${this.containerPort} \
       -v tvbox-spider-data:/data \
       -e REDROID_PROP_ro.debuggable=1 \
       -e ANDROIDBOOT_REDROID_GPU_MODE=guest \
@@ -305,7 +309,7 @@ export class DockerManager {
     try {
       const result = await execAsync(
         `docker logs --tail ${lines} ${this.containerName}`,
-        { timeout: 10000, maxBuffer: 1024 * 1024 }
+        { timeout: 10000, maxBuffer: 1024 * 1024 },
       );
       return result.stdout;
     } catch (error: any) {
@@ -324,8 +328,8 @@ export class DockerManager {
     while (Date.now() - startTime < timeout * 1000) {
       try {
         const response = await axios.get(
-          `http://localhost:${this.servicePort}/health`,
-          { timeout: 3000 }
+          `http://localhost:${this.hostPort}/health`,
+          { timeout: 3000 },
         );
 
         if (response.data.success) {
@@ -351,7 +355,7 @@ export class DockerManager {
     try {
       const result = await execAsync(
         `docker images --filter reference=${image} --format {{.Repository}}`,
-        { timeout: 5000 }
+        { timeout: 5000 },
       );
       return result.stdout.trim().length > 0;
     } catch {

@@ -81,8 +81,11 @@ async function startDev() {
 
   log('\n✓ Development server is running!', colors.green);
   log('  - Vite: http://localhost:5173', colors.cyan);
-  log('  - Electron app will open automatically via vite-plugin-electron\n', colors.cyan);
-  
+  log(
+    '  - Electron app will open automatically via vite-plugin-electron\n',
+    colors.cyan,
+  );
+
   // vite-plugin-electron will automatically start Electron when Vite is ready
   // No need to spawn it manually
 }

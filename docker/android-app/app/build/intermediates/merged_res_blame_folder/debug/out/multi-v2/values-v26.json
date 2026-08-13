@@ -1,7 +1,7 @@
 {
     "logs": [
         {
-            "outputFile": "com.tvbox.spiderserver.app-mergeDebugResources-29:/values-v26/values-v26.xml",
+            "outputFile": "com.tvbox.spiderserver.app-mergeDebugResources-37:/values-v26/values-v26.xml",
             "map": [
                 {
                     "source": "C:\\Users\\zk\\.gradle\\caches\\8.9\\transforms\\9d807e6613d7de328ffddcc39c313989\\transformed\\appcompat-1.6.1\\res\\values-v26\\values-v26.xml",

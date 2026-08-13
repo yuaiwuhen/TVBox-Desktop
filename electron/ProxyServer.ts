@@ -369,10 +369,11 @@ export class ProxyServer {
   private server: http.Server | null = null;
   private port: number = -1;
   private onPortChanged: PortCallback | null = null;
-  // 优先监听 9978 端口（spider的ProxyOrigin.findPort()扫描范围是9978-9999）
-  // 如果9978被占用，尝试9979等。但必须确保ProxyOrigin返回的端口与实际监听端口一致。
-  private static readonly PREFERRED_PORT = 9978;
-  private static readonly START_PORT = 9978;
+  // 本地视频流代理端口：避开 9978（Docker Spider 容器占用）。
+  // Spider 容器 HTTP API 在 9978（/health, /spider/*）。
+  // ProxyServer 从 9979 开始，Spider 的 Proxy.a() 会扫描 9978-9999 找到本代理。
+  private static readonly PREFERRED_PORT = 9979;
+  private static readonly START_PORT = 9979;
   private static readonly END_PORT = 9999;
   private contentLengthCache = new Map<string, number>();
   private dnsOptimized: boolean = false; // DNS优化是否已初始化

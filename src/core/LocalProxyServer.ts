@@ -4,16 +4,20 @@ import { JsSpider } from './JsSpider';
 import { M3u8Purifier } from './M3u8Purifier';
 import type { IncomingMessage, ServerResponse, Server } from 'http';
 
-// Node.js builtins via require (Vite doesn't bundle these)
-declare const __non_webpack_require__: NodeRequire | undefined;
-const _require =
-  typeof __non_webpack_require__ !== 'undefined'
-    ? __non_webpack_require__!
-    : typeof require !== 'undefined'
-      ? require
-      : (m: string) => {
-          throw new Error(`Cannot require ${m}`);
-        };
+// Node.js builtins via require (Vite doesn't bundle these).
+// Use dynamic property access on globalThis so Vite's ESM transform doesn't
+// statically replace `typeof require` with `false`. In Electron renderer with
+// nodeIntegration:true, globalThis.require is available at runtime.
+const g = globalThis as any;
+const _require: NodeRequire =
+  g.__non_webpack_require__ ||
+  g.require ||
+  (typeof window !== 'undefined' ? (window as any).require : undefined) ||
+  ((m: string) => {
+    throw new Error(
+      `Cannot require ${m} — running in browser without nodeIntegration`,
+    );
+  });
 const http = _require('http');
 const { URL } = _require('url');
 const fs = _require('fs');
@@ -122,7 +126,7 @@ class CacheStore {
 
 export class LocalProxyServer {
   private server: Server | null = null;
-  private port: number = 9978;
+  private port: number = 19978;
   private cacheStore: CacheStore | null = null;
   private dataDir: string = '';
   private dohIndex: number = 0;

@@ -470,7 +470,7 @@ async function loadLiveSource() {
   console.log('[Live] loadLiveSource: original url=', url)
   try {
     if (url.startsWith('proxy://')) {
-      const proxyHost = `http://127.0.0.1:9978`
+      const proxyHost = `http://127.0.0.1:19978`
       const ext = btoa(url.replace('proxy://', ''))
       url = `${proxyHost}/proxy?do=live&type=txt&ext=${encodeURIComponent(ext)}`
       console.log('[Live] loadLiveSource: converted proxy url=', url)
