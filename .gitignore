@@ -67,6 +67,7 @@ fatcat/*.txt
 
 # Debug scripts (temporary development files)
 dev/
+debug-*.mjs
 *.error.zip
 commit_msg.txt
 test-playback*.mjs
