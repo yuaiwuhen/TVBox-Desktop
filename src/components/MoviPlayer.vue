@@ -9,9 +9,9 @@
  *  4. headers 属性可为所有媒体请求附加自定义请求头（解决夸克 CDN 的
  *     Referer/Cookie 鉴权 403）
  */
-import { ref, onMounted, onUnmounted, watch, computed } from 'vue';
+import { ref, onMounted, onUnmounted, watch } from 'vue';
 import 'movi-player/element';
-import { DanmuEngine, type DanmuItem } from '../core/DanmuEngine';
+import { DanmuEngine } from '../core/DanmuEngine';
 import axios from 'axios';
 import { checkReplaceProxy, getLocalProxy } from '../core/ConfigParser';
 import { useAppStore } from '../store/app';
@@ -185,13 +185,36 @@ const onDanmuToggle = (val: boolean) => {
 };
 
 // ==================== movi-player 事件 ====================
+// movi-player 会派发标准 ended/play/pause/playing/waiting 事件，
+// 以及 statechange（detail 为 PlayerState 字符串）、timeupdate、
+// error、trackschange 等自定义事件。ended 两者都会触发，只处理其一。
+
 const onEnded = () => emit('ended');
 
-const onTimeUpdate = () => {
+const onStateChange = (e: any) => {
+  const state = e.detail ?? '';
+  switch (state) {
+    case 'playing':
+    case 'ready':
+      isLoading.value = false;
+      hasError.value = false;
+      if (state === 'ready') emit('ready');
+      break;
+    case 'error':
+      hasError.value = true;
+      isLoading.value = false;
+      break;
+    default:
+      break;
+    // 注意：ended 由标准 ended 事件处理（元素同时派发两者，避免重复 emit）
+  }
+};
+
+const onTimeUpdate = (e: any) => {
   const el = mpRef.value;
-  if (!el) return;
-  currentTime.value = el.currentTime;
-  duration.value = el.duration || 0;
+  const t = typeof e.detail === 'number' ? e.detail : el?.currentTime ?? 0;
+  currentTime.value = t;
+  duration.value = el?.duration || 0;
   emit('progress', currentTime.value, duration.value);
   if (danmuEnabled.value) renderDanmu(currentTime.value);
 };
@@ -205,14 +228,23 @@ const onError = (e: any) => {
 
 const onTracksChange = (e: any) => {
   const el = mpRef.value;
-  if (!el) return;
+  const detail = e.detail ?? {};
   try {
-    const subs = el.getSubtitleLangs?.() ?? [];
-    subtitleTracksInfo.value = subs.map((s: any) => `${s.label ?? s.lang ?? s.language ?? ''}${s.active ? ' ✓' : ''}`);
-    const audios = el.getAudioLangs?.() ?? [];
-    audioTracksInfo.value = audios.map((a: any) => `${a.label ?? a.lang ?? a.language ?? ''}${a.active ? ' ✓' : ''}`);
-    console.log('[MoviPlayer] trackschange 字幕轨:', subtitleTracksInfo.value);
-    console.log('[MoviPlayer] trackschange 音轨:', audioTracksInfo.value);
+    // detail.subtitle = 内嵌字幕轨（含 MKV/MP4 容器内嵌轨），比 getSubtitleLangs 完整
+    const subs: any[] = detail.subtitle ?? el?.getSubtitleLangs?.() ?? [];
+    subtitleTracksInfo.value = subs.map((s: any) =>
+      `${s.label ?? s.language ?? s.lang ?? s.id ?? ''}${s.subtitleType === 'image' ? ' [图形]' : ''}${s.active ? ' ✓' : ''}`,
+    );
+    const audios: any[] = detail.audio ?? el?.getAudioLangs?.() ?? [];
+    audioTracksInfo.value = audios.map((a: any) =>
+      `${a.label ?? a.language ?? a.lang ?? a.id ?? ''}${a.active ? ' ✓' : ''}`,
+    );
+    if (subs.length > 0) {
+      console.log('[MoviPlayer] trackschange 内嵌字幕轨:', subtitleTracksInfo.value);
+    }
+    if (audios.length > 0) {
+      console.log('[MoviPlayer] trackschange 音轨:', audioTracksInfo.value);
+    }
   } catch (err) {
     console.warn('[MoviPlayer] trackschange 解析失败:', err);
   }
@@ -235,26 +267,25 @@ const initPlayer = () => {
   el.engine = 'wasm hlsjs shaka native';
   // 断点续播
   if (props.resumeProgress > 0) el.startat = props.resumeProgress;
-  // 夸克等 CDN 鉴权头（Referer/Cookie）
+  // 夸克等 CDN 鉴权头（Referer/Cookie）——注意 headers 是「对象属性」，不是 JSON 字符串
   if (props.headers && Object.keys(props.headers).length > 0) {
-    el.headers = JSON.stringify(props.headers);
+    el.headers = { ...props.headers };
   }
 
-  // 事件监听（movi-player DOM 事件为小写）
+  // 事件监听（movi-player 事件；先移除避免重复绑定）
+  el.removeEventListener('ended', onEnded);
+  el.removeEventListener('statechange', onStateChange);
+  el.removeEventListener('timeupdate', onTimeUpdate);
+  el.removeEventListener('error', onError);
+  el.removeEventListener('trackschange', onTracksChange);
   el.addEventListener('ended', onEnded);
+  el.addEventListener('statechange', onStateChange);
   el.addEventListener('timeupdate', onTimeUpdate);
   el.addEventListener('error', onError);
   el.addEventListener('trackschange', onTracksChange);
-  el.addEventListener('play', () => { isLoading.value = false; });
-  el.addEventListener('playing', () => { isLoading.value = false; });
-  el.addEventListener('loadeddata', () => { isLoading.value = false; emit('ready'); });
-  el.addEventListener('canplay', () => { isLoading.value = false; });
 };
 
-const onMoviReady = () => {
-  console.log('[MoviPlayer] 元素 ready，开始初始化');
-  initPlayer();
-};
+
 
 // ==================== Expose ====================
 const loadSubtitleContent = (content: string) => {
@@ -267,7 +298,9 @@ const loadSubtitleContent = (content: string) => {
     track.kind = 'subtitles';
     track.src = url;
     track.label = '外部字幕';
+    track.setAttribute('srclang', 'zh');
     track.setAttribute('data-format', 'srt');
+    track.setAttribute('data-default', '');
     el.appendChild(track);
     console.log('[MoviPlayer] 外部字幕已注入:', url);
   } catch (e) {
@@ -306,15 +339,8 @@ watch(playbackRate, (val) => {
 
 // ==================== Mount ====================
 onMounted(() => {
-  const el = mpRef.value;
-  if (el) {
-    // 等自定义元素注册完成
-    if (el.readyState !== undefined && el.isConnected) {
-      initPlayer();
-    } else {
-      setTimeout(() => initPlayer(), 100);
-    }
-  }
+  // movi-player 是自定义元素，注册后直接初始化（不派发 ready 事件）
+  initPlayer();
   if (props.danmuUrl) loadDanmu(props.danmuUrl);
 });
 
@@ -322,6 +348,7 @@ onUnmounted(() => {
   const el = mpRef.value;
   if (el) {
     el.removeEventListener('ended', onEnded);
+    el.removeEventListener('statechange', onStateChange);
     el.removeEventListener('timeupdate', onTimeUpdate);
     el.removeEventListener('error', onError);
     el.removeEventListener('trackschange', onTracksChange);
@@ -334,8 +361,8 @@ onUnmounted(() => {
 
 <template>
   <div ref="playerContainer" class="video-player-wrapper relative w-full h-full bg-black select-none">
-    <!-- movi-player 元素（自带完整 UI） -->
-    <movi-player ref="mpRef" class="w-full h-full block" @ready="onMoviReady"></movi-player>
+    <!-- movi-player 元素（自带完整 UI，不派发 ready 事件，由 onMounted 初始化） -->
+    <movi-player ref="mpRef" class="w-full h-full block"></movi-player>
 
     <!-- 加载遮罩 -->
     <div v-if="isLoading" class="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
