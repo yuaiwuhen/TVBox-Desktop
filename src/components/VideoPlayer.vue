@@ -970,11 +970,25 @@ const unlockScreen = () => {
 };
 
 // ==================== Controls visibility ====================
+// 是否有打开的悬浮层（Element Plus 下拉菜单会被 teleport 到 body，
+// 悬浮层打开时不应自动隐藏控制栏，否则用户在选速度/音轨时面板会消失）
+function hasOpenPopper() {
+  const poppers = document.querySelectorAll('.el-popper');
+  for (const p of poppers) {
+    const style = getComputedStyle(p);
+    if (style.display !== 'none' && p.getBoundingClientRect().width > 0) return true;
+  }
+  return false;
+}
+
 function hideControlsDelayed() {
   if (controlsTimer) clearTimeout(controlsTimer);
   showControls.value = true;
   controlsTimer = setTimeout(() => {
-    if (isPlaying.value && !screenLocked.value) showControls.value = false;
+    // 仅在播放中、未锁屏、且没有打开的悬浮层/弹幕设置面板时才自动隐藏
+    if (isPlaying.value && !screenLocked.value && !hasOpenPopper() && !showDanmuSettings.value) {
+      showControls.value = false;
+    }
   }, 5000);
 }
 
@@ -1149,7 +1163,8 @@ const onMouseDown = (e: MouseEvent) => {
     target.closest('.vp-episode-btn') || target.closest('.vp-speed-btn') ||
     target.closest('.vp-play-btn') || target.closest('.vp-seek-bar') ||
     target.closest('.vp-volume-slider') || target.closest('.el-dropdown') ||
-    target.closest('.el-dropdown-menu') || target.closest('.el-switch')) {
+    target.closest('.el-dropdown-menu') || target.closest('.el-switch') ||
+    target.closest('.vp-danmu-panel')) {
     return;
   }
 
@@ -1176,6 +1191,7 @@ const onMouseUp = (e: MouseEvent) => {
     target.closest('.vp-volume-slider') || target.closest('.vp-icon-btn') ||
     target.closest('.vp-control-btn') || target.closest('.vp-episode-btn') ||
     target.closest('.vp-speed-btn') || target.closest('.vp-play-btn') ||
+    target.closest('.vp-danmu-panel') ||
     target.closest('.vp-overlay-top') || target.closest('.vp-overlay-bottom')) {
     if (longPressTimer) {
       clearTimeout(longPressTimer);
@@ -1219,20 +1235,12 @@ const onMouseMove = (e: MouseEvent) => {
     target.closest('.vp-seek-bar') || target.closest('.vp-icon-btn') ||
     target.closest('.vp-control-btn') || target.closest('.vp-episode-btn') ||
     target.closest('.vp-speed-btn') || target.closest('.vp-play-btn') ||
-    target.closest('.vp-volume-slider') ||
+    target.closest('.vp-volume-slider') || target.closest('.vp-danmu-panel') ||
     target.closest('.vp-overlay-top') || target.closest('.vp-overlay-bottom')) {
     return;
   }
 
   hideControlsDelayed();
-};
-
-const onMouseLeave = () => {
-  // 鼠标移出视频区域后自动隐藏控件
-  if (isPlaying.value && !screenLocked.value) {
-    if (controlsTimer) clearTimeout(controlsTimer);
-    showControls.value = false;
-  }
 };
 
 // ==================== Keyboard Shortcuts ====================
@@ -1745,7 +1753,7 @@ defineExpose({
   <Teleport to="body" :disabled="!isAppFullscreen">
     <div ref="playerContainer" class="video-player-wrapper relative w-full h-full bg-black select-none"
       :class="{ 'app-fullscreen': isAppFullscreen }" tabindex="0" @keydown="onKeyDown" @mousedown="onMouseDown"
-      @mouseup="onMouseUp" @dblclick="onDoubleClick" @mousemove="onMouseMove" @mouseleave="onMouseLeave">
+      @mouseup="onMouseUp" @dblclick="onDoubleClick" @mousemove="onMouseMove">
       <!-- 视频元素 -->
       <video ref="videoElement" class="w-full h-full" :poster="poster" :autoplay="autoplay" :muted="isMuted"
         :volume="volume" :playbackRate="playbackRate" @timeupdate="onTimeUpdate" @loadedmetadata="onLoadedMetadata"
@@ -1978,7 +1986,7 @@ defineExpose({
         </div>
 
         <!-- Bottom control bar (glass gradient) -->
-        <div class="vp-overlay-bottom px-4 md:px-6 lg:px-8 pb-4 pt-8 pointer-events-auto" @click.stop>
+        <div class="vp-overlay-bottom px-4 md:px-6 lg:px-8 pb-2 pt-5 pointer-events-auto" @click.stop>
           <!-- Seek bar -->
           <div ref="seekBarRef" class="vp-seek-bar group relative w-full mb-3 cursor-pointer"
             @mousedown="onSeekBarMouseDown" @mousemove="onSeekBarMouseMove" @mouseleave="onSeekBarMouseLeave">
@@ -2060,7 +2068,7 @@ defineExpose({
                     <component :is="isMuted ? Mute : Microphone" />
                   </el-icon>
                 </button>
-                <div class="vp-volume-slider flex items-center w-0 overflow-hidden">
+                <div class="vp-volume-slider flex items-center">
                   <div ref="volumeSliderRef"
                     class="vp-volume-track relative w-20 h-full flex items-center cursor-pointer"
                     @mousedown="onVolumeSliderMouseDown">
@@ -2103,7 +2111,7 @@ defineExpose({
               </button>
 
               <!-- Audio track dropdown -->
-              <el-dropdown v-if="audioTrackList.length > 1" @command="switchAudioTrack" trigger="click">
+              <el-dropdown v-if="audioTrackList.length > 0" @command="switchAudioTrack" trigger="click">
                 <button class="vp-icon-btn" :class="{ active: activeAudioTrack > 0 }" title="音轨">
                   <el-icon :size="20">
                     <Headset />
@@ -2149,13 +2157,6 @@ defineExpose({
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
-
-              <!-- Subtitle ON/OFF toggle -->
-              <button class="vp-icon-btn" :class="{ active: subtitleEnabled }" @click="toggleSubtitle" title="字幕">
-                <el-icon :size="20">
-                  <Document />
-                </el-icon>
-              </button>
 
               <!-- More options dropdown -->
               <el-dropdown trigger="click">
@@ -2206,13 +2207,6 @@ defineExpose({
                   <Rank />
                 </el-icon>
               </button>
-
-              <!-- Fullscreen -->
-              <button class="vp-icon-btn" @click="toggleFullscreen" :title="isFullscreen ? '退出全屏' : '全屏'">
-                <el-icon :size="20">
-                  <FullScreen />
-                </el-icon>
-              </button>
             </div>
           </div>
         </div>
@@ -2222,28 +2216,28 @@ defineExpose({
       <div v-if="showDanmuSettings && showControls && !screenLocked"
         class="vp-danmu-panel absolute p-3 rounded-lg z-40 w-56 space-y-2 text-sm">
         <div class="flex justify-between items-center">
-          <span style="color: #ffffff;">弹幕开关</span>
+          <span style="color: var(--color-text-primary);">弹幕开关</span>
           <el-switch v-model="danmuEnabled" size="small" @change="onDanmuToggle" />
         </div>
         <div>
-          <span style="color: rgba(255,255,255,0.8);">速度</span>
+          <span style="color: var(--color-text-secondary);">速度</span>
           <el-slider v-model="danmuSpeedIndex" :min="0" :max="3" :step="1"
             :format-tooltip="(v: number) => danmuSpeedOptions[v].label" @change="onDanmuSpeedChange" />
         </div>
         <div>
-          <span style="color: rgba(255,255,255,0.8);">透明度 {{ danmuOpacity }}%</span>
+          <span style="color: var(--color-text-secondary);">透明度 {{ danmuOpacity }}%</span>
           <el-slider v-model="danmuOpacity" :min="10" :max="100" :step="10" @change="onDanmuOpacityChange" />
         </div>
         <div class="flex justify-between items-center">
-          <span style="color: rgba(255,255,255,0.8);">行数</span>
+          <span style="color: var(--color-text-secondary);">行数</span>
           <div class="flex items-center gap-1">
             <el-button size="small" @click="adjustDanmuLines(-1)">-</el-button>
-            <span class="w-6 text-center" style="color: #ffffff;">{{ danmuLines }}</span>
+            <span class="w-6 text-center" style="color: var(--color-text-primary);">{{ danmuLines }}</span>
             <el-button size="small" @click="adjustDanmuLines(1)">+</el-button>
           </div>
         </div>
         <div class="flex justify-between items-center">
-          <span style="color: rgba(255,255,255,0.8);">颜色</span>
+          <span style="color: var(--color-text-secondary);">颜色</span>
           <el-select v-model="danmuColorMode" size="small" style="width:80px">
             <el-option label="默认" value="default" />
             <el-option label="随机" value="random" />
@@ -2515,8 +2509,26 @@ defineExpose({
 }
 
 .vp-volume-slider {
-  height: 20px;
-  transition: width 250ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+  position: absolute;
+  right: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0;
+  height: 28px;
+  overflow: hidden;
+  padding: 0;
+  border-radius: 8px;
+  background: var(--color-bg-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: var(--glass-border);
+  transition: width 200ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1)),
+              padding 200ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.vp-volume-group.expanded .vp-volume-slider {
+  width: 92px;
+  padding: 0 10px;
 }
 
 /* ===== Center Play Button ===== */
