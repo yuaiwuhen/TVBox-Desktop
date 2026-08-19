@@ -72,6 +72,8 @@ const isLoading = ref(true);
 const hasError = ref(false);
 const currentTime = ref(0);
 const duration = ref(0);
+// 是否已真正进入播放（用于判断 wasm 引擎失败后是否回退成功）
+const isPlaying = ref(false);
 
 // 弹幕
 const danmuEngine = new DanmuEngine();
@@ -195,6 +197,10 @@ const onStateChange = (e: any) => {
   const state = e.detail ?? '';
   switch (state) {
     case 'playing':
+      isPlaying.value = true;
+      isLoading.value = false;
+      hasError.value = false;
+      break;
     case 'ready':
       isLoading.value = false;
       hasError.value = false;
@@ -219,11 +225,22 @@ const onTimeUpdate = (e: any) => {
   if (danmuEnabled.value) renderDanmu(currentTime.value);
 };
 
+// wasm 引擎打开失败后 movi-player 会自动回退到 native/hlsjs 引擎继续播放，
+// 此时 error 事件会触发但播放实际成功，不能显示"播放失败"遮罩。
+// 策略：收到 error 时延时 1.5s，若期间进入 playing（说明已回退成功）则不提示；
+// 仅当 statechange: error（真正的致命错误）才立即显示遮罩。
+let errorTimer: ReturnType<typeof setTimeout> | null = null;
 const onError = (e: any) => {
-  console.warn('[MoviPlayer] error:', e.detail ?? e);
-  hasError.value = true;
-  isLoading.value = false;
-  emit('error', e.detail ?? e);
+  console.warn('[MoviPlayer] error(可能已回退引擎):', e.detail ?? e);
+  if (errorTimer) clearTimeout(errorTimer);
+  errorTimer = setTimeout(() => {
+    // 1.5s 后仍未进入 playing → 判定播放确实失败
+    if (!isPlaying) {
+      hasError.value = true;
+      isLoading.value = false;
+      emit('error', e.detail ?? e);
+    }
+  }, 1500);
 };
 
 const onTracksChange = (e: any) => {
@@ -255,7 +272,9 @@ const initPlayer = () => {
   const el = mpRef.value;
   if (!el || !props.url) return;
   hasError.value = false;
+  isPlaying.value = false;
   isLoading.value = true;
+  if (errorTimer) { clearTimeout(errorTimer); errorTimer = null; }
 
   // 基础属性
   el.src = props.url;
@@ -263,8 +282,16 @@ const initPlayer = () => {
   el.autoplay = props.autoplay;
   if (props.poster) el.poster = props.poster;
   if (props.title) el.title = props.title;
-  // 引擎优先级：wasm 解析 MKV/HEVC，hlsjs/shaka 处理 m3u8，native 兜底
-  el.engine = 'wasm hlsjs shaka native';
+  // 引擎优先级：MKV/HEVC/AV1 等原生内核不支持的格式用 wasm 解析；
+  // 普通直链(MP4/TS)与 do=stream 代理流直接用 native，避免 wasm 打开失败
+  // 再回退导致的错误闪烁与启动变慢。
+  const lower = (props.url || '').toLowerCase();
+  const needsWasm =
+    /\.(mkv|webm|avi|mov|flv|wmv)([?#]|$)/i.test(lower) ||
+    /filename[^&]*\.(mkv|webm|avi|mov|flv|wmv)(?:&|$|%26)/i.test(lower);
+  el.engine = needsWasm
+    ? 'wasm hlsjs shaka native'
+    : 'native hlsjs shaka wasm';
   // 断点续播
   if (props.resumeProgress > 0) el.startat = props.resumeProgress;
   // 夸克等 CDN 鉴权头（Referer/Cookie）——注意 headers 是「对象属性」，不是 JSON 字符串
@@ -356,6 +383,7 @@ onUnmounted(() => {
   }
   for (const d of activeDanmuEls) d.remove();
   activeDanmuEls.length = 0;
+  if (errorTimer) { clearTimeout(errorTimer); errorTimer = null; }
 });
 </script>
 
