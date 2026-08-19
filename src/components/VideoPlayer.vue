@@ -1163,8 +1163,9 @@ const onMouseDown = (e: MouseEvent) => {
     target.closest('.vp-episode-btn') || target.closest('.vp-speed-btn') ||
     target.closest('.vp-play-btn') || target.closest('.vp-seek-bar') ||
     target.closest('.vp-volume-slider') || target.closest('.el-dropdown') ||
-    target.closest('.el-dropdown-menu') || target.closest('.el-switch') ||
-    target.closest('.vp-danmu-panel')) {
+    target.closest('.el-dropdown-menu') ||     target.closest('.el-switch') ||
+    target.closest('.vp-danmu-panel') ||
+    target.closest('.vp-volume-group')) {
     return;
   }
 
@@ -1192,6 +1193,7 @@ const onMouseUp = (e: MouseEvent) => {
     target.closest('.vp-control-btn') || target.closest('.vp-episode-btn') ||
     target.closest('.vp-speed-btn') || target.closest('.vp-play-btn') ||
     target.closest('.vp-danmu-panel') ||
+    target.closest('.vp-volume-group') ||
     target.closest('.vp-overlay-top') || target.closest('.vp-overlay-bottom')) {
     if (longPressTimer) {
       clearTimeout(longPressTimer);
@@ -1236,6 +1238,7 @@ const onMouseMove = (e: MouseEvent) => {
     target.closest('.vp-control-btn') || target.closest('.vp-episode-btn') ||
     target.closest('.vp-speed-btn') || target.closest('.vp-play-btn') ||
     target.closest('.vp-volume-slider') || target.closest('.vp-danmu-panel') ||
+    target.closest('.vp-volume-group') ||
     target.closest('.vp-overlay-top') || target.closest('.vp-overlay-bottom')) {
     return;
   }
