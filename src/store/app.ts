@@ -1,7 +1,7 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { ref, computed } from 'vue';
 import axios from 'axios';
-import { configParser, checkReplaceProxy, getSpiderApiBaseUrl } from '../core/ConfigParser';
+import { configParser, checkReplaceProxy, getLocalProxy, getSpiderApiBaseUrl } from '../core/ConfigParser';
 import { spiderEngine } from '../core/SpiderEngine';
 import { ParseEngine } from '../core/ParseEngine';
 import {
@@ -1252,6 +1252,41 @@ export const useAppStore = defineStore('app', () => {
           }
         } catch (e) {
           console.warn('[Store] loadPlay: failed to parse header for cookie:', e);
+        }
+      }
+
+      // 裸 CDN 直链 + header 需要 Cookie/Referer 鉴权（夸克/UC 等）。
+      // 浏览器 <video>/hls.js 无法附加自定义 Referer/Cookie，必须经本地
+      // ProxyServer 的 do=stream 端点用 Node http 转发（带上 jar 的 header）。
+      // 判定条件：URL 是远程 http(s) 直链（非本地代理、非 m3u8、非 goproxy），
+      // 且 header 中存在 Cookie 或 Referer。
+      if (
+        result.url &&
+        /^https?:\/\//i.test(result.url) &&
+        !/^https?:\/\/(127\.0\.0\.1|localhost)/i.test(result.url) &&
+        !/\/proxy\?/i.test(result.url) &&
+        !/\/goproxy\?/i.test(result.url) &&
+        !/\.m3u8([?#]|$)/i.test(result.url) &&
+        result.header
+      ) {
+        try {
+          const playHeader = JSON.parse(result.header) as Record<string, string>;
+          const needsAuth =
+            (playHeader.Cookie || playHeader.cookie || playHeader.Referer) &&
+            !/do=stream/i.test(result.url);
+          if (needsAuth) {
+            const headersB64 = btoa(JSON.stringify(playHeader));
+            const sep = result.url.includes('?') ? '&' : '?';
+            const proxyBase = await getLocalProxy();
+            result.url = `${proxyBase}/proxy?do=stream&url=${encodeURIComponent(
+              result.url,
+            )}&headers=${encodeURIComponent(headersB64)}`;
+            console.log(
+              '[Store] loadPlay: 裸 CDN 直链已重写为 do=stream 代理（带鉴权 header）',
+            );
+          }
+        } catch (e) {
+          console.warn('[Store] loadPlay: 解析 header 失败，跳过 stream 重写:', e);
         }
       }
 

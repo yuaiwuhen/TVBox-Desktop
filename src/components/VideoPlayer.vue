@@ -391,6 +391,9 @@ const initPlayer = async () => {
       urlLower.includes('do=hls') ||
       urlLower.includes('do=hxq') ||
       (urlLower.includes('do=proxy') && !urlLower.includes('do=ali'));
+    // do=stream 是本地代理转发的直链（可能是 m3u8 转码流，也可能是 MP4/TS 视频流），
+    // 需要探测 Content-Type 后分流：m3u8 → hls.js；视频流 → 原生 video.src。
+    const isStreamProxyUrl = urlLower.includes('do=stream');
     const isDirectVideoUrl =
       urlLower.includes('do=ali') ||
       /\.(mp4|mkv|webm|avi|mov|flv|m4v)(\?|$|&)/i.test(props.url) ||
@@ -410,15 +413,45 @@ const initPlayer = async () => {
         }
       })();
 
+    // do=stream 探测：用 Range 只取首字节即可读 Content-Type（避免下载整段流）
+    let streamIsM3u8 = false;
+    if (isStreamProxyUrl) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const probeRes = await fetch(props.url, {
+          method: 'GET',
+          headers: { Range: 'bytes=0-0' },
+          signal: ctrl.signal,
+        });
+        const ct = probeRes.headers.get('content-type') || '';
+        streamIsM3u8 = /mpegurl|m3u8/i.test(ct);
+        console.log(
+          '[VideoPlayer-hevc] do=stream 探测 Content-Type:',
+          ct,
+          '→ m3u8?',
+          streamIsM3u8,
+        );
+      } catch (e) {
+        console.warn('[VideoPlayer-hevc] do=stream 探测失败，按直链处理:', e);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
     console.log('[VideoPlayer-hevc] URL type detection:', {
       url: props.url.substring(0, 100),
       isM3u8Url,
       isDirectVideoUrl,
+      streamIsM3u8,
     });
+
+    // do=stream 且探测为 m3u8 → 交给 hls.js
+    const useHls = isM3u8Url || (isStreamProxyUrl && streamIsM3u8);
 
     // For direct video URLs (mp4/mkv/etc), use native video.src — hls.js
     // cannot parse non-manifest responses and will emit fatal NETWORK_ERROR.
-    if (isDirectVideoUrl) {
+    if (isDirectVideoUrl && !(isStreamProxyUrl && streamIsM3u8)) {
       console.log('[VideoPlayer-hevc] 使用原生 video.src 加载直链视频');
       if (videoElement.value) {
         videoElement.value.pause();
@@ -488,7 +521,7 @@ const initPlayer = async () => {
         videoElement.value?.removeEventListener('error', onError);
       };
       videoElement.value.addEventListener('error', onError);
-    } else if (Hls.isSupported()) {
+    } else if (useHls && Hls.isSupported()) {
       console.log('[VideoPlayer-hevc] 使用hls.js加载HLS流');
 
       // 先暂停视频，确保状态正确

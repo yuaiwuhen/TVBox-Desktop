@@ -267,6 +267,9 @@ export class LocalProxyServer {
       case 'danmu':
         await this.handleDanmuProxy(reqUrl, req, res);
         break;
+      case 'stream':
+        await this.handleStreamProxy(reqUrl, req, res);
+        break;
       default:
         this.sendError(res, 400, `Unknown action: ${doAction}`);
     }
@@ -795,6 +798,124 @@ export class LocalProxyServer {
       console.error('[LocalProxyServer] M3U8 proxy error:', e);
       this.sendError(res, 502, 'Failed to fetch m3u8');
     }
+  }
+
+  // ── /proxy?do=stream (带 header 的直链流式转发) ──────────────────────────
+  // 解决夸克等 CDN 直链需要 Referer/Cookie 而浏览器 <video>/hls.js 无法附加的问题。
+  // 用 Node http/https 带上 jar 返回的 header 请求上游，流式转发给浏览器，
+  // 并透传 Range 以支持进度条拖动；自动跟随重定向。
+  private async handleStreamProxy(
+    reqUrl: URL,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const target = reqUrl.searchParams.get('url') || '';
+    if (!target) {
+      this.sendError(res, 400, 'Missing url parameter');
+      return;
+    }
+    let headers: Record<string, string> = {};
+    const hB64 =
+      reqUrl.searchParams.get('headers') ||
+      reqUrl.searchParams.get('h') ||
+      '';
+    if (hB64) {
+      try {
+        headers = JSON.parse(urlSafeBase64Decode(hB64));
+      } catch (e) {
+        console.error('[LocalProxyServer] stream headers decode failed:', e);
+      }
+    }
+    if (!headers['User-Agent']) {
+      headers['User-Agent'] =
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+    }
+    // 透传浏览器 Range（视频拖动进度条）
+    if (req.headers.range) headers['Range'] = req.headers.range;
+
+    const proxyBase = `${reqUrl.origin}/proxy?do=stream`;
+    await this.streamFetch(target, headers, res, 0, 5, proxyBase, hB64);
+  }
+
+  private async streamFetch(
+    target: string,
+    headers: Record<string, string>,
+    res: ServerResponse,
+    redirectCount: number,
+    maxRedirects: number,
+    proxyBase: string,
+    headersB64: string,
+  ): Promise<void> {
+    if (redirectCount > maxRedirects) {
+      this.sendError(res, 502, 'Too many redirects');
+      return;
+    }
+    const parsed = new URL(target);
+    const lib = parsed.protocol === 'https:' ? _require('https') : http;
+    const upstreamReq = lib.request(
+      parsed,
+      { headers, method: 'GET' },
+      (upRes: any) => {
+        const status = upRes.statusCode || 200;
+        // 跟随重定向：保留 header（Referer/Cookie）与 Range
+        if (status >= 300 && status < 400 && upRes.headers.location) {
+          upRes.resume();
+          const next = new URL(upRes.headers.location, target).toString();
+          this.streamFetch(next, headers, res, redirectCount + 1, maxRedirects, proxyBase, headersB64);
+          return;
+        }
+        const ct = String(upRes.headers['content-type'] || '');
+        // 上游返回 m3u8 播放列表（夸克预览的转码流）：读取全文，
+        // 把所有分片/子列表 URL 重写为本代理 do=stream 端点（继续带 header），
+        // 这样 hls.js 在浏览器里请求分片也能带上 Referer/Cookie。
+        if (/mpegurl|m3u8/i.test(ct) || /\.m3u8([?#]|$)/i.test(target)) {
+          const chunks: Buffer[] = [];
+          upRes.on('data', (c: Buffer) => chunks.push(c));
+          upRes.on('end', () => {
+            const text = Buffer.concat(chunks).toString('utf-8');
+            const rewritten = text
+              .split('\n')
+              .map((line) => {
+                const l = line.trim();
+                if (!l || l.startsWith('#')) return line;
+                const abs = /^https?:\/\//i.test(l)
+                  ? l
+                  : new URL(l, target).toString();
+                return `${proxyBase}&url=${encodeURIComponent(
+                  abs,
+                )}&headers=${encodeURIComponent(headersB64)}`;
+              })
+              .join('\n');
+            res.writeHead(200, {
+              'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+              'Access-Control-Allow-Origin': '*',
+            });
+            res.end(rewritten);
+          });
+          upRes.on('error', (e: Error) => res.destroy());
+          return;
+        }
+        // 普通视频流：原样透传（含 Range 206）
+        res.writeHead(status, {
+          'Content-Type': ct || 'application/octet-stream',
+          'Content-Length': upRes.headers['content-length'] || undefined,
+          'Accept-Ranges': upRes.headers['accept-ranges'] || 'bytes',
+          'Content-Range': upRes.headers['content-range'] || undefined,
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Headers': 'Range',
+        });
+        upRes.pipe(res);
+      },
+    );
+    upstreamReq.on('error', (e: Error) => {
+      console.error('[LocalProxyServer] stream proxy error:', e);
+      if (!res.headersSent) this.sendError(res, 502, 'Stream proxy failed');
+      else res.destroy();
+    });
+    upstreamReq.setTimeout(20000, () => {
+      upstreamReq.destroy(new Error('stream proxy timeout'));
+    });
+    upstreamReq.end();
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────
