@@ -432,8 +432,15 @@ const initPlayer = async () => {
           '→ m3u8?',
           streamIsM3u8,
         );
+        // 立即中断响应体，避免上游忽略 Range 时下载整段视频流
+        ctrl.abort();
       } catch (e) {
-        console.warn('[VideoPlayer-hevc] do=stream 探测失败，按直链处理:', e);
+        // abort 也会触发 catch，属正常流程
+        if (e instanceof DOMException && e.name === 'AbortError') {
+          console.log('[VideoPlayer-hevc] do=stream 探测已中断（预期行为）');
+        } else {
+          console.warn('[VideoPlayer-hevc] do=stream 探测失败，按直链处理:', e);
+        }
       } finally {
         clearTimeout(timer);
       }

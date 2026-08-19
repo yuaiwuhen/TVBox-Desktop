@@ -831,10 +831,13 @@ export class LocalProxyServer {
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
     }
     // 透传浏览器 Range（视频拖动进度条）
-    if (req.headers.range) headers['Range'] = req.headers.range;
+    const hasRange = !!req.headers.range;
+    if (hasRange) headers['Range'] = req.headers.range as string;
 
     const proxyBase = `${reqUrl.origin}/proxy?do=stream`;
-    await this.streamFetch(target, headers, res, 0, 5, proxyBase, hB64);
+    await this.streamFetch(
+      target, headers, res, 0, 5, proxyBase, hB64, hasRange,
+    );
   }
 
   private async streamFetch(
@@ -845,6 +848,7 @@ export class LocalProxyServer {
     maxRedirects: number,
     proxyBase: string,
     headersB64: string,
+    hasRange: boolean,
   ): Promise<void> {
     if (redirectCount > maxRedirects) {
       this.sendError(res, 502, 'Too many redirects');
@@ -861,14 +865,19 @@ export class LocalProxyServer {
         if (status >= 300 && status < 400 && upRes.headers.location) {
           upRes.resume();
           const next = new URL(upRes.headers.location, target).toString();
-          this.streamFetch(next, headers, res, redirectCount + 1, maxRedirects, proxyBase, headersB64);
+          this.streamFetch(
+            next, headers, res, redirectCount + 1, maxRedirects,
+            proxyBase, headersB64, hasRange,
+          );
           return;
         }
         const ct = String(upRes.headers['content-type'] || '');
         // 上游返回 m3u8 播放列表（夸克预览的转码流）：读取全文，
         // 把所有分片/子列表 URL 重写为本代理 do=stream 端点（继续带 header），
         // 这样 hls.js 在浏览器里请求分片也能带上 Referer/Cookie。
-        if (/mpegurl|m3u8/i.test(ct) || /\.m3u8([?#]|$)/i.test(target)) {
+        // 注意：仅当客户端请求不带 Range（完整 manifest 拉取）时才重写；
+        // 带 Range 的探测/拖动请求直接透传原始 206 响应，避免把部分内容当完整 manifest。
+        if (!hasRange && (/mpegurl|m3u8/i.test(ct) || /\.m3u8([?#]|$)/i.test(target))) {
           const chunks: Buffer[] = [];
           upRes.on('data', (c: Buffer) => chunks.push(c));
           upRes.on('end', () => {
@@ -895,7 +904,7 @@ export class LocalProxyServer {
           upRes.on('error', (e: Error) => res.destroy());
           return;
         }
-        // 普通视频流：原样透传（含 Range 206）
+        // 普通视频流（或带 Range 的 m3u8 探测请求）：原样透传（含 206）
         res.writeHead(status, {
           'Content-Type': ct || 'application/octet-stream',
           'Content-Length': upRes.headers['content-length'] || undefined,
