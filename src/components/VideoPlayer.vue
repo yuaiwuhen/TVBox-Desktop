@@ -1973,23 +1973,11 @@ defineExpose({
                 <Lock />
               </el-icon>
             </button>
-            <!-- Picture-in-Picture -->
-            <button class="vp-icon-btn" @click="togglePiP" title="画中画">
-              <el-icon :size="20">
-                <Monitor />
-              </el-icon>
-            </button>
-            <!-- Fullscreen -->
-            <button class="vp-icon-btn" @click="toggleFullscreen" title="全屏">
-              <el-icon :size="20">
-                <FullScreen />
-              </el-icon>
-            </button>
           </div>
         </div>
 
         <!-- Bottom control bar (glass gradient) -->
-        <div class="vp-overlay-bottom px-4 md:px-6 lg:px-8 pb-2 pt-5 pointer-events-auto" @click.stop>
+        <div class="vp-overlay-bottom px-4 md:px-6 lg:px-8 pb-1.5 pt-3 pointer-events-auto" @click.stop>
           <!-- Seek bar -->
           <div ref="seekBarRef" class="vp-seek-bar group relative w-full mb-3 cursor-pointer"
             @mousedown="onSeekBarMouseDown" @mousemove="onSeekBarMouseMove" @mouseleave="onSeekBarMouseLeave">
@@ -2073,7 +2061,7 @@ defineExpose({
                 </button>
                 <div class="vp-volume-slider flex items-center">
                   <div ref="volumeSliderRef"
-                    class="vp-volume-track relative w-20 h-full flex items-center cursor-pointer"
+                    class="vp-volume-track relative w-24 h-full flex items-center cursor-pointer"
                     @mousedown="onVolumeSliderMouseDown">
                     <div class="absolute left-0 right-0"
                       style="height: 3px; background: rgba(255,255,255,0.12); border-radius: 2px;">
@@ -2114,7 +2102,7 @@ defineExpose({
               </button>
 
               <!-- Audio track dropdown -->
-              <el-dropdown v-if="audioTrackList.length > 0" @command="switchAudioTrack" trigger="click">
+              <el-dropdown @command="switchAudioTrack" trigger="click">
                 <button class="vp-icon-btn" :class="{ active: activeAudioTrack > 0 }" title="音轨">
                   <el-icon :size="20">
                     <Headset />
@@ -2122,6 +2110,7 @@ defineExpose({
                 </button>
                 <template #dropdown>
                   <el-dropdown-menu class="vp-dropdown-menu">
+                    <el-dropdown-item v-if="audioTrackList.length === 0" disabled>无可用音轨</el-dropdown-item>
                     <el-dropdown-item v-for="(t, i) in audioTrackList" :key="t.id" :command="i">
                       <span :style="{ color: i === activeAudioTrack ? 'var(--color-primary)' : '' }">{{ t.label
                         }}</span>
@@ -2131,9 +2120,7 @@ defineExpose({
               </el-dropdown>
 
               <!-- Subtitle track dropdown (external `sub` + in-stream) -->
-              <el-dropdown
-                v-if="subtitleTrackList.length > 0 || hlsSubtitleTracks.length > 0"
-                @command="onSubtitleTrackCommand" trigger="click">
+              <el-dropdown @command="onSubtitleTrackCommand" trigger="click">
                 <button class="vp-icon-btn" :class="{ active: subtitleEnabled || activeHlsSubtitleTrack >= 0 }"
                   title="字幕轨">
                   <el-icon :size="20">
@@ -2145,6 +2132,8 @@ defineExpose({
                     <el-dropdown-item :command="-1">
                       <span :style="{ color: (activeSubtitleTrack === -1 && activeHlsSubtitleTrack === -1) ? 'var(--color-primary)' : '' }">关闭</span>
                     </el-dropdown-item>
+                    <el-dropdown-item v-if="subtitleTrackList.length === 0 && hlsSubtitleTracks.length === 0" disabled>
+                      无可用字幕轨</el-dropdown-item>
                     <template v-if="subtitleTrackList.length > 0">
                       <el-dropdown-item v-for="(u, i) in subtitleTrackList" :key="'s' + i" :command="100 + i">
                         <span :style="{ color: i === activeSubtitleTrack ? 'var(--color-primary)' : '' }">外挂字幕 {{
@@ -2203,6 +2192,20 @@ defineExpose({
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
+
+              <!-- Picture-in-Picture -->
+              <button class="vp-icon-btn" @click="togglePiP" title="画中画">
+                <el-icon :size="20">
+                  <Monitor />
+                </el-icon>
+              </button>
+
+              <!-- Fullscreen -->
+              <button class="vp-icon-btn" @click="toggleFullscreen" :title="isFullscreen ? '退出全屏' : '全屏'">
+                <el-icon :size="20">
+                  <FullScreen />
+                </el-icon>
+              </button>
 
               <!-- App fullscreen button -->
               <button class="vp-icon-btn" @click="toggleAppFullscreen" :title="isAppFullscreen ? '退出应用全屏' : '应用全屏'">
@@ -2508,7 +2511,7 @@ defineExpose({
 
 /* ===== Volume Slider ===== */
 .vp-volume-group:hover .vp-volume-slider {
-  width: 80px;
+  width: 116px;
 }
 
 .vp-volume-slider {
@@ -2530,7 +2533,7 @@ defineExpose({
 }
 
 .vp-volume-group.expanded .vp-volume-slider {
-  width: 92px;
+  width: 116px;
   padding: 0 10px;
 }
 
