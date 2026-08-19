@@ -18,12 +18,9 @@ import { useAppStore } from '../store/app';
 import type { MediaTrack } from '../core/models';
 import { ArrowLeft, ArrowRight } from '@element-plus/icons-vue';
 
-// 让 Vue 把 <movi-player> 当原生自定义元素渲染，不做组件解析
-defineOptions({
-  compilerOptions: {
-    isCustomElement: (tag: string) => tag === 'movi-player',
-  },
-});
+// 注：<movi-player> 作为原生自定义元素渲染的 isCustomElement 配置
+// 已在 vite.config.ts 的 vue() 插件中统一设置（runtime-only 构建不支持
+// 在组件内通过 defineOptions.compilerOptions 配置，会触发 Vue 警告）。
 
 // ==================== Props ====================
 const props = withDefaults(defineProps<{
@@ -273,7 +270,7 @@ const onError = (e: any) => {
   if (errorTimer) clearTimeout(errorTimer);
   errorTimer = setTimeout(() => {
     // 1.5s 后仍未进入 playing → 判定播放确实失败
-    if (!isPlaying) {
+    if (!isPlaying.value) {
       hasError.value = true;
       isLoading.value = false;
       emit('error', e.detail ?? e);
@@ -564,6 +561,10 @@ const initPlayer = () => {
       try {
         let dec = props.url || '';
         for (let i = 0; i < 2; i++) dec = decodeURIComponent(dec);
+        // 仅匹配 filename=/name= 参数；夸克 url= 里的文件名不要匹配，
+        // 否则会被误判成 needsWasm=true 从而强制 wasm 优先，而该流的 wasm
+        // 解码器在 Demuxer.open 阶段会崩溃（memory access out of bounds）。
+        // 走 wasm 兜底（引擎列表末尾）反而能正常播放。
         return /(?:filename|name)=[^&]*\.(mkv|webm|avi|mov|flv|wmv)(?:&|$|%26)/i.test(
           dec,
         );
