@@ -380,7 +380,19 @@ const initPlayer = () => {
   const lower = (props.url || '').toLowerCase();
   const needsWasm =
     /\.(mkv|webm|avi|mov|flv|wmv)([?#]|$)/i.test(lower) ||
-    /filename[^&]*\.(mkv|webm|avi|mov|flv|wmv)(?:&|$|%26)/i.test(lower);
+    // goproxy/代理 URL 中文件名是双重编码的（filename%253D...%252Emkv），
+    // 需解码两次后匹配（与 store 的 isDirectVideoUrl 逻辑一致）
+    (() => {
+      try {
+        let dec = props.url || '';
+        for (let i = 0; i < 2; i++) dec = decodeURIComponent(dec);
+        return /(?:filename|name)=[^&]*\.(mkv|webm|avi|mov|flv|wmv)(?:&|$|%26)/i.test(
+          dec,
+        );
+      } catch {
+        return false;
+      }
+    })();
   el.engine = needsWasm
     ? 'wasm hlsjs shaka native'
     : 'native hlsjs shaka wasm';
