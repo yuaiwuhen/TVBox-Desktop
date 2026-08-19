@@ -16,7 +16,7 @@ import axios from 'axios';
 import { checkReplaceProxy, getLocalProxy } from '../core/ConfigParser';
 import { useAppStore } from '../store/app';
 import type { MediaTrack } from '../core/models';
-import { Search, ArrowLeft, ArrowRight, ChatDotRound, Headset, Document } from '@element-plus/icons-vue';
+import { ArrowLeft, ArrowRight } from '@element-plus/icons-vue';
 
 // 让 Vue 把 <movi-player> 当原生自定义元素渲染，不做组件解析
 defineOptions({
@@ -170,15 +170,17 @@ const renderDanmu = (time: number) => {
   }
 };
 
-const toggleDanmu = () => {
-  danmuEnabled.value = !danmuEnabled.value;
-  danmuEngine.setEnabled(danmuEnabled.value);
-  localStorage.setItem('tvbox_danmu_enabled', String(danmuEnabled.value));
-  if (!danmuEnabled.value) {
+const setDanmu = (on: boolean) => {
+  if (danmuEnabled.value === on) return;
+  danmuEnabled.value = on;
+  danmuEngine.setEnabled(on);
+  localStorage.setItem('tvbox_danmu_enabled', String(on));
+  if (!on) {
     for (const el of activeDanmuEls) el.remove();
     activeDanmuEls.length = 0;
   }
 };
+const toggleDanmu = () => setDanmu(!danmuEnabled.value);
 
 const onDanmuToggle = (val: boolean) => {
   danmuEngine.setEnabled(val);
@@ -359,6 +361,74 @@ const selectAudio = async (id: string) => {
   }
 };
 
+// ==================== movi-player 自定义控件栏 ====================
+// 复用 movi-player 自带控件栏（进度条/播放/音量/倍速/画中画/全屏），
+// 仅把业务按钮（搜索字幕/音轨/字幕/弹幕）注入其控件栏，不重建底层控件。
+const MOV_SEARCH_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>';
+const MOV_AUDIO_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/></svg>';
+const MOV_SUBTITLE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="5" rx="2"/><path d="M7 12h4"/><path d="M15 12h2"/><path d="M7 15h2"/><path d="M15 15h2"/></svg>';
+const MOV_DANMU_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-6a2 2 0 0 1-2-2v-2"/><path d="M6 13h4"/><path d="M6 17h4"/></svg>';
+
+let controlsRegistered = false;
+const registerMoviControls = (el: any) => {
+  if (controlsRegistered || !el || typeof el.addControl !== 'function') return;
+  controlsRegistered = true;
+  // 搜索字幕（普通按钮）
+  if (props.showSubtitleSearch) {
+    el.addControl({
+      id: 'movi-search-sub',
+      placement: 'bar',
+      title: '搜索字幕',
+      icon: MOV_SEARCH_ICON,
+      onSelect: () => emit('searchSubtitle'),
+    });
+  }
+  // 音轨（子菜单）
+  el.addControl({
+    id: 'movi-audio',
+    placement: 'both',
+    title: '音轨',
+    icon: MOV_AUDIO_ICON,
+    items: audioMenuItems.value.map((m) => ({ id: m.id, label: m.label })),
+    value: audioMenuItems.value.find((m) => m.active)?.id ?? '',
+    onPick: (itemId: string) => selectAudio(itemId),
+  });
+  // 字幕（子菜单）
+  el.addControl({
+    id: 'movi-subtitle',
+    placement: 'both',
+    title: '字幕',
+    icon: MOV_SUBTITLE_ICON,
+    items: subtitleMenuItems.value.map((m) => ({ id: m.id, label: m.label })),
+    value: subtitleMenuItems.value.find((m) => m.active)?.id ?? '',
+    onPick: (itemId: string) => selectSubtitle(itemId),
+  });
+  // 弹幕（开关）
+  el.addControl({
+    id: 'movi-danmu',
+    placement: 'bar',
+    title: '弹幕',
+    icon: MOV_DANMU_ICON,
+    toggle: true,
+    active: danmuEnabled.value,
+    onSelect: (active: boolean) => setDanmu(active),
+  });
+};
+
+// 选择状态变化时同步到 movi 控件栏（高亮当前项）
+const syncMoviControlValues = () => {
+  const el = mpRef.value;
+  if (!el || typeof el.updateControl !== 'function') return;
+  el.updateControl('movi-audio', {
+    items: audioMenuItems.value.map((m) => ({ id: m.id, label: m.label })),
+    value: audioMenuItems.value.find((m) => m.active)?.id ?? '',
+  });
+  el.updateControl('movi-subtitle', {
+    items: subtitleMenuItems.value.map((m) => ({ id: m.id, label: m.label })),
+    value: subtitleMenuItems.value.find((m) => m.active)?.id ?? '',
+  });
+};
+
 // ==================== 初始化 ====================
 const initPlayer = () => {
   const el = mpRef.value;
@@ -372,6 +442,12 @@ const initPlayer = () => {
   el.src = props.url;
   el.controls = true;
   el.autoplay = props.autoplay;
+  // 注入自定义控件到 movi-player 自带控件栏（进度条/播放/音量等用自带栏）
+  if (typeof el.addControl === 'function') {
+    registerMoviControls(el);
+  } else {
+    customElements.whenDefined('movi-player').then(() => registerMoviControls(el));
+  }
   if (props.poster) el.poster = props.poster;
   if (props.title) el.title = props.title;
   // 引擎优先级：MKV/HEVC/AV1 等原生内核不支持的格式用 wasm 解析；
@@ -483,6 +559,15 @@ watch(playbackRate, (val) => {
   const el = mpRef.value;
   if (el) el.playbackRate = val;
 });
+// 字幕/音轨菜单变化（含 trackschange 重新解析）时同步到 movi 控件栏
+watch([audioMenuItems, subtitleMenuItems], syncMoviControlValues, { deep: true });
+// 弹幕开关状态同步到 movi 控件栏的开关按钮
+watch(danmuEnabled, (on) => {
+  const el = mpRef.value;
+  if (el && typeof el.updateControl === 'function') {
+    el.updateControl('movi-danmu', { active: on });
+  }
+});
 
 // ==================== Mount ====================
 onMounted(() => {
@@ -527,54 +612,6 @@ onUnmounted(() => {
 
     <!-- 弹幕层 -->
     <div ref="danmuContainer" class="absolute top-0 left-0 w-full h-3/4 pointer-events-none overflow-hidden z-30">
-    </div>
-
-    <!-- 顶部工具条 -->
-    <div class="absolute top-0 left-0 right-0 z-40 flex items-center justify-between px-4 py-2 pointer-events-none"
-      style="background: linear-gradient(to bottom, rgba(0,0,0,0.5), transparent)">
-      <div class="flex items-center gap-2 pointer-events-auto">
-        <button v-if="props.showSubtitleSearch" class="vp-icon-btn" @click="emit('searchSubtitle')" title="搜索字幕">
-          <el-icon :size="18"><Search /></el-icon>
-        </button>
-      </div>
-      <div class="flex items-center gap-2 pointer-events-auto">
-        <!-- 音轨选择（即使只有 1 条也可选） -->
-        <el-dropdown v-if="audioMenuItems.length > 0" trigger="click" @command="selectAudio">
-          <button class="vp-icon-btn" title="选择音轨">
-            <el-icon :size="18"><Headset /></el-icon>
-          </button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item v-for="m in audioMenuItems" :key="'au' + m.id"
-                :command="m.id">
-                <span :style="{ color: m.active ? 'var(--color-primary)' : '' }">{{ m.label }}</span>
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-
-        <!-- 字幕选择 -->
-        <el-dropdown v-if="subtitleMenuItems.length > 0" trigger="click" @command="selectSubtitle">
-          <button class="vp-icon-btn" title="选择字幕">
-            <el-icon :size="18"><Document /></el-icon>
-          </button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item v-for="m in subtitleMenuItems" :key="'sub' + m.id"
-                :command="m.id">
-                <span :style="{ color: m.active ? 'var(--color-primary)' : '' }">{{ m.label }}</span>
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-
-        <!-- 弹幕开关 -->
-        <button class="vp-icon-btn" @click="toggleDanmu" :title="danmuEnabled ? '关闭弹幕' : '开启弹幕'">
-          <el-icon :size="18" :style="{ color: danmuEnabled ? 'var(--color-primary)' : '' }">
-            <ChatDotRound />
-          </el-icon>
-        </button>
-      </div>
     </div>
 
     <!-- 上下集切换（左下角） -->

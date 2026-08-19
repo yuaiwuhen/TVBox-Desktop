@@ -480,6 +480,46 @@ class SpiderHttpServer(port: Int = DEFAULT_PORT) : NanoHTTPD(port) {
             val contentRange = conn.getHeaderField("Content-Range")
             val acceptRanges = conn.getHeaderField("Accept-Ranges")
             Log.d(TAG, "/goproxy: status=$status mime=$mime contentLength=$contentLength contentRange=$contentRange acceptRanges=$acceptRanges")
+
+            // HEAD 请求：movi-player 的 HttpSource 用 HEAD + Content-Length 获取
+            // 文件总大小。goproxy 对 HEAD 返回 206 + Content-Length:1（把 Range
+            // 头当 GET 处理），导致浏览器判定非法响应(ERR_INVALID_HTTP_RESPONSE)
+            // 且拿不到真实大小。这里用 GET + Range: bytes=0-0 探测，从
+            // Content-Range 解析总大小，返回标准 200 + Content-Length:<total>。
+            if (session.method == NanoHTTPD.Method.HEAD) {
+                try {
+                    val probe = URL(target).openConnection() as HttpURLConnection
+                    probe.connectTimeout = 15000
+                    probe.readTimeout = 60000
+                    probe.requestMethod = "GET"
+                    probe.setRequestProperty("Range", "bytes=0-0")
+                    if (cookieParam.isNotBlank()) {
+                        probe.setRequestProperty("Cookie", cookieParam)
+                    }
+                    val probeStatus = probe.responseCode
+                    val probeContentRange = probe.getHeaderField("Content-Range")
+                    val total = probeContentRange
+                        ?.substringAfter('/')
+                        ?.trim()
+                        ?.toLongOrNull()
+                    Log.d(TAG, "/goproxy HEAD probe: status=$probeStatus contentRange=$probeContentRange total=$total")
+                    val size = total ?: probe.contentLength.toLong()
+                    probe.inputStream?.close() ?: probe.errorStream?.close()
+                    probe.disconnect()
+                    val resp = newFixedLengthResponse(
+                        Response.Status.OK,
+                        mime,
+                        java.io.ByteArrayInputStream(ByteArray(0)),
+                        size,
+                    )
+                    resp.addHeader("Accept-Ranges", acceptRanges ?: "bytes")
+                    addCors(resp)
+                    return resp
+                } catch (e: Throwable) {
+                    Log.w(TAG, "/goproxy HEAD probe failed, falling through: ${e.message}")
+                }
+            }
+
             val input = if (status in 200..299) conn.inputStream else conn.errorStream
                 ?: java.io.ByteArrayInputStream(ByteArray(0))
             // Stream the upstream response directly to the client -- the Go proxy
