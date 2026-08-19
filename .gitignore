@@ -65,6 +65,9 @@ feimao_*.log
 # their own tokens — keep directory tracked via .gitkeep, ignore contents.
 fatcat/*.txt
 
+# Local agent working memory (cross-session, not source code)
+.codebuddy/memory/
+
 # Debug scripts (temporary development files)
 dev/
 debug-*.mjs
