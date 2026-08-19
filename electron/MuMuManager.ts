@@ -494,8 +494,27 @@ export class MuMuManager {
     const instances = await this.listInstances();
     const target = instances.find((i) => i.index === this.targetIndex);
 
+    // 0. 环境已完全就绪（模拟器 + Spider 应用都在跑）时，不做任何动作、
+    //    不上报任何进度，直接返回成功。
+    if (await this.isServiceReady()) {
+      console.log('[MuMuManager] environment already ready, skipping startup');
+      return {
+        installed: true,
+        running: true,
+        booted: true,
+        serviceReady: true,
+        targetIndex: this.targetIndex,
+        instances,
+        message: 'MuMu 已运行，Spider 服务就绪',
+      };
+    }
+
+    // 标记本次是否真正启动了模拟器（用于区分"模拟器已启动"与"本次启动"）
+    let startedEmulator = false;
+
     // 1. Ensure the VM process + Android is booted.
     if (!target || !target.isAndroidStarted) {
+      startedEmulator = true;
       console.log('[MuMuManager] VM not running, launching...');
       onProgress?.('正在启动模拟器...', 15, 'starting');
       try {
@@ -511,7 +530,13 @@ export class MuMuManager {
       }
     }
 
-    onProgress?.('模拟器启动成功，正在启动应用...', 50, 'booting');
+    // 只有本次真正启动了模拟器，才提示"模拟器启动成功"；
+    // 若模拟器早已在运行，直接跳到"正在启动应用"。
+    if (startedEmulator) {
+      onProgress?.('模拟器启动成功，正在启动应用...', 50, 'booting');
+    } else {
+      onProgress?.('正在启动应用...', 50, 'app');
+    }
 
     // 2. Wait for full boot.
     const booted = await this.waitForBootCompleted(this.targetIndex);
@@ -585,7 +610,7 @@ export class MuMuManager {
       };
     }
 
-    onProgress?.('应用启动成功', 100, 'ready');
+    // 走到这里说明服务在过程中自行就绪（未经上方启动），无需再报提示
     return {
       installed: true,
       running: true,

@@ -550,15 +550,24 @@ onMounted(async () => {
     }
   });
 
-  // 兜底：主进程可能在本页面挂载前就已开始启动模拟器（install:progress
-  // 的初始进度可能已错过）。主动查一次状态，若模拟器已安装但服务未就绪，
-  // 立即显示"正在启动模拟器"进度提示，后续 install:progress 会持续更新。
+  // 兜底：主进程可能在本页面挂载前就已开始启动（install:progress 的初始
+  // 进度可能已错过）。主动查一次状态：仅当确实需要启动时才显示进度提示。
+  // - 模拟器与应用都已就绪 → 不显示任何提示
+  // - 模拟器已启动但应用未就绪 → 显示"正在启动应用"
+  // - 模拟器未启动 → 显示"正在启动模拟器"
+  // 后续 install:progress 会持续更新进度。
   try {
     const st = await ipcRenderer.invoke('mumu:getStatus')
     if (st?.installed && !st?.serviceReady) {
-      console.log('[App] MuMu installed but service not ready, showing startup progress')
-      startLoading('mumu-startup', 'MuMu 模拟器启动中')
-      updateLoading('mumu-startup', 'installing', '正在启动模拟器...', 10)
+      if (st?.booted) {
+        console.log('[App] Emulator ready but app not ready, showing app startup progress')
+        startLoading('mumu-startup', 'MuMu 应用启动中')
+        updateLoading('mumu-startup', 'installing', '正在启动应用...', 50)
+      } else {
+        console.log('[App] Emulator not running, showing emulator startup progress')
+        startLoading('mumu-startup', 'MuMu 模拟器启动中')
+        updateLoading('mumu-startup', 'installing', '正在启动模拟器...', 10)
+      }
     }
   } catch (e) {
     console.warn('[App] mumu:getStatus failed:', e)
