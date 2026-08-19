@@ -28,6 +28,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import http from 'http';
 
 const execAsync = promisify(exec);
@@ -206,7 +207,16 @@ export class MuMuManager {
     return false;
   }
 
-  /** Wait until sys.boot_completed == 1 inside the VM. */
+  /**
+   * Wait until the VM's Android has finished booting.
+   *
+   * MuMu 12 的 `sys.boot_completed` 经常不返回 `1`（定制系统行为），
+   * 因此改用更可靠的信号：
+   *   1. `sys.boot_completed == 1` 或 `dev.bootcomplete == 1` → 已就绪
+   *   2. adb 设备在线（Android 实际上已完成启动、可用）→ 立即视为就绪。
+   *      这是最可靠的信号——`waitForAndroidStarted` 已确认系统在启动，
+   *      adb 能连通即说明系统可用，无需等待完整超时。
+   */
   async waitForBootCompleted(
     index = this.targetIndex,
     timeoutMs = 120000,
@@ -222,6 +232,26 @@ export class MuMuManager {
         if (out.trim() === '1') return true;
       } catch {
         // adb not connected yet
+      }
+      try {
+        const devComplete = await this.runAdb([
+          'shell',
+          'getprop',
+          'dev.bootcomplete',
+        ]);
+        if (devComplete.trim() === '1') return true;
+      } catch {
+        // ignore
+      }
+      // adb 设备在线即视为 boot 完成（MuMu 定制系统下最可靠）
+      try {
+        const devices = await this.runAdb(['devices'], 10000);
+        if (/device\b/.test(devices) && !/offline\b/.test(devices)) {
+          console.log('[MuMuManager] adb device online, boot considered complete');
+          return true;
+        }
+      } catch {
+        // ignore
       }
       await new Promise((r) => setTimeout(r, 2000));
     }
@@ -637,7 +667,11 @@ export class MuMuManager {
     } catch {
       // fall through
     }
-    const projectRoot = path.resolve(__dirname, '..');
+    // ESM 下没有 __dirname，用 import.meta.url 推导当前文件所在目录
+    const thisDir = path.dirname(
+      fileURLToPath(import.meta.url),
+    );
+    const projectRoot = path.resolve(thisDir, '..');
     candidates.push(
       path.join(
         projectRoot,
