@@ -57,6 +57,12 @@ export interface SpiderDetailResult {
   list: Movie[];
 }
 
+/** 字幕/音轨等外部媒体轨道：含可读名称与真实地址 */
+export interface MediaTrack {
+  name: string;
+  url: string;
+}
+
 export interface PlayResult {
   parse: number; // 0=direct play, 1=need VIP parse
   url: string;

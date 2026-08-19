@@ -12,6 +12,7 @@ import { SubtitleEngine, type SubtitleCue } from '../core/SubtitleEngine';
 import { DanmuEngine, type DanmuItem } from '../core/DanmuEngine';
 import { checkReplaceProxy, getSpiderApiBaseUrl, getLocalProxy } from '../core/ConfigParser';
 import { useAppStore } from '../store/app';
+import type { MediaTrack } from '../core/models';
 import {
   ChatDotRound,
   Setting,
@@ -50,9 +51,9 @@ const props = withDefaults(defineProps<{
   subtitleUrl?: string;
   danmuUrl?: string;
   /** TVBox `audio` field: alternate audio track URLs */
-  audioUrls?: string[];
+  audioUrls?: MediaTrack[];
   /** TVBox `sub` field: external subtitle track URLs */
-  subtitleUrls?: string[];
+  subtitleUrls?: MediaTrack[];
   hasPrev?: boolean;
   hasNext?: boolean;
   resumeProgress?: number;
@@ -212,7 +213,7 @@ const subtitleColor = ref(localStorage.getItem('tvbox_subtitle_color') || '#ffff
 const subtitleDelay = ref(Number(localStorage.getItem('tvbox_subtitle_delay') || '0'));
 const currentSubtitle = ref<SubtitleCue | null>(null);
 /** Available external subtitle tracks (from TVBox `sub` field + search) */
-const subtitleTrackList = ref<string[]>([]);
+const subtitleTrackList = ref<MediaTrack[]>([]);
 const activeSubtitleTrack = ref(-1); // -1 = off
 /** Available in-stream subtitle tracks (HLS subtitleTracks) */
 const hlsSubtitleTracks = ref<{ id: number; label: string }[]>([]);
@@ -1374,13 +1375,18 @@ const refreshHlsTracks = () => {
   if (props.audioUrls && props.audioUrls.length > 0 && audioTrackList.value.length === 0) {
     audioTrackList.value = props.audioUrls.map((u, i) => ({
       id: i,
-      label: `音轨 ${i + 1}`,
-      url: u,
+      label: u.name || `音轨 ${i + 1}`,
+      url: u.url,
     }));
+  }
+  // 没有任何音轨（HLS 无独立音轨且 spider 也未提供 audio）时，仍列出“默认音轨”，
+  // 与饭米/夸克一致，保证音轨至少可选。
+  if (audioTrackList.value.length === 0) {
+    audioTrackList.value = [{ id: 0, label: '默认音轨', url: undefined }];
   }
   // TVBox `sub` field: external subtitle URLs (merged after any in-stream).
   if (props.subtitleUrls && props.subtitleUrls.length > 0) {
-    subtitleTrackList.value = props.subtitleUrls.map((u, i) => u);
+    subtitleTrackList.value = props.subtitleUrls.map((u) => ({ name: u.name, url: u.url }));
     // Don't auto-load; the user picks from the dropdown.
   }
 };
@@ -1433,7 +1439,8 @@ const switchSubtitleTrack = async (id: number) => {
     currentSubtitle.value = null;
     return;
   }
-  const url = subtitleTrackList.value[id];
+  const item = subtitleTrackList.value[id];
+  const url = item?.url;
   if (!url) return;
   activeSubtitleTrack.value = id;
   await loadSubtitle(url);
@@ -1651,13 +1658,13 @@ onMounted(() => {
 
   // Register TVBox `sub`/`audio` track lists (populate dropdowns).
   if (props.subtitleUrls && props.subtitleUrls.length > 0) {
-    subtitleTrackList.value = props.subtitleUrls;
+    subtitleTrackList.value = props.subtitleUrls.map((u) => ({ name: u.name, url: u.url }));
   }
   if (props.audioUrls && props.audioUrls.length > 0) {
     audioTrackList.value = props.audioUrls.map((u, i) => ({
       id: i,
-      label: `音轨 ${i + 1}`,
-      url: u,
+      label: u.name || `音轨 ${i + 1}`,
+      url: u.url,
     }));
   }
 
@@ -1714,6 +1721,10 @@ watch(() => props.url, (newUrl) => {
 watch(() => props.subtitleUrl, (newUrl) => {
   if (newUrl) loadSubtitle(newUrl);
 });
+
+// store 异步返回字幕/音轨后，刷新下拉列表
+watch(() => props.subtitleUrls, () => refreshHlsTracks());
+watch(() => props.audioUrls, () => refreshHlsTracks());
 
 watch(() => props.danmuUrl, (newUrl) => {
   if (newUrl) loadDanmu(newUrl);
@@ -2130,8 +2141,8 @@ defineExpose({
                       无可用字幕轨</el-dropdown-item>
                     <template v-if="subtitleTrackList.length > 0">
                       <el-dropdown-item v-for="(u, i) in subtitleTrackList" :key="'s' + i" :command="100 + i">
-                        <span :style="{ color: i === activeSubtitleTrack ? 'var(--color-primary)' : '' }">外挂字幕 {{
-                          i + 1 }}</span>
+                        <span :style="{ color: i === activeSubtitleTrack ? 'var(--color-primary)' : '' }">{{ u.name
+                          }}</span>
                       </el-dropdown-item>
                     </template>
                     <template v-if="hlsSubtitleTracks.length > 0">

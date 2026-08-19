@@ -18,6 +18,7 @@ import type {
   ParseBean,
   PlayResult,
   LiveChannelGroup,
+  MediaTrack,
 } from '../core/models';
 
 export const useAppStore = defineStore('app', () => {
@@ -67,8 +68,8 @@ export const useAppStore = defineStore('app', () => {
   const currentPlayFlag = ref('');
   const currentPlayIndex = ref(0);
   const currentDanmuUrl = ref('');
-  const currentAudioUrls = ref<string[]>([]);
-  const currentSubtitleUrls = ref<string[]>([]);
+  const currentAudioUrls = ref<MediaTrack[]>([]);
+  const currentSubtitleUrls = ref<MediaTrack[]>([]);
   const playLoading = ref(false);
   const currentEpisodes = ref<{ name: string; url: string }[]>([]);
   const resumeProgress = ref(0);
@@ -1486,19 +1487,45 @@ export const useAppStore = defineStore('app', () => {
       }
       currentDanmuUrl.value = rawDanmu;
 
-      // TVBox standard: `audio` = alternate audio tracks (string or array),
-      // `sub`/`subtitle` = external subtitles (string or array).
-      // Normalize each URL through the proxy rewriter.
-      const toUrlArray = (v: unknown): string[] => {
+      // TVBox standard: `audio` = alternate audio tracks, `sub`/`subtitle` =
+      // external subtitles. 真实 spider（夸克/饭米 等）返回的可能是：
+      //  - 纯 URL 字符串数组
+      //  - "url#url" 形式的字符串
+      //  - [{ name, url }] 对象数组（最常见，且含可读名称）
+      //  - "名称,地址#名称,地址" 形式的字符串
+      // 这里统一归一化为 { name, url } 并经过代理重写。
+      const toMediaList = (v: unknown): MediaTrack[] => {
         if (v == null) return [];
-        const arr = Array.isArray(v) ? v : String(v).split('#');
-        return arr
-          .map((u) => String(u).trim())
-          .filter((u) => u)
-          .map((u) => checkReplaceProxy(u));
+        const raw = Array.isArray(v) ? v : String(v).split('#');
+        const list: MediaTrack[] = [];
+        for (const item of raw) {
+          if (item == null) continue;
+          let name = '';
+          let url = '';
+          if (typeof item === 'object') {
+            const o = item as Record<string, unknown>;
+            url = String(o.url ?? o.src ?? o.link ?? '').trim();
+            name = String(o.name ?? o.lang ?? o.label ?? '').trim();
+          } else {
+            const s = String(item).trim();
+            if (!s) continue;
+            // 支持 "名称,地址" 形式
+            const comma = s.indexOf(',');
+            if (comma > 0 && /^https?:\/\//.test(s.slice(comma + 1).trim())) {
+              name = s.slice(0, comma).trim();
+              url = s.slice(comma + 1).trim();
+            } else {
+              url = s;
+            }
+          }
+          if (!url) continue;
+          url = checkReplaceProxy(url);
+          list.push({ name: name || url, url });
+        }
+        return list;
       };
-      currentAudioUrls.value = toUrlArray((result as any).audio);
-      currentSubtitleUrls.value = toUrlArray(
+      currentAudioUrls.value = toMediaList((result as any).audio);
+      currentSubtitleUrls.value = toMediaList(
         (result as any).sub ?? (result as any).subtitle,
       );
 
