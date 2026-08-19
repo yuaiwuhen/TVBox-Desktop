@@ -464,11 +464,18 @@ export class MuMuManager {
   /**
    * Full orchestration: ensure the target VM is running, booted, forwarded,
    * with the spider app installed and the HTTP service healthy.
+   *
+   * `onProgress` is called at each lifecycle stage so the renderer can show
+   * step-by-step status (starting emulator → emulator ready → starting app →
+   * app ready/failed).
    */
-  async ensureRunning(opts?: {
-    installApk?: boolean;
-    apkPath?: string;
-  }): Promise<MuMuStatus> {
+  async ensureRunning(
+    opts?: {
+      installApk?: boolean;
+      apkPath?: string;
+    },
+    onProgress?: (message: string, percent: number, stage: string) => void,
+  ): Promise<MuMuStatus> {
     const fail = (message: string, error?: string): MuMuStatus => ({
       installed: !!this.muMuRoot,
       running: false,
@@ -490,22 +497,30 @@ export class MuMuManager {
     // 1. Ensure the VM process + Android is booted.
     if (!target || !target.isAndroidStarted) {
       console.log('[MuMuManager] VM not running, launching...');
+      onProgress?.('正在启动模拟器...', 15, 'starting');
       try {
         await this.launchInstance(this.targetIndex);
       } catch (e: any) {
         return fail('MuMu 实例启动失败', e.message);
       }
+      onProgress?.('等待模拟器启动...', 35, 'starting');
       const androidStarted = await this.waitForAndroidStarted(this.targetIndex);
       if (!androidStarted) {
+        onProgress?.('模拟器启动超时', 35, 'error');
         return fail('等待 MuMu 安卓系统启动超时，请手动打开 MuMu');
       }
     }
 
+    onProgress?.('模拟器启动成功，正在启动应用...', 50, 'booting');
+
     // 2. Wait for full boot.
     const booted = await this.waitForBootCompleted(this.targetIndex);
     if (!booted) {
+      onProgress?.('系统启动超时', 55, 'error');
       return fail('MuMu 系统启动完成超时，请手动打开 MuMu');
     }
+
+    onProgress?.('正在配置端口转发...', 65, 'forward');
 
     // 3. Port forwarding (idempotent).
     try {
@@ -519,6 +534,7 @@ export class MuMuManager {
     let apkPath = opts?.apkPath || this.findSpiderApk();
     if (wantInstall) {
       if (apkPath) {
+        onProgress?.('正在安装 Spider 应用...', 75, 'install');
         try {
           await this.installApk(apkPath);
         } catch (e: any) {
@@ -526,6 +542,7 @@ export class MuMuManager {
           console.warn('[MuMuManager] APK install failed (non-fatal):', e.message);
         }
       } else if (!(await this.isAppInstalled())) {
+        onProgress?.('未找到 Spider APK', 75, 'error');
         return fail(
           '未找到 Spider APK，请先构建: cd android-app && gradlew assembleDebug',
         );
@@ -536,6 +553,7 @@ export class MuMuManager {
     //    reached after a normal start, uninstall + reinstall the APK once to
     //    recover from a corrupted install.
     if (!(await this.isServiceReady())) {
+      onProgress?.('正在启动 Spider 应用...', 85, 'app');
       try {
         await this.startService();
       } catch (e: any) {
@@ -548,6 +566,11 @@ export class MuMuManager {
         );
         ready = await this.reinstallApkOnce(apkPath);
       }
+      onProgress?.(
+        ready ? '应用启动成功' : '应用启动失败',
+        ready ? 100 : 85,
+        ready ? 'ready' : 'error',
+      );
       return {
         installed: true,
         running: true,
@@ -562,6 +585,7 @@ export class MuMuManager {
       };
     }
 
+    onProgress?.('应用启动成功', 100, 'ready');
     return {
       installed: true,
       running: true,

@@ -223,6 +223,7 @@
 <script setup lang="ts">
 import LoadingToast from './components/LoadingToast.vue'
 import MuMuSetupGuide from './components/MuMuSetupGuide.vue'
+import { useLoading } from './composables/useLoading'
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -510,12 +511,34 @@ const muMuStatus = ref({
   message: ''
 });
 const showMuMuSetupGuide = ref(false);
+const { start: startLoading, update: updateLoading, finish: finishLoading, fail: failLoading } = useLoading();
 
 onMounted(async () => {
   console.log('[App] Starting initialization...')
   
-  // Listen for MuMu status updates from main process
   const { ipcRenderer } = window.require('electron')
+
+  // Listen for emulator/app startup progress (install:progress) and show a
+  // loading toast with step-by-step status, then a success/error toast.
+  ipcRenderer.on('install:progress', (_event: any, data: any) => {
+    if (!data || !data.status) return
+    console.log('[Renderer] install:progress received:', data)
+    const { status, message, progress, error } = data
+    if (status === 'installing') {
+      startLoading('mumu-startup', 'MuMu 模拟器启动中')
+      updateLoading('mumu-startup', 'installing', message || '正在启动...', progress ?? 0)
+    } else if (status === 'success') {
+      updateLoading('mumu-startup', 'ready', message || '启动成功', 100)
+      finishLoading('mumu-startup', true)
+      ElMessage.success(message || 'MuMu 环境就绪')
+      showMuMuSetupGuide.value = false
+    } else if (status === 'error') {
+      failLoading('mumu-startup', error || message || '启动失败')
+      ElMessage.error(error || message || '启动失败')
+    }
+  })
+
+  // Listen for MuMu status updates from main process
   ipcRenderer.on('mumu:status', (_event: any, data: any) => {
     console.log('[Renderer] MuMu status received:', data);
     muMuStatus.value = data;
@@ -526,6 +549,20 @@ onMounted(async () => {
       showMuMuSetupGuide.value = false;
     }
   });
+
+  // 兜底：主进程可能在本页面挂载前就已开始启动模拟器（install:progress
+  // 的初始进度可能已错过）。主动查一次状态，若模拟器已安装但服务未就绪，
+  // 立即显示"正在启动模拟器"进度提示，后续 install:progress 会持续更新。
+  try {
+    const st = await ipcRenderer.invoke('mumu:getStatus')
+    if (st?.installed && !st?.serviceReady) {
+      console.log('[App] MuMu installed but service not ready, showing startup progress')
+      startLoading('mumu-startup', 'MuMu 模拟器启动中')
+      updateLoading('mumu-startup', 'installing', '正在启动模拟器...', 10)
+    }
+  } catch (e) {
+    console.warn('[App] mumu:getStatus failed:', e)
+  }
 
   // Restore config from file BEFORE any other initialization.
   // This ensures configUrl and settings are available

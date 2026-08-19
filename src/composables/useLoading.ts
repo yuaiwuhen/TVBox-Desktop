@@ -71,6 +71,14 @@ export function useLoading() {
       task.error = error;
       task.message = error;
       task.stage = 'error';
+      // Auto-hide after 3 seconds (red error toast)
+      setTimeout(() => {
+        task.visible = false;
+        tasks.delete(id);
+        if (currentTask.value?.id === id) {
+          currentTask.value = tasks.size > 0 ? Array.from(tasks.values())[0] : null;
+        }
+      }, 3000);
     }
   }
 

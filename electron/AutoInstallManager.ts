@@ -163,7 +163,20 @@ export class AutoInstallManager {
       });
 
       if (this.currentPlatform === PlatformType.WINDOWS) {
-        const status = await muMuManager.ensureRunning({ installApk: true });
+        const status = await muMuManager.ensureRunning(
+          { installApk: true },
+          (message, percent, stage) => {
+            this.sendProgress({
+              status:
+                stage === 'error'
+                  ? InstallStatus.ERROR
+                  : InstallStatus.INSTALLING,
+              message,
+              progress: percent,
+              error: stage === 'error' ? message : undefined,
+            });
+          },
+        );
         if (status.serviceReady) {
           this.sendProgress({
             status: InstallStatus.SUCCESS,
@@ -245,7 +258,20 @@ export class AutoInstallManager {
   async ensureEmulatorRunning(): Promise<void> {
     if (this.currentPlatform !== PlatformType.WINDOWS) return;
     try {
-      const result = await muMuManager.ensureRunning({ installApk: false });
+      const result = await muMuManager.ensureRunning(
+        { installApk: false },
+        (message, percent, stage) => {
+          this.sendProgress({
+            status:
+              stage === 'error'
+                ? InstallStatus.ERROR
+                : InstallStatus.INSTALLING,
+            message,
+            progress: percent,
+            error: stage === 'error' ? message : undefined,
+          });
+        },
+      );
       console.log(
         result.running && result.serviceReady
           ? '[AutoInstallManager] Emulator + service verified running'

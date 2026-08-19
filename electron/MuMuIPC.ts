@@ -80,12 +80,32 @@ export function registerMuMuIPC(): void {
         ...partial,
       });
 
+    const emitProgress = (message: string, progress: number, stage: string) => {
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('install:progress', {
+          status:
+            stage === 'error'
+              ? 'error'
+              : stage === 'ready'
+                ? 'success'
+                : 'installing',
+          message,
+          progress,
+          error: stage === 'error' ? message : undefined,
+        });
+      }
+    };
+
     try {
       startPayload({ message: '正在启动 MuMu 模拟器...' });
-      const status = await muMuManager.ensureRunning({ installApk: true });
+      const status = await muMuManager.ensureRunning(
+        { installApk: true },
+        emitProgress,
+      );
       broadcastStatus(win, status);
       return status;
     } catch (e: any) {
+      emitProgress('MuMu 启动失败', 0, 'error');
       const status: MuMuStatusPayload = {
         installed: true,
         running: false,
@@ -103,6 +123,21 @@ export function registerMuMuIPC(): void {
 
   ipcMain.handle('mumu:installApp', async (): Promise<MuMuStatusPayload> => {
     const win = BrowserWindow.getAllWindows()[0] || null;
+    const emitProgress = (message: string, progress: number, stage: string) => {
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('install:progress', {
+          status:
+            stage === 'error'
+              ? 'error'
+              : stage === 'ready'
+                ? 'success'
+                : 'installing',
+          message,
+          progress,
+          error: stage === 'error' ? message : undefined,
+        });
+      }
+    };
     try {
       broadcastStatus(win, {
         installed: true,
@@ -113,7 +148,10 @@ export function registerMuMuIPC(): void {
         instances: [],
         message: '正在安装 Spider 应用...',
       });
-      const status = await muMuManager.ensureRunning({ installApk: true });
+      const status = await muMuManager.ensureRunning(
+        { installApk: true },
+        emitProgress,
+      );
       broadcastStatus(win, status);
       return status;
     } catch (e: any) {
