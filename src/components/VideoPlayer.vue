@@ -1949,12 +1949,6 @@ defineExpose({
 
           <!-- Right: action buttons -->
           <div class="flex items-center gap-1 shrink-0">
-            <!-- Subtitle toggle -->
-            <button class="vp-icon-btn" :class="{ active: subtitleEnabled }" @click="toggleSubtitle" title="字幕">
-              <el-icon :size="20">
-                <Document />
-              </el-icon>
-            </button>
             <!-- Subtitle search -->
             <button v-if="showSubtitleSearch" class="vp-icon-btn" @click="onSearchSubtitleClick" title="搜索字幕">
               <el-icon :size="20">
@@ -1965,6 +1959,13 @@ defineExpose({
             <button class="vp-icon-btn" :class="{ active: danmuEnabled }" @click="toggleDanmu" title="弹幕">
               <el-icon :size="20">
                 <ChatDotRound />
+              </el-icon>
+            </button>
+            <!-- Danmu settings -->
+            <button class="vp-icon-btn" :class="{ active: showDanmuSettings }"
+              @click="showDanmuSettings = !showDanmuSettings" title="弹幕设置">
+              <el-icon :size="20">
+                <Setting />
               </el-icon>
             </button>
             <!-- Lock screen -->
@@ -2093,13 +2094,6 @@ defineExpose({
                 </template>
               </el-dropdown>
 
-              <!-- Danmu settings -->
-              <button class="vp-icon-btn" :class="{ active: showDanmuSettings }"
-                @click="showDanmuSettings = !showDanmuSettings" title="弹幕设置">
-                <el-icon :size="20">
-                  <Setting />
-                </el-icon>
-              </button>
 
               <!-- Audio track dropdown -->
               <el-dropdown @command="switchAudioTrack" trigger="click">
@@ -2516,7 +2510,7 @@ defineExpose({
 
 .vp-volume-slider {
   position: absolute;
-  right: calc(100% + 6px);
+  left: calc(100% + 6px);
   top: 50%;
   transform: translateY(-50%);
   width: 0;
@@ -2528,6 +2522,7 @@ defineExpose({
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   border: var(--glass-border);
+  z-index: 5;
   transition: width 200ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1)),
               padding 200ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
 }
