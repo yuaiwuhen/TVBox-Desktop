@@ -461,6 +461,10 @@ const initPlayer = async () => {
       const onLoadedMetadata = () => {
         console.log('[VideoPlayer-hevc] ✅ 直链视频 metadata 加载成功');
         console.log(`[VideoPlayer-hevc] resumeProgress=${props.resumeProgress}s`);
+        // 直链（MP4/MKV 等）也刷新音轨/字幕列表：
+        // - 有 TVBox audio/sub 外挂轨 → 列出；
+        // - 没有 → 兜底"默认音轨"，保证音轨至少可选。
+        refreshHlsTracks();
         if (props.resumeProgress > 0) {
           const startPos = Math.max(props.resumeProgress, skipIntro.value);
           console.log(`[VideoPlayer-hevc] 跳转到 ${startPos}s 开始播放`);

@@ -1525,8 +1525,11 @@ export const useAppStore = defineStore('app', () => {
         return list;
       };
       currentAudioUrls.value = toMediaList((result as any).audio);
+      // 兼容 `sub` / `subtitle` / `subs`（部分 jar 如夸克网盘用复数 `subs`）
       currentSubtitleUrls.value = toMediaList(
-        (result as any).sub ?? (result as any).subtitle,
+        (result as any).sub ??
+          (result as any).subtitle ??
+          (result as any).subs,
       );
 
       if (currentVod.value) {
