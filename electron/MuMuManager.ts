@@ -142,13 +142,66 @@ export class MuMuManager {
 
   private async runAdb(args: string[], timeoutMs = 20000): Promise<string> {
     if (!this.adbExe) throw new Error('adb.exe not located');
-    const cmd = `"${this.adbExe}" ${args.join(' ')}`;
-    const { stdout, stderr } = await execAsync(cmd, {
-      timeout: timeoutMs,
-      windowsHide: true,
-      maxBuffer: 4 * 1024 * 1024,
-    });
-    return (stdout || '') + (stderr || '');
+    const doRun = (a: string[]) => {
+      const cmd = `"${this.adbExe}" ${a.join(' ')}`;
+      return execAsync(cmd, {
+        timeout: timeoutMs,
+        windowsHide: true,
+        maxBuffer: 4 * 1024 * 1024,
+      });
+    };
+    try {
+      const { stdout, stderr } = await doRun(args);
+      return (stdout || '') + (stderr || '');
+    } catch (err: any) {
+      const msg = `${err?.message || ''} ${err?.stderr || ''}`;
+      // 多个设备/模拟器在线时，adb 需要 -s <serial> 指定目标设备。
+      // 通过 MuMuManager.exe adb -v <index> 获取目标实例的连接串后重试。
+      if (/more than one device|more than one emulator/i.test(msg)) {
+        console.warn('[MuMuManager] multiple adb devices detected, retrying with -s');
+        const serial = await this.resolveAdbSerial();
+        if (serial) {
+          const { stdout, stderr } = await doRun(['-s', serial, ...args]);
+          return (stdout || '') + (stderr || '');
+        }
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Resolve the target MuMu instance's adb connection string.
+   *
+   * `MuMuManager.exe adb -v <index>` prints the instance's adb address.
+   * Output format varies: may be `127.0.0.1:16384`, or just a port number.
+   * MuMu 12 adb ports are dynamic: 0号 16384, 每多开 +32，端口被占用则 +1.
+   *
+   * Returns e.g. `127.0.0.1:16384`; null if resolution fails.
+   */
+  private async resolveAdbSerial(index = this.targetIndex): Promise<string | null> {
+    try {
+      const out = await this.runManager(['adb', '-v', String(index)], 15000);
+      const t = out.trim();
+      if (!t) return null;
+      // 1) 完整连接串：127.0.0.1:port 或 emulator-N
+      const full = t.match(
+        /\b(\d{1,3}(?:\.\d{1,3}){3}:\d+|emulator-\d+)\b/,
+      );
+      if (full) {
+        console.log(`[MuMuManager] target adb serial: ${full[1]}`);
+        return full[1];
+      }
+      // 2) 纯端口号 → 拼成 127.0.0.1:port
+      const port = t.match(/\b(\d{4,5})\b/);
+      if (port) {
+        const serial = `127.0.0.1:${port[1]}`;
+        console.log(`[MuMuManager] target adb serial (port): ${serial}`);
+        return serial;
+      }
+    } catch (e) {
+      console.warn('[MuMuManager] resolveAdbSerial failed:', (e as Error).message);
+    }
+    return null;
   }
 
   /** List VM instances (probes info -v 0..n until an error occurs). */
@@ -259,16 +312,28 @@ export class MuMuManager {
   }
 
   /**
-   * Wait until `adb devices` shows a connected emulator (the MuMu bundled adb
-   * auto-discovers the running VM, but right after MuMu boots the adb device
-   * may still be "offline"/absent for a few seconds).
+   * Wait until the target MuMu instance's adb device is online.
+   *
+   * When multiple devices/emulators are attached, we must target the specific
+   * MuMu instance — not just "any device". Resolve the target serial first,
+   * then wait for it to appear as `device` (not offline/absent).
    */
   private async waitForAdbDevice(timeoutMs = 60000): Promise<boolean> {
+    const serial = await this.resolveAdbSerial();
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       try {
         const out = await this.runAdb(['devices'], 10000);
-        if (/device\b/.test(out) && !/offline\b/.test(out)) {
+        if (serial) {
+          // 目标 serial 必须在线
+          const line = out
+            .split('\n')
+            .find((l) => l.trim().startsWith(serial));
+          if (line && /device\b/.test(line) && !/offline\b/.test(line)) {
+            return true;
+          }
+        } else if (/device\b/.test(out) && !/offline\b/.test(out)) {
+          // 无法解析目标 serial（例如 MuMuManager 命令异常）时退化为任意设备
           return true;
         }
       } catch {
