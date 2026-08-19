@@ -11,7 +11,14 @@ export default defineConfig({
     },
   },
   plugins: [
-    vue(),
+    vue({
+      template: {
+        compilerOptions: {
+          // movi-player 是 WebComponent 自定义元素，不需要 Vue 解析为组件
+          isCustomElement: (tag: string) => tag === 'movi-player',
+        },
+      },
+    }),
     tailwindcss(),
     electron([
       {

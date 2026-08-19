@@ -419,7 +419,7 @@ import { ArrowLeft, Star, StarFilled, Film, Loading, Avatar, WarningFilled } fro
 import { useAppStore } from '../store/app'
 import { Database } from '../core/Database'
 import { SubtitleSearch, type SubtitleSearchResult } from '../core/SubtitleSearch'
-import VideoPlayer from '../components/VideoPlayer.vue'
+import VideoPlayer from '../components/MoviPlayer.vue'
 import { processImageUrl } from '../core/models'
 
 const route = useRoute()
@@ -434,6 +434,7 @@ const sortOrder = ref<'asc' | 'desc'>('asc')
 const quickSearchLoading = ref(false)
 const activeEpisodeGroup = ref(0)
 const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
+// 播放器对外方法：MoviPlayer 通过 defineExpose 暴露 loadSubtitleContent
 const subtitleSearchVisible = ref(false)
 const subtitleSearchResults = ref<SubtitleSearchResult[]>([])
 const subtitleSearchLoading = ref(false)
