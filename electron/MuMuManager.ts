@@ -183,6 +183,18 @@ export class MuMuManager {
       const out = await this.runManager(['adb', '-v', String(index)], 15000);
       const t = out.trim();
       if (!t) return null;
+      // 0) JSON 格式（实测 MuMuManager v6.5.1.0）：
+      //    {"adb_host":"127.0.0.1","adb_port":16384}
+      try {
+        const json = JSON.parse(t);
+        if (json.adb_host && json.adb_port) {
+          const serial = `${json.adb_host}:${json.adb_port}`;
+          console.log(`[MuMuManager] target adb serial (json): ${serial}`);
+          return serial;
+        }
+      } catch {
+        // not JSON, fall through
+      }
       // 1) 完整连接串：127.0.0.1:port 或 emulator-N
       const full = t.match(
         /\b(\d{1,3}(?:\.\d{1,3}){3}:\d+|emulator-\d+)\b/,
@@ -446,20 +458,21 @@ export class MuMuManager {
     }
   }
 
-  /** Start the SpiderHttpService foreground service. */
+  /**
+   * Start the SpiderHttpService.
+   *
+   * 注意：SpiderHttpService 在 AndroidManifest 中为 android:exported="false"，
+   * 从 adb shell 用 `am start-foreground-service` / `am startservice` 直接启动
+   * 会报 `Requires permission not exported from uid`，无法启动。
+   * 正确方式：启动 exported=true 的 MainActivity（有 launcher intent），
+   * 其 onCreate 会调用 SpiderHttpService.startService(this) 拉起服务。
+   */
   async startService(): Promise<void> {
-    console.log('[MuMuManager] Starting SpiderHttpService...');
-    try {
-      await this.runAdb(
-        ['shell', 'am', 'start-foreground-service', 'com.tvbox.spiderserver/.SpiderHttpService'],
-        15000,
-      );
-    } catch {
-      await this.runAdb(
-        ['shell', 'am', 'startservice', 'com.tvbox.spiderserver/.SpiderHttpService'],
-        15000,
-      );
-    }
+    console.log('[MuMuManager] Starting MainActivity (spawns SpiderHttpService)...');
+    await this.runAdb(
+      ['shell', 'am', 'start', '-n', 'com.tvbox.spiderserver/.MainActivity'],
+      15000,
+    );
   }
 
   /** Wait until the spider HTTP API responds to /health. */
