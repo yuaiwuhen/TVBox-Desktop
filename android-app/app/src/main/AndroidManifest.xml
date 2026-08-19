@@ -8,12 +8,15 @@
     <!-- jar 配置中心扫码需要获取本机 IP 拼接 pushinfo/wexconfig URL -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
-    <!-- 存储权限。注意：Android 13+ 对 targetSdk 33+ 的应用，
-         WRITE_EXTERNAL_STORAGE 已被废弃，jar 每次扫码都 requestPermissions
-         会弹权限窗打断宿主 Activity，导致 jar 拿不到前台 Activity 而 NPE。
-         故不声明 WRITE_EXTERNAL_STORAGE，jar 请求未声明权限会被静默拒绝，
-         不弹窗。 -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <!-- 存储权限：一律不声明。
+         本服务所有 jar/缓存文件均存放于应用内部缓存目录
+         (getCacheDir()/jar)，无需访问公共存储。
+         Android 13+ 对 targetSdk 33+ 的应用，WRITE_EXTERNAL_STORAGE 已废弃；
+         且 jar 每次扫码都 requestPermissions(READ/WRITE_EXTERNAL_STORAGE)
+         会弹系统授权窗打断宿主 Activity，导致 jar 拿不到前台 Activity 而 NPE，
+         接口也拿不到数据。
+         因此不声明任何存储权限，jar 请求未声明权限会被系统静默拒绝，不弹窗。 -->
+    <!-- (不声明 READ/WRITE_EXTERNAL_STORAGE) -->
 
     <!-- 前台服务 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
