@@ -99,6 +99,23 @@ const audioTracksInfo = ref<string[]>([]);
 const subtitleMenuItems = ref<{ id: string; label: string; active: boolean }[]>([]);
 const audioMenuItems = ref<{ id: string; label: string; active: boolean }[]>([]);
 
+// ==================== 画面比例 / 跳过片头片尾 / 应用全屏 / 更多 ====================
+const aspectRatio = ref(localStorage.getItem('tvbox_scale_type') || 'default');
+const aspectRatios = [
+  { label: '默认', value: 'default' },
+  { label: '16:9', value: '16:9' },
+  { label: '4:3', value: '4:3' },
+  { label: '填充', value: 'fill' },
+  { label: '原始', value: 'original' },
+  { label: '裁剪', value: 'crop' },
+];
+const timeStep = ref(Number(localStorage.getItem('tvbox_time_step') || '10'));
+const skipIntro = ref(Number(localStorage.getItem('tvbox_skip_intro') || '0'));
+const skipOutro = ref(Number(localStorage.getItem('tvbox_skip_outro') || '0'));
+const skipIndicator = ref('');
+const isAppFullscreen = ref(false);
+const showMorePanel = ref(false);
+
 // ==================== 弹幕 ====================
 const loadDanmu = async (url: string) => {
   try {
@@ -228,6 +245,22 @@ const onTimeUpdate = (e: any) => {
   duration.value = el?.duration || 0;
   emit('progress', currentTime.value, duration.value);
   if (danmuEnabled.value) renderDanmu(currentTime.value);
+
+  // 自动跳过片尾 → 触发下一集
+  if (skipOutro.value > 0 && duration.value > 0 && props.hasNext &&
+    currentTime.value + skipOutro.value >= duration.value) {
+    emit('next');
+    skipOutro.value = 0;
+    localStorage.setItem('tvbox_skip_outro', '0');
+  }
+  // 跳过提示
+  if (skipIntro.value > 0 && currentTime.value > 2 && currentTime.value < skipIntro.value) {
+    skipIndicator.value = '跳过片头';
+  } else if (skipOutro.value > 0 && duration.value > 0 && currentTime.value + skipOutro.value >= duration.value) {
+    skipIndicator.value = '跳过片尾';
+  } else {
+    skipIndicator.value = '';
+  }
 };
 
 // wasm 引擎打开失败后 movi-player 会自动回退到 native/hlsjs 引擎继续播放，
@@ -368,6 +401,9 @@ const MOV_SEARCH_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" heig
 const MOV_AUDIO_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/></svg>';
 const MOV_SUBTITLE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="5" rx="2"/><path d="M7 12h4"/><path d="M15 12h2"/><path d="M7 15h2"/><path d="M15 15h2"/></svg>';
 const MOV_DANMU_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-6a2 2 0 0 1-2-2v-2"/><path d="M6 13h4"/><path d="M6 17h4"/></svg>';
+const MOV_NEXT_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
+const MOV_MORE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>';
+const MOV_APPFS_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>';
 
 let controlsRegistered = false;
 const registerMoviControls = (el: any) => {
@@ -413,6 +449,34 @@ const registerMoviControls = (el: any) => {
     active: danmuEnabled.value,
     onSelect: (active: boolean) => setDanmu(active),
   });
+  // 下一集
+  if (props.hasNext) {
+    el.addControl({
+      id: 'movi-next',
+      placement: 'bar',
+      title: '下一集',
+      icon: MOV_NEXT_ICON,
+      onSelect: () => emit('next'),
+    });
+  }
+  // 更多设置（片头/片尾跳过·画面比例·步长）
+  el.addControl({
+    id: 'movi-more',
+    placement: 'bar',
+    title: '更多设置',
+    icon: MOV_MORE_ICON,
+    onSelect: () => { showMorePanel.value = !showMorePanel.value; },
+  });
+  // 应用全屏（整个窗口铺满）
+  el.addControl({
+    id: 'movi-appfs',
+    placement: 'bar',
+    title: '应用全屏',
+    icon: MOV_APPFS_ICON,
+    toggle: true,
+    active: isAppFullscreen.value,
+    onSelect: (active: boolean) => toggleAppFullscreen(active),
+  });
 };
 
 // 选择状态变化时同步到 movi 控件栏（高亮当前项）
@@ -427,6 +491,42 @@ const syncMoviControlValues = () => {
     items: subtitleMenuItems.value.map((m) => ({ id: m.id, label: m.label })),
     value: subtitleMenuItems.value.find((m) => m.active)?.id ?? '',
   });
+};
+
+// ==================== 画面比例 / 跳过 / 应用全屏 ====================
+const applyVideoFit = (mode: string) => {
+  const el = mpRef.value;
+  if (!el) return;
+  switch (mode) {
+    case '16:9': el.style.objectFit = 'contain'; el.style.aspectRatio = '16 / 9'; break;
+    case '4:3': el.style.objectFit = 'contain'; el.style.aspectRatio = '4 / 3'; break;
+    case 'fill': el.style.objectFit = 'fill'; el.style.aspectRatio = ''; break;
+    case 'original': el.style.objectFit = 'none'; el.style.aspectRatio = ''; break;
+    case 'crop': el.style.objectFit = 'cover'; el.style.aspectRatio = ''; break;
+    default: el.style.objectFit = 'contain'; el.style.aspectRatio = ''; break;
+  }
+};
+const changeAspectRatio = (mode: string) => {
+  aspectRatio.value = mode;
+  localStorage.setItem('tvbox_scale_type', mode);
+  applyVideoFit(mode);
+};
+const setTimeStep = (step: number) => {
+  timeStep.value = step;
+  localStorage.setItem('tvbox_time_step', String(step));
+};
+const toggleSkipIntro = () => {
+  skipIntro.value = skipIntro.value > 0 ? 0 : Math.floor(currentTime.value);
+  localStorage.setItem('tvbox_skip_intro', String(skipIntro.value));
+};
+const toggleSkipOutro = () => {
+  const left = duration.value > 0 ? duration.value - currentTime.value : 0;
+  skipOutro.value = skipOutro.value > 0 ? 0 : Math.floor(left);
+  localStorage.setItem('tvbox_skip_outro', String(skipOutro.value));
+};
+const toggleAppFullscreen = (force?: boolean) => {
+  isAppFullscreen.value = force ?? !isAppFullscreen.value;
+  document.body.style.overflow = isAppFullscreen.value ? 'hidden' : '';
 };
 
 // ==================== 初始化 ====================
@@ -448,6 +548,8 @@ const initPlayer = () => {
   } else {
     customElements.whenDefined('movi-player').then(() => registerMoviControls(el));
   }
+  // 应用已保存的画面比例
+  applyVideoFit(aspectRatio.value);
   if (props.poster) el.poster = props.poster;
   if (props.title) el.title = props.title;
   // 引擎优先级：MKV/HEVC/AV1 等原生内核不支持的格式用 wasm 解析；
@@ -568,6 +670,13 @@ watch(danmuEnabled, (on) => {
     el.updateControl('movi-danmu', { active: on });
   }
 });
+// 应用全屏状态同步到 movi 控件栏的开关按钮
+watch(isAppFullscreen, (on) => {
+  const el = mpRef.value;
+  if (el && typeof el.updateControl === 'function') {
+    el.updateControl('movi-appfs', { active: on });
+  }
+});
 
 // ==================== Mount ====================
 onMounted(() => {
@@ -593,7 +702,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="playerContainer" class="video-player-wrapper relative w-full h-full bg-black select-none">
+  <div ref="playerContainer" :class="{ 'app-fullscreen': isAppFullscreen }" class="video-player-wrapper relative w-full h-full bg-black select-none">
     <!-- movi-player 元素（自带完整 UI，不派发 ready 事件，由 onMounted 初始化） -->
     <movi-player ref="mpRef" class="w-full h-full block"></movi-player>
 
@@ -624,6 +733,33 @@ onUnmounted(() => {
       </button>
     </div>
 
+    <!-- 更多设置面板 -->
+    <div v-if="showMorePanel"
+      class="absolute bottom-16 right-4 z-[60] w-56 rounded-lg border border-white/10 bg-black/85 p-3 text-sm text-white shadow-xl backdrop-blur">
+      <div class="mb-1 text-white/60">画面比例</div>
+      <el-select :model-value="aspectRatio" @change="changeAspectRatio" size="small" class="mb-3 w-full">
+        <el-option v-for="r in aspectRatios" :key="r.value" :label="r.label" :value="r.value" />
+      </el-select>
+      <div class="mb-1 text-white/60">快进/快退步长</div>
+      <el-select :model-value="String(timeStep)" @change="(v: string) => setTimeStep(Number(v))" size="small" class="mb-3 w-full">
+        <el-option v-for="s in [5, 10, 15, 20, 25, 30]" :key="s" :label="s + 's'" :value="String(s)" />
+      </el-select>
+      <button class="mb-1 w-full rounded px-2 py-1.5 text-left hover:bg-white/10"
+        :style="{ color: skipIntro > 0 ? 'var(--color-primary)' : '' }" @click="toggleSkipIntro">
+        片头跳过 {{ skipIntro > 0 ? skipIntro + 's' : '关' }}
+      </button>
+      <button class="w-full rounded px-2 py-1.5 text-left hover:bg-white/10"
+        :style="{ color: skipOutro > 0 ? 'var(--color-primary)' : '' }" @click="toggleSkipOutro">
+        片尾跳过 {{ skipOutro > 0 ? skipOutro + 's' : '关' }}
+      </button>
+    </div>
+
+    <!-- 跳过提示 -->
+    <div v-if="skipIndicator"
+      class="pointer-events-none absolute left-1/2 top-16 z-40 -translate-x-1/2 rounded bg-black/70 px-3 py-1 text-sm text-white">
+      {{ skipIndicator }}
+    </div>
+
     <!-- 调试信息（字幕/音轨轨列表） -->
     <div v-if="subtitleTracksInfo.length > 0"
       class="absolute top-12 right-4 z-40 pointer-events-none text-[11px] text-white/80 bg-black/50 rounded px-2 py-1 max-w-[300px]">
@@ -650,5 +786,13 @@ onUnmounted(() => {
 }
 .vp-icon-btn:hover {
   background: rgba(255, 255, 255, 0.25);
+}
+/* 应用全屏：整个播放器窗口铺满视口（区别于 movi 自带的 element 全屏） */
+.video-player-wrapper.app-fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 9999;
 }
 </style>
