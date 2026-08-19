@@ -252,6 +252,11 @@ const sitePopoverVisible = ref(false)
 const siteDropdownRef = ref<HTMLElement | null>(null)
 const dropdownPos = reactive({ top: 0, left: 0 })
 
+// 点击下拉框外部时关闭源选择面板（供 v-click-outside 指令调用）
+const closeSitePopover = () => {
+  sitePopoverVisible.value = false
+}
+
 // Navigation active state helper
 function isNavActive(item: { path: string }) {
   if (item.path === '/') return route.path === '/' || route.name === 'detail'
