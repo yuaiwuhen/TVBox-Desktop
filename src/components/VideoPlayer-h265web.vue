@@ -255,6 +255,7 @@ import { ref, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import axios from 'axios'
 import { SubtitleEngine, type SubtitleCue } from '../core/SubtitleEngine'
 import { DanmuEngine, type DanmuItem } from '../core/DanmuEngine'
+import { checkReplaceProxy, getSpiderApiBaseUrl, getLocalProxy } from '../core/ConfigParser'
 
 // h265web.js PRO全局类型声明
 declare const H265webjsPlayer: any
@@ -953,7 +954,26 @@ function adjustSubtitleDelay(delta: number) {
 // --- Danmu ---
 async function loadDanmu(url: string) {
   try {
-    const resp = await axios.get(url, { responseType: 'text', timeout: 10000 })
+    // JAR-internal proxy URLs (proxy:// or 127.0.0.1:9978) must reach the
+    // Android API base first (adb forward) — mirroring Android DefaultConfig.
+    // All other feeds go through the local /proxy?do=danmu endpoint so the
+    // renderer gets a unified CORS-free, UA/Referer-tagged response.
+    const target = checkReplaceProxy(url)
+    const isAndroidProxy =
+      target.startsWith(getSpiderApiBaseUrl()) ||
+      target.includes('/proxy?') ||
+      target.startsWith('proxy://')
+    let finalUrl = target
+    if (!isAndroidProxy) {
+      let origin = ''
+      try {
+        origin = new URL(target).origin
+      } catch {
+        /* ignore */
+      }
+      finalUrl = `${getLocalProxy()}/proxy?do=danmu&url=${encodeURIComponent(target)}${origin ? `&referer=${encodeURIComponent(origin + '/')}` : ''}`
+    }
+    const resp = await axios.get(finalUrl, { responseType: 'text', timeout: 10000 })
     danmuEngine.load(resp.data)
     danmuEnabled.value = true
     danmuEngine.setEnabled(true)

@@ -73,24 +73,35 @@
       <header class="h-[52px] shrink-0 flex items-center justify-between px-5"
         style="background: var(--color-bg-glass); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border-bottom: var(--color-border);">
         <div class="flex items-center gap-3">
-          <!-- Source Selector -->
-          <el-popover placement="bottom-start" trigger="click" :width="240">
-            <template #reference>
-              <button class="flex items-center gap-2 px-3 py-1.5 transition-colors duration-150 hover:bg-[var(--color-bg-elevated)]"
-                style="color: var(--color-primary); border-radius: var(--radius-sm, 6px);">
-                <span class="text-[13px] font-medium whitespace-nowrap">{{ activeSiteName || '选择源' }}</span>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--color-primary)"><path d="M6 9l6 6 6-6"/></svg>
-              </button>
-            </template>
-            <div class="max-h-64 overflow-auto">
-              <div v-for="site in store.sites" :key="site.key"
-                class="flex items-center gap-2 px-3 py-2 cursor-pointer text-[13px] rounded transition-colors duration-150"
-                :style="{ color: site.key === store.activeSiteKey ? 'var(--color-primary)' : 'var(--color-text-secondary)', background: site.key === store.activeSiteKey ? 'var(--color-primary-soft)' : 'transparent' }"
-                @click="onSiteChange(site.key)">
-                {{ site.name }}
+          <!-- Source Selector (home tab only) -->
+          <div v-if="route.name === 'home'" class="relative">
+            <button class="site-selector-ref flex items-center gap-2 px-3 py-1.5 transition-colors duration-150 hover:bg-[var(--color-bg-elevated)]"
+              style="color: var(--color-primary); border-radius: var(--radius-sm, 6px);"
+              @click.stop="toggleSitePopover($event)">
+              <span class="text-[13px] font-medium whitespace-nowrap">{{ activeSiteName || '选择源' }}</span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--color-primary)"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <!-- 自定义下拉面板：3 列 grid，点击外部或选择源后关闭。
+                 用 <Teleport to="body"> 渲染，避免被 header 的 backdrop-filter
+                 stacking context 截断 z-index；top/left 由 JS 计算 reference 位置 -->
+            <Teleport to="body">
+              <div v-if="sitePopoverVisible" ref="siteDropdownRef"
+                class="site-selector-dropdown"
+                :style="{ top: dropdownPos.top + 'px', left: dropdownPos.left + 'px' }"
+                v-click-outside="closeSitePopover">
+                <div class="site-selector-grid">
+                  <div v-for="site in store.sites" :key="site.key"
+                    class="site-selector-item"
+                    :class="{ 'site-selector-item-active': site.key === store.activeSiteKey }"
+                    :title="site.name"
+                    @click="onSiteChange(site.key)">
+                    {{ site.name }}
+                  </div>
+                  <div v-if="store.sites.length === 0" class="site-selector-empty">暂无源</div>
+                </div>
               </div>
-            </div>
-          </el-popover>
+            </Teleport>
+          </div>
           <!-- Source Count Badge -->
           <span v-if="store.sites.length > 0"
             class="inline-flex items-center justify-center px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap"
@@ -116,6 +127,17 @@
             </div>
           </el-popover>
         </div>
+        <!-- Global Search Button (Ctrl+K) -->
+        <button
+          class="flex items-center gap-2 px-3 py-1.5 transition-colors duration-150 hover:bg-[var(--color-bg-elevated)]"
+          style="color: var(--color-text-secondary); border-radius: var(--radius-sm, 6px);"
+          @click="goGlobalSearch"
+        >
+          <el-icon :size="14"><Search /></el-icon>
+          <span class="text-[13px] whitespace-nowrap">搜索</span>
+          <kbd class="text-[11px] px-1.5 py-0.5 font-mono hidden sm:inline-block"
+            style="background: var(--color-bg-elevated); color: var(--color-text-tertiary); border-radius: 4px; border: 1px solid var(--color-border);">Ctrl K</kbd>
+        </button>
         <!-- Time Display (theme color) -->
         <span class="text-[12px] tabular-nums whitespace-nowrap font-medium" style="color: var(--color-primary)">{{ currentTime }}</span>
       </header>
@@ -201,7 +223,7 @@
 <script setup lang="ts">
 import LoadingToast from './components/LoadingToast.vue'
 import MuMuSetupGuide from './components/MuMuSetupGuide.vue'
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAppStore } from './store/app'
@@ -222,6 +244,13 @@ const router = useRouter()
 const store = useAppStore()
 const sidebarExpanded = ref(true)
 const currentTime = ref('')
+
+// Source selector popover
+const sitePopoverRef = ref()
+const sitePopoverVisible = ref(false)
+// Teleport 模式下下拉框的位置由 reference 按钮的 getBoundingClientRect 算出
+const siteDropdownRef = ref<HTMLElement | null>(null)
+const dropdownPos = reactive({ top: 0, left: 0 })
 
 // Navigation active state helper
 function isNavActive(item: { path: string }) {
@@ -350,6 +379,7 @@ updateTime()
 timeTimer = setInterval(updateTime, 30000)
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onGlobalKeyDown)
   if (timeTimer) clearInterval(timeTimer)
   if (msgPollTimer) clearInterval(msgPollTimer)
   document.getElementById('__msg_close_all__')?.remove()
@@ -553,12 +583,80 @@ onMounted(async () => {
     console.warn('[App] Failed to register IPC listeners:', e)
   }
 
+  // Global search shortcut: Ctrl/Cmd + K
+  window.addEventListener('keydown', onGlobalKeyDown)
+
+})
+
+function onGlobalKeyDown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault()
+    goGlobalSearch()
+  }
+}
+
+function goGlobalSearch() {
+  if (route.name === 'search') {
+    // Already on the search page — focus the input instead
+    const input = document.querySelector<HTMLInputElement>(
+      'input[placeholder*="搜索电影"]',
+    )
+    input?.focus()
+    input?.select()
+    return
+  }
+  router.push('/search')
+}
+
+const toggleSitePopover = (ev?: Event) => {
+  if (sitePopoverVisible.value) {
+    sitePopoverVisible.value = false
+    return
+  }
+  const target = (ev?.currentTarget as HTMLElement) || document.querySelector('.site-selector-ref')
+  if (target) {
+    const rect = target.getBoundingClientRect()
+    dropdownPos.top = rect.bottom + 6
+    dropdownPos.left = rect.left
+  }
+  sitePopoverVisible.value = true
+}
+
+// 点击外部关闭源选择下拉框。
+// 用 capture 阶段的 document 监听，确保能捕获到事件（即使 target 上冒泡被
+// stopPropagation 拦截也能触发）。忽略点击触发按钮（.site-selector-ref）和
+// 下拉面板内部的情况——它们分别由 toggleSitePopover 和 onSiteChange 处理。
+const vClickOutside = {
+  mounted(el: HTMLElement, binding: any) {
+    el._clickOutsideHandler = (ev: MouseEvent) => {
+      const t = ev.target as Node
+      if (!t) return
+      // 点击下拉面板内部不关闭
+      if (el.contains(t)) return
+      // 点击触发按钮不关闭（由 toggleSitePopover 的 .stop 处理开关）
+      if ((t as HTMLElement).closest && (t as HTMLElement).closest('.site-selector-ref')) return
+      binding.value()
+    }
+    document.addEventListener('click', el._clickOutsideHandler, true)
+  },
+  unmounted(el: HTMLElement) {
+    document.removeEventListener('click', el._clickOutsideHandler, true)
+  },
+}
+
+// 离开首页时确保关闭源选择下拉框
+watch(() => route.name, () => {
+  if (route.name !== 'home') {
+    sitePopoverVisible.value = false
+  }
 })
 
 const onSiteChange = (val: string) => {
   const wasSameSite = store.activeSiteKey === val
   console.log(`[App] onSiteChange: val=${val}, wasSameSite=${wasSameSite}, currentActiveSiteKey=${store.activeSiteKey}`)
   store.setActiveSite(val)
+  // 点击后关闭源选择下拉框（纯受控模式）
+  sitePopoverVisible.value = false
   if (route.name === 'detail') {
     router.push('/')
   }
@@ -885,6 +983,63 @@ const onSiteChange = (val: string) => {
 .fade-text-enter-from,
 .fade-text-leave-to {
   opacity: 0;
+}
+
+/* Source selector — dropdown panel (teleported to body) */
+.site-selector-dropdown {
+  position: fixed;
+  z-index: 10000;
+  /* 宽度由 grid auto-fit + minmax 控制；3 列自适应，最长源名决定每列宽度 */
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+/* Source selector — 3-column adaptive grid. Each column is wide enough to fit
+   the longest source name (auto-fit minmax), so names never get truncated. */
+.site-selector-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(140px, max-content));
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.site-selector-item {
+  padding: 7px 10px;
+  font-size: 12.5px;
+  line-height: 1.3;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: all 0.15s;
+}
+
+.site-selector-item:hover {
+  border-color: var(--color-primary-border);
+  color: var(--color-primary);
+}
+
+.site-selector-item-active {
+  background: var(--color-primary-soft) !important;
+  color: var(--color-primary) !important;
+  border-color: var(--color-primary) !important;
+  font-weight: 500;
+}
+
+.site-selector-empty {
+  grid-column: 1 / -1;
+  padding: 16px;
+  text-align: center;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
 }
 
 /* Navigation items — left border indicator style per design */

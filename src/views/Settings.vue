@@ -98,17 +98,31 @@
                 <path d="M6 9l6 6 6-6"/>
               </svg>
             </div>
-            <div v-show="!sourceListCollapsed" class="flex flex-wrap gap-2">
-              <el-tag
-                v-for="site in store.sites"
-                :key="site.key"
-                :type="site.key === store.activeSiteKey ? 'primary' : 'info'"
-                :effect="site.key === store.activeSiteKey ? 'dark' : 'plain'"
-                class="cursor-pointer"
-                @click="store.setActiveSite(site.key)"
-              >
-                {{ site.name }}
-              </el-tag>
+            <div v-show="!sourceListCollapsed">
+              <!-- 源搜索 -->
+              <div v-if="store.sites.length > 8" class="mb-3">
+                <el-input
+                  v-model="sourceSearch"
+                  placeholder="搜索源名称 / 接口 / 域名..."
+                  size="small"
+                  clearable
+                  class="settings-input"
+                  :prefix-icon="Search"
+                />
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <el-tag
+                  v-for="site in filteredSites"
+                  :key="site.key"
+                  :type="site.key === store.activeSiteKey ? 'primary' : 'info'"
+                  :effect="site.key === store.activeSiteKey ? 'dark' : 'plain'"
+                  class="cursor-pointer"
+                  @click="store.setActiveSite(site.key)"
+                >
+                  {{ site.name }}
+                </el-tag>
+                <span v-if="filteredSites.length === 0" class="text-xs py-1" style="color: var(--color-text-tertiary)">没有匹配的源</span>
+              </div>
             </div>
           </div>
         </div>
@@ -135,17 +149,31 @@
               <path d="M6 9l6 6 6-6"/>
             </svg>
           </div>
-          <div v-show="!sourceListCollapsed" class="flex flex-wrap gap-2">
-            <el-tag
-              v-for="site in store.sites"
-              :key="site.key"
-              :type="site.key === store.activeSiteKey ? 'primary' : 'info'"
-              :effect="site.key === store.activeSiteKey ? 'dark' : 'plain'"
-              class="cursor-pointer"
-              @click="store.setActiveSite(site.key)"
-            >
-              {{ site.name }}
-            </el-tag>
+          <div v-show="!sourceListCollapsed">
+            <!-- 源搜索 -->
+            <div v-if="store.sites.length > 8" class="mb-3">
+              <el-input
+                v-model="sourceSearch"
+                placeholder="搜索源名称 / 接口 / 域名..."
+                size="small"
+                clearable
+                class="settings-input"
+                :prefix-icon="Search"
+              />
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <el-tag
+                v-for="site in filteredSites"
+                :key="site.key"
+                :type="site.key === store.activeSiteKey ? 'primary' : 'info'"
+                :effect="site.key === store.activeSiteKey ? 'dark' : 'plain'"
+                class="cursor-pointer"
+                @click="store.setActiveSite(site.key)"
+              >
+                {{ site.name }}
+              </el-tag>
+              <span v-if="filteredSites.length === 0" class="text-xs py-1" style="color: var(--color-text-tertiary)">没有匹配的源</span>
+            </div>
           </div>
         </div>
       </section>
@@ -536,6 +564,30 @@
               <span class="text-[13px]">文档</span>
             </a>
           </div>
+          <!-- Keyboard shortcuts -->
+          <div style="border-top: 1px solid var(--color-border)"></div>
+          <div class="mt-1">
+            <span class="block text-[13px] mb-3" style="color: var(--color-text-secondary)">快捷键</span>
+            <div class="flex flex-col gap-2.5">
+              <div class="flex items-center justify-between">
+                <span class="text-[13px]" style="color: var(--color-text-tertiary)">全局搜索</span>
+                <span class="flex items-center gap-1">
+                  <kbd class="shortcut-key">Ctrl</kbd>
+                  <span style="color: var(--color-text-tertiary)">+</span>
+                  <kbd class="shortcut-key">K</kbd>
+                </span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-[13px]" style="color: var(--color-text-tertiary)">当前页聚焦搜索</span>
+                <span class="flex items-center gap-1">
+                  <kbd class="shortcut-key">Ctrl</kbd>
+                  <span style="color: var(--color-text-tertiary)">+</span>
+                  <kbd class="shortcut-key">K</kbd>
+                  <span style="color: var(--color-text-tertiary)">(搜索页)</span>
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -559,6 +611,19 @@ const inputUrl = ref('')
 const configLoading = ref(false)
 const configUrlHistory = ref<string[]>([])
 const sourceListCollapsed = ref(false)
+const sourceSearch = ref('')
+
+// 源列表过滤（名称/域名/接口关键字），支持高亮与快速定位
+const filteredSites = computed(() => {
+  const q = sourceSearch.value.trim().toLowerCase()
+  if (!q) return store.sites
+  return store.sites.filter((s) => {
+    const name = (s.name || '').toLowerCase()
+    const api = (s.api || '').toLowerCase()
+    const key = (s.key || '').toLowerCase()
+    return name.includes(q) || api.includes(q) || key.includes(q)
+  })
+})
 
 // Preset config URLs — curated from web-shared TVBox configs.
 // Each preset is verified to load JAR + have working csp_ sources.
@@ -1096,6 +1161,22 @@ async function webdavRestore() {
 
 .settings-card:hover {
   box-shadow: 0 0 20px var(--color-primary-glow);
+}
+
+.shortcut-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 22px;
+  padding: 0 7px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-bottom-width: 2px;
+  border-radius: 6px;
 }
 
 .settings-input {

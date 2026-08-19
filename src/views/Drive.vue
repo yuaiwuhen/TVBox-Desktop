@@ -152,7 +152,10 @@
             </button>
           </div>
           <div v-if="drives.length === 0" class="drive-empty">
-            点击上方按钮添加网盘
+            <div class="drive-empty-icon">
+              <el-icon :size="22"><FolderOpened /></el-icon>
+            </div>
+            <p>点击上方按钮<br />添加网盘</p>
           </div>
         </nav>
       </div>
@@ -171,8 +174,33 @@
             </div>
           </template>
           <template v-else-if="activeDriveIdx < 0">
-            <div class="flex items-center justify-center h-full py-20" style="color: var(--color-text-tertiary)">
-              <p>选择网盘后浏览文件</p>
+            <div class="flex flex-col items-center justify-center h-full py-20" style="color: var(--color-text-tertiary)">
+              <div class="drive-empty-icon drive-empty-icon-lg mb-4">
+                <el-icon :size="40"><FolderOpened /></el-icon>
+              </div>
+              <p class="text-sm mb-1" style="color: var(--color-text-secondary)">还没有选择网盘</p>
+              <p class="text-xs mb-8">支持 WebDAV 和本地文件夹，添加后可在线播放视频</p>
+              <div class="drive-steps">
+                <div class="drive-step">
+                  <span class="drive-step-num">1</span>
+                  <span class="drive-step-text">点击左侧「添加网盘」</span>
+                </div>
+                <el-icon :size="14" class="drive-step-arrow"><ArrowRight /></el-icon>
+                <div class="drive-step">
+                  <span class="drive-step-num">2</span>
+                  <span class="drive-step-text">填写 WebDAV 或本地路径</span>
+                </div>
+                <el-icon :size="14" class="drive-step-arrow"><ArrowRight /></el-icon>
+                <div class="drive-step">
+                  <span class="drive-step-num">3</span>
+                  <span class="drive-step-text">点选网盘浏览视频</span>
+                </div>
+              </div>
+              <button
+                class="px-5 h-10 mt-8 text-sm font-medium cursor-pointer border-none transition-all duration-200"
+                style="background: var(--color-primary); color: white; border-radius: var(--radius-md, 10px); box-shadow: 0 4px 16px var(--color-primary-soft)"
+                @click="showAddDrive = true"
+              >添加网盘</button>
             </div>
           </template>
           <template v-else>
@@ -239,7 +267,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Delete, Folder, VideoPlay, Loading, Plus, Close, Refresh, List, Grid, ArrowRight } from '@element-plus/icons-vue'
+import { Delete, Folder, FolderOpened, VideoPlay, Loading, Plus, Close, Refresh, List, Grid, ArrowRight } from '@element-plus/icons-vue'
 import { WebDAV } from '../core/WebDAV'
 import type { Movie } from '../core/models'
 import { useAppStore } from '../store/app'
@@ -600,10 +628,77 @@ function formatSize(bytes?: number): string {
 }
 
 .drive-empty {
-  padding: 12px;
+  padding: 24px 12px;
   font-size: 13px;
   text-align: center;
   color: var(--color-text-tertiary);
+  line-height: 1.6;
+}
+
+.drive-empty-icon {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md, 10px);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-tertiary);
+}
+
+.drive-empty-icon-lg {
+  width: 84px;
+  height: 84px;
+  border-radius: var(--radius-lg, 14px);
+}
+
+/* Onboarding steps */
+.drive-steps {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.drive-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.drive-step-num {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-soft);
+  border-radius: 50%;
+}
+
+.drive-step-text {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.drive-step-arrow {
+  color: var(--color-text-disabled);
+}
+
+@media (max-width: 640px) {
+  .drive-steps {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .drive-step-arrow {
+    transform: rotate(90deg);
+  }
 }
 
 /* File Area */

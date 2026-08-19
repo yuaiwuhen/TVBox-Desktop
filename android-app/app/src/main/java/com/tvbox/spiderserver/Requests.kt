@@ -23,6 +23,41 @@ data class HomeContentRequest(
     val filter: Boolean = false
 )
 
+/**
+ * Global config pushed from the PC (config JSON's `hosts`/`cors` fields).
+ * hosts: DNS override rules "host=ip" (OkDns.addAll).
+ * cors:  per-host header injection {host, header} (ResponseInterceptor.addAll).
+ */
+data class ConfigUpdateRequest(
+    val hosts: List<String> = emptyList(),
+    val cors: List<HeaderRule> = emptyList()
+)
+
+data class HeaderRule(
+    val host: String = "",
+    // header can be a JSON object {"Referer": "..."} or a string
+    val header: JsonElement? = null
+)
+
+// ── Remote desktop (config-center mirroring) ──
+
+data class RemoteTapRequest(
+    val x: Int = 0,
+    val y: Int = 0
+)
+
+data class RemoteSwipeRequest(
+    val x1: Int = 0,
+    val y1: Int = 0,
+    val x2: Int = 0,
+    val y2: Int = 0,
+    val duration: Long = 200
+)
+
+data class RemoteTextRequest(
+    val text: String = ""
+)
+
 data class CategoryContentRequest(
     val key: String = "",
     val tid: String = "",
@@ -57,4 +92,13 @@ data class DestroyRequest(
 data class SetPrefRequest(
     val key: String = "",
     val value: String = ""
+)
+
+data class DumpRequest(
+    val key: String = ""
+)
+
+data class ActionRequest(
+    val key: String = "",
+    val action: String = ""
 )

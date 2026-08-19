@@ -7,7 +7,12 @@ import com.github.catvod.crawler.SpiderNull
 import dalvik.system.DexClassLoader
 import java.io.File
 import java.net.URL
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * Spider JAR loader that mirrors FongMi/TV's official JarLoader.
@@ -24,6 +29,17 @@ import java.util.concurrent.ConcurrentHashMap
  * Context for getSharedPreferences() etc.
  */
 class SpiderManager {
+    companion object {
+        private const val TAG = "SpiderManager"
+        // SharedPreferences file name. JAR spiders read via:
+        //   Init.context().getSharedPreferences("tvbox_prefs", 0)
+        private const val PREFS_NAME = "tvbox_prefs"
+
+        /** 进程内单例，供 QrHostActivity 触发扫码时调用 */
+        @Volatile
+        var instance: SpiderManager? = null
+    }
+
     private val jarCache: ConcurrentHashMap<String, File> = ConcurrentHashMap()
     private val loaders: ConcurrentHashMap<String, DexClassLoader> = ConcurrentHashMap()
     private val spiders: ConcurrentHashMap<String, Spider> = ConcurrentHashMap()
@@ -83,6 +99,25 @@ class SpiderManager {
     private var recentSpiderKey: String? = null
 
     fun getRecentSpiderKey(): String? = recentSpiderKey
+
+    /**
+     * Key of the config-center spider to use for ConfigCenterActivity.
+     *
+     * The config center must be loaded from the *config* source (api containing
+     * "Config", key containing "config"), NOT whatever spider was most recently
+     * used for playback — otherwise the activity renders a video list instead
+     * of the login/cookie entries.
+     *
+     * Returns null when no config spider is loaded. Callers should treat null
+     * as "load the config-center source on the PC side first" rather than
+     * falling back to recentSpiderKey, which would just show a video list.
+     */
+    fun getConfigCenterKey(): String? {
+        return spiders.keys.firstOrNull {
+            it.contains("csp_Config", ignoreCase = true) ||
+                it.contains("config", ignoreCase = true)
+        }
+    }
 
     private fun setRecentSpider(key: String) {
         recentSpiderKey = key
@@ -144,6 +179,24 @@ class SpiderManager {
                     } catch (e: Throwable) {
                         Log.w(TAG, "Load $spiderClassName via spiderClassLoader failed: ${e.javaClass.simpleName}: ${e.message}")
                         loadError = e
+                        // Fallback: some configs reference a wrapper class that
+                        // doesn't exist in the current JAR (e.g. WexConfigGuard),
+                        // but the JAR ships a sibling "Config" class with the
+                        // same purpose. If the requested class looks like a
+                        // config-center wrapper, try the generic "Config" class
+                        // as a fallback so the PC side still gets a working
+                        // config-center spider instead of an init error.
+                        if (className.contains("Config", ignoreCase = true)) {
+                            try {
+                                val fallback = "com.github.catvod.spider.Config"
+                                spiderInstance = spiderClassLoader.loadClass(fallback).newInstance() as? Spider
+                                if (spiderInstance != null) {
+                                    Log.i(TAG, "Loaded fallback Config class instead of $spiderClassName")
+                                }
+                            } catch (e2: Throwable) {
+                                Log.w(TAG, "Fallback Config load also failed: ${e2.message}")
+                            }
+                        }
                     }
 
                     val finalizedSpider = spiderInstance
@@ -260,11 +313,77 @@ class SpiderManager {
         // that follow (streaming video segments through the JAR proxy) route
         // to this spider.
         setRecentSpider(key)
-        return invokeSpiderMethod(
+        // Some netdisk JARs block inside playerContent when not logged in
+        // (they wait for a QR scan that only the phone UI shows). We bound
+        // the call with a timeout; on expiry we dismiss the dialog and return
+        // a "not logged in" error that the PC frontend surfaces to the user.
+        return invokeSpiderMethodWithTimeout(
             key, "playerContent",
             arrayOf(String::class.java, String::class.java, List::class.java),
-            arrayOf(flag, id, vipFlags)
+            arrayOf(flag, id, vipFlags),
+            timeoutMs = playerContentTimeoutMs
         )
+    }
+
+    /** playerContent must return within this window, otherwise the JAR is
+     *  considered blocked on a login dialog / slow netdisk request.
+     *
+     *  Why a timeout at all? Netdisk JARs (Duopan etc.) do NOT return an error
+     *  when you're not logged in — their login check spins in a
+     *  sleep(300ms) loop inside playerContent waiting for a QR-scan cookie
+     *  that only the phone UI can produce. The desktop frontend has no such
+     *  dialog, so the call would hang forever. 8s is a reasonable balance:
+     *  fast enough for the user to see a login prompt, generous enough for
+     *  normal netdisk playback to finish parsing. */
+    private val playerContentTimeoutMs = 8000L
+
+    private val spiderCallExecutor = Executors.newSingleThreadExecutor()
+
+    /**
+     * Like [invokeSpiderMethod] but bounded by [timeoutMs]. If the JAR call
+     * does not finish in time (e.g. it is blocked waiting on a QR login
+     * dialog), we dismiss any visible dialog via the Back key and return an
+     * error instead of hanging the HTTP request forever.
+     */
+    private fun invokeSpiderMethodWithTimeout(
+        key: String,
+        methodName: String,
+        paramTypes: Array<Class<*>>,
+        args: Array<Any?>,
+        timeoutMs: Long
+    ): ApiResponse {
+        val spider = spiders[key] ?: return ApiResponse.error("Spider not found: $key")
+        val task = FutureTask(Callable {
+            try {
+                val spiderClass = spider.javaClass
+                val method = spiderClass.getMethod(methodName, *paramTypes)
+                method.invoke(spider, *args) as String
+            } catch (e: Throwable) {
+                val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+                throw cause
+            }
+        })
+        spiderCallExecutor.execute(task)
+        return try {
+            val result = task.get(timeoutMs, TimeUnit.MILLISECONDS)
+            ApiResponse.success(result)
+        } catch (e: TimeoutException) {
+            task.cancel(true)
+            Log.w(TAG, "$methodName for $key timed out after ${timeoutMs}ms; closing login dialog")
+            // The JAR is likely waiting on a QR/login dialog. Press Back to
+            // dismiss it so the emulator isn't stuck on it, then tell the PC
+            // that login is required.
+            try {
+                RemotePanel.get().injectBack()
+            } catch (ignored: Throwable) {
+            }
+            ApiResponse.error("未登录网盘，请去配置中心登录对应网盘后重试")
+        } catch (e: Throwable) {
+            task.cancel(true)
+            Log.e(TAG, "$methodName timed-out call failed for $key", e)
+            val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+            ApiResponse.error("$methodName failed: ${cause.javaClass.simpleName}: ${cause.message ?: "null"}")
+        }
     }
 
     fun searchContent(key: String, keyword: String, quick: Boolean, pg: String): ApiResponse {
@@ -287,6 +406,103 @@ class SpiderManager {
             Log.e(TAG, "searchContent failed for $key", e)
             ApiResponse.error("searchContent failed: ${e.message}")
         }
+    }
+
+    /**
+     * 触发 jar 配置中心扫码并截取弹窗中的二维码。
+     *
+     * 流程：
+     *  1. 设置待扫码数据，启动 QrHostActivity；
+     *  2. QrHostActivity.onResume（前台就绪，jar 的 Init.activity() 可用）
+     *     回调 triggerScan 调 detailContent 触发 jar 弹窗；
+     *  3. QrHostActivity 周期性调用 QrCapture.captureFromWindows() 截取
+     *     Dialog 中 ImageView 的二维码 Bitmap，转 base64；
+     *  4. 返回 { qrImage, capturedAt } 供前端显示。
+     */
+    fun scanQr(key: String, ids: List<String>, timeoutMs: Long = 12000L): ApiResponse {
+        val spider = spiders[key] ?: return ApiResponse.error("Spider not found: $key")
+        QrCapture.reset()
+        QrCapture.lastEntryId = ids.firstOrNull()
+        // 1. 记录待触发数据（QrHostActivity.onResume 时消费）。
+        QrHostActivity.pendingScan = key to ids
+        try {
+            val ctx = applicationContext()
+            val intent = android.content.Intent(ctx, QrHostActivity::class.java)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            ctx.startActivity(intent)
+            Log.d(TAG, "QrHostActivity started for scan entry=$ids")
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to start QrHostActivity: ${e.message}")
+        }
+        // 2. 等待 QrHostActivity 截取二维码（onResume 后会触发弹窗并轮询捕获）。
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (QrCapture.latestBase64 != null) {
+                return ApiResponse.success(
+                    mapOf(
+                        "qrImage" to QrCapture.latestBase64!!,
+                        "capturedAt" to QrCapture.capturedAt,
+                        "entryId" to (QrCapture.lastEntryId ?: "")
+                    )
+                )
+            }
+            Thread.sleep(200)
+        }
+        return ApiResponse.error(
+            "Timed out waiting for QR dialog (windows=${QrCapture.lastWindowCount}, " +
+                "captured=${QrCapture.latestBase64 != null})"
+        )
+    }
+
+    /**
+     * 由 QrHostActivity.onResume 调用：此时 Activity 已在最前，jar 的
+     * Init.activity() 能找到前台 Activity，调用 detailContent 触发弹窗。
+     */
+    fun triggerScan(key: String, ids: List<String>) {
+        val spider = spiders[key] ?: return
+        try {
+            val spiderClass = spider.javaClass
+            val method = spiderClass.getMethod("detailContent", List::class.java)
+            method.invoke(spider, ids)
+            Log.d(TAG, "detailContent (scan trigger from QrHostActivity) sent, entry=$ids")
+        } catch (e: Throwable) {
+            Log.e(TAG, "detailContent (scan trigger from QrHostActivity) failed for $key", e)
+        }
+    }
+
+        /**
+     * 调用 jar spider 的 action(String) 接口。
+     *
+     * FongMi 点击配置中心条目（如 wex 的 quarkcookie）时调用 spider.action(id)
+     * 返回二维码/状态信息。此接口镜像该调用，供前端触发配置中心操作。
+     */
+    fun spiderAction(key: String, action: String): ApiResponse {
+        val spider = spiders[key] ?: return ApiResponse.error("Spider not found: $key")
+        return try {
+            val spiderClass = spider.javaClass
+            val method = spiderClass.getMethod("action", String::class.java)
+            val result = method.invoke(spider, action) as String
+            ApiResponse.success(result)
+        } catch (e: Throwable) {
+            Log.e(TAG, "action($action) failed for $key", e)
+            ApiResponse.error("action($action) failed: ${e.message}")
+        }
+    }
+
+    /**
+     * 查询当前二维码登录状态（供前端轮询）。
+     * 返回 { qrImage, statusText, dialogPresent, entryId, capturedAt }。
+     */
+    fun scanStatus(): ApiResponse {
+        return ApiResponse.success(
+            mapOf(
+                "qrImage" to (QrCapture.latestBase64 ?: ""),
+                "statusText" to (QrCapture.statusText ?: ""),
+                "dialogPresent" to QrCapture.dialogPresent,
+                "entryId" to (QrCapture.lastEntryId ?: ""),
+                "capturedAt" to QrCapture.capturedAt
+            )
+        )
     }
 
     fun destroy(key: String) {
@@ -345,8 +561,101 @@ class SpiderManager {
         }
     }
 
+    /** Debug endpoint: dump the spider's declared/inherited methods and try
+     *  calling proxy(Map) on the instance, its internal delegate spiders, and
+     *  the static ProxyOrigin fallback. Helps discover how config-center
+     *  (do=wexconfig) QR login works on JARs with native delegate spiders. */
+    fun dumpSpider(key: String): String {
+        val spider = spiders[key] ?: return "no spider for key $key"
+        val sb = StringBuilder()
+        try {
+            sb.append("class=").append(spider.javaClass.name).append("\n")
+            sb.append("--- declared methods ---\n")
+            spider.javaClass.declaredMethods.forEach { m ->
+                sb.append("  ").append(m.name).append(m.parameterTypes.joinToString(",", "(", ")") { it.simpleName })
+                    .append(" -> ").append(m.returnType.simpleName).append("\n")
+            }
+            sb.append("--- public methods ---\n")
+            spider.javaClass.methods.forEach { m ->
+                sb.append("  ").append(m.name).append(m.parameterTypes.joinToString(",", "(", ")") { it.simpleName })
+                    .append(" -> ").append(m.returnType.simpleName).append("\n")
+            }
+            sb.append("--- fields ---\n")
+            var fcls: Class<*>? = spider.javaClass
+            val fseen = HashSet<String>()
+            while (fcls != null) {
+                fcls.declaredFields.forEach { f ->
+                    if (!fseen.add(f.name)) return@forEach
+                    try {
+                        f.isAccessible = true
+                        val v = f.get(spider)
+                        sb.append("  ").append(f.name).append(" : ").append(f.type.simpleName)
+                            .append(" (in ").append(fcls!!.simpleName).append(") = ")
+                            .append(v?.javaClass?.name ?: "null").append("\n")
+                    } catch (e: Throwable) {
+                        sb.append("  ").append(f.name).append(" : err ").append(e.message).append("\n")
+                    }
+                }
+                fcls = fcls.superclass
+            }
+            // Try proxy(Map) on the instance and any Spider-typed delegate fields.
+            val targets = LinkedHashMap<String, Any>()
+            targets["self"] = spider
+            // Walk the full hierarchy (including inherited fields) for
+            // Spider-typed delegates (e.g. BaseSpiderGuard.oOoOoOoOoOoOoO0o).
+            var cls: Class<*>? = spider.javaClass
+            val seenFields = HashSet<String>()
+            while (cls != null) {
+                cls.declaredFields.forEach { f ->
+                    if (seenFields.add(f.name)) {
+                        try {
+                            f.isAccessible = true
+                            val v = f.get(spider)
+                            if (v is Spider) targets[f.name] = v
+                        } catch (e: Throwable) { /* ignore */ }
+                    }
+                }
+                cls = cls.superclass
+            }
+            for ((name, target) in targets) {
+                val proxyMethod = runCatching { target.javaClass.getMethod("proxy", Map::class.java) }.getOrNull()
+                    ?: continue
+                try {
+                    val r = proxyMethod.invoke(target, HashMap(mapOf("do" to "wexconfig")))
+                    val summary = when (r) {
+                        is Array<*> -> "Array<${r.size}> first=${r.firstOrNull()?.toString()?.take(80)}"
+                        else -> r?.toString()?.take(120) ?: "null"
+                    }
+                    sb.append("proxy($name) do=wexconfig -> $summary\n")
+                } catch (e: Throwable) {
+                    sb.append("proxy($name) do=wexconfig threw ${e.cause?.javaClass?.name ?: e.javaClass.name}: ${e.cause?.message ?: e.message}\n")
+                }
+            }
+        } catch (e: Throwable) {
+            sb.append("dump error: ${e.message}\n")
+        }
+        return sb.toString()
+    }
+
     private fun invokeProxy(spider: Spider, params: Map<String, String>): Any? {
         val spiderClass = spider.javaClass
+        // 0. Static com.github.catvod.spider.Proxy.proxy(Map) — the standard
+        //    TVBox /proxy entry point. JARs route do=wexconfig (config-center
+        //    web UI / QR login), do=ck probe, and playback streaming through
+        //    this static class (which calls Init.proxyInvoke — a native
+        //    method in the JAR's own .so). FongMi/TV invoke this before any
+        //    spider-instance proxy. (Our proxyLocal/proxy calls below miss it
+        //    because config-center spiders only carry a delegate spider.)
+        try {
+            val cls = spiderClass.classLoader?.loadClass("com.github.catvod.spider.Proxy")
+                ?: return null
+            val m = cls.getMethod("proxy", Map::class.java)
+            val r = m.invoke(null, params)
+            if (r != null) return r
+            Log.w(TAG, "Proxy.proxy returned null (do=${params["do"]})")
+        } catch (e: Throwable) {
+            Log.w(TAG, "Proxy.proxy failed: ${e.message}", e)
+        }
         // 1. Instance proxyLocal(Map) — spider-specific logic (encryption,
         //    CDN scheduling). Mirrors Android ApiConfig.proxyLocal().
         try {
@@ -527,6 +836,50 @@ class SpiderManager {
         }
     }
 
+    /**
+     * Push the config JSON's global `hosts` (DNS override "host=ip") and
+     * `cors` (per-host header injection {host, header}) into the JAR runtime.
+     *
+     * Mirrors FongMi/TV:
+     *   OkHttp.dns().addAll(hosts)               — OkDns DNS override
+     *   OkHttp.responseInterceptor().addAll(cors) — header injection
+     *
+     * The JAR's spider classes use com.github.catvod.net.OkHttp (provided by
+     * the catvod module), so all JAR-originated HTTP requests pick these up.
+     */
+    fun updateGlobalConfig(hosts: List<String>, cors: List<HeaderRule>): Boolean {
+        return try {
+            // DNS override rules ("host=ip") → OkDns.addAll
+            val okHttpCls = Class.forName("com.github.catvod.net.OkHttp")
+            val dnsMethod = okHttpCls.getMethod("dns")
+            val dns = dnsMethod.invoke(null)
+            val dnsAddAll = dns.javaClass.getMethod("addAll", List::class.java)
+            dnsAddAll.invoke(dns, hosts)
+            Log.i(TAG, "Hosts applied: ${hosts.size} rules")
+
+            // Per-host header injection → ResponseInterceptor.addAll(Header[]).
+            // Build the JSON array [{host, header}, ...] and let the catvod
+            // Header bean parse it (header may be an object or a string).
+            val jsonArr = com.google.gson.JsonArray()
+            for (h in cors) {
+                val obj = com.google.gson.JsonObject()
+                obj.addProperty("host", h.host)
+                obj.add("header", h.header ?: com.google.gson.JsonNull.INSTANCE)
+                jsonArr.add(obj)
+            }
+            val headers = com.github.catvod.bean.Header.arrayFrom(jsonArr)
+            val riMethod = okHttpCls.getMethod("responseInterceptor")
+            val ri = riMethod.invoke(null)
+            val riAddAll = ri.javaClass.getMethod("addAll", List::class.java)
+            riAddAll.invoke(ri, headers)
+            Log.i(TAG, "Cors applied: ${cors.size} rules")
+            true
+        } catch (e: Throwable) {
+            Log.e(TAG, "updateGlobalConfig failed", e)
+            false
+        }
+    }
+
     private fun invokeSpiderMethod(
         key: String,
         methodName: String,
@@ -555,15 +908,51 @@ class SpiderManager {
         }
     }
 
+    /**
+     * Download a spider JAR from a config `spider` URL.
+     *
+     * Config `spider` values use the TVBox convention
+     *   "<download-url>;md5;<md5-hash>"
+     * e.g. "http://host/xxx.jar;md5;c4ce8d61764f37c8f35b765bc77b4559".
+     * The `;md5;hash` suffix is NOT part of the download URL — strip it and
+     * use the hash to verify the downloaded file (and to pick the cache name).
+     * Mirrors FongMi/TV's JarLoader + Util.md5 verification.
+     */
     private fun downloadJar(jarUrl: String): File {
         Log.d(TAG, "Downloading JAR from: $jarUrl")
-        val fileName = jarUrl.substringAfterLast('/')
-        val targetFile = File("/data/data/com.tvbox.spiderserver/cache/$fileName")
-        if (!targetFile.exists()) {
-            URL(jarUrl).openStream().use { input ->
+
+        // Split "<url>;md5;<hash>" (or just "<url>")
+        val parts = jarUrl.split(";md5;", limit = 2)
+        val downloadUrl = parts[0]
+        val expectedMd5 = if (parts.size > 1) parts[1] else ""
+
+        val fileName = downloadUrl.substringAfterLast('/').ifEmpty { "spider.jar" }
+        val cacheDir = File("/data/data/com.tvbox.spiderserver/cache")
+        if (!cacheDir.exists()) cacheDir.mkdirs()
+        val targetFile = File(cacheDir, fileName)
+
+        // Cache valid when the file exists and its MD5 matches (when a hash
+        // is provided).
+        val cachedValid =
+            targetFile.exists() &&
+                (expectedMd5.isEmpty() ||
+                    com.github.catvod.utils.Util.md5(targetFile).equals(expectedMd5, ignoreCase = true))
+
+        if (!cachedValid) {
+            if (targetFile.exists()) targetFile.delete()
+            URL(downloadUrl).openStream().use { input ->
                 targetFile.outputStream().use { output -> input.copyTo(output) }
             }
-            Log.i(TAG, "JAR downloaded: ${targetFile.absolutePath}")
+            if (expectedMd5.isNotEmpty()) {
+                val actual = com.github.catvod.utils.Util.md5(targetFile)
+                if (!actual.equals(expectedMd5, ignoreCase = true)) {
+                    targetFile.delete()
+                    throw IllegalStateException("JAR MD5 mismatch: expected=$expectedMd5 actual=$actual")
+                }
+            }
+            Log.i(TAG, "JAR downloaded + verified: ${targetFile.absolutePath}")
+        } else {
+            Log.i(TAG, "JAR cache valid, reuse: ${targetFile.absolutePath}")
         }
         // Android 10+ forbids loading writable DEX files.
         if (targetFile.canWrite()) {
@@ -575,11 +964,4 @@ class SpiderManager {
 
     @Suppress("unused")
     private fun spiderNull(): Spider = SpiderNull()
-
-    companion object {
-        private const val TAG = "SpiderManager"
-        // SharedPreferences file name. JAR spiders read via:
-        //   Init.context().getSharedPreferences("tvbox_prefs", 0)
-        private const val PREFS_NAME = "tvbox_prefs"
-    }
 }

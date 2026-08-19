@@ -2,11 +2,10 @@
  * JarSpider - JAR Spider implementation for renderer process
  *
  * 使用HTTP与MuMu 模拟器内的 Spider 服务器通信
- * 替代原有的IPC + java-bridge方式
+ * 所有 jar/java 逻辑均在安卓端处理，electron 仅作为纯前端。
  */
 
 import type { ISpider } from './models';
-import { useLoading } from '../composables/useLoading';
 import { getSpiderApiBaseUrl } from './ConfigParser';
 import axios from 'axios';
 
@@ -26,13 +25,20 @@ const httpClient = axios.create({
  * Retry wrapper — NanoHTTPD occasionally resets connections when the
  * Android process is busy (e.g. loading DEX classes). Retry up to 3 times
  * with a short delay to ride through transient ECONNRESET / Network Error.
+ *
+ * If the connection is *refused* (ECONNREFUSED / ERR_CONNECTION_REFUSED) the
+ * spider service is unreachable — usually because the emulator was restarted
+ * and the adb `tcp:19978 -> tcp:9978` forward was dropped. In that case we
+ * ask the main process to re-establish the forward, then retry, so the app
+ * recovers automatically instead of showing a blank page / play error.
  */
 async function postWithRetry(
   endpoint: string,
   data: any,
-  retries = 3,
+  retries = 4,
 ): Promise<any> {
   let lastError: any;
+  let forwardRefreshed = false;
   for (let i = 1; i <= retries; i++) {
     try {
       return await httpClient.post(endpoint, data);
@@ -44,6 +50,40 @@ async function postWithRetry(
         msg.includes('ECONNRESET') ||
         msg.includes('socket hang up') ||
         msg.includes('Network Error');
+      const isConnRefused =
+        error.code === 'ECONNREFUSED' ||
+        msg.includes('ECONNREFUSED') ||
+        msg.includes('ERR_CONNECTION_REFUSED') ||
+        msg.includes('net::ERR_CONNECTION') ||
+        msg.includes('connection refused');
+      if (isConnRefused && !forwardRefreshed) {
+        // First connection-refused attempt: try to restore the adb forward.
+        forwardRefreshed = true;
+        console.warn(
+          `[JarSpider] POST ${endpoint} refused (${msg}) — refreshing adb forward...`,
+        );
+        try {
+          const ipc = (window as any).electronIPC;
+          if (ipc?.invoke) {
+            const result = await ipc.invoke('mumu:ensureForward');
+            console.warn(
+              `[JarSpider] mumu:ensureForward ->`,
+              result?.ok ? 'OK' : result?.error || 'unknown',
+            );
+          } else {
+            console.warn(
+              '[JarSpider] electronIPC unavailable (running in plain browser?)',
+            );
+          }
+        } catch (forwardErr: any) {
+          console.warn(
+            '[JarSpider] mumu:ensureForward threw:',
+            forwardErr?.message || forwardErr,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+        continue; // retry immediately after refreshing the forward
+      }
       if (!isConnReset || i === retries) throw error;
       console.warn(
         `[JarSpider] POST ${endpoint} attempt ${i} failed (${msg}), retrying...`,
@@ -83,17 +123,15 @@ export class JarSpider implements ISpider {
   async init(extend: string): Promise<void> {
     this.ext = extend || this.ext;
 
+    // 静默初始化：首次搜索/浏览时后台加载 jar 爬虫，不弹 toast 打扰用户。
+    // 爬虫加载是真实发生的（POST /spider/load + /spider/init），
+    // 完成后由 spiderCache 缓存，同一源不会重复加载。
     console.log('[JarSpider] init called:', {
       key: this.key,
       className: this.className,
       jarUrl: this.jarUrl,
       extPreview: this.ext.substring(0, 80),
     });
-
-    // Show loading progress
-    const loading = useLoading();
-    const taskId = `jar-${this.key}`;
-    loading.start(taskId, `加载爬虫: ${this.className}`);
 
     try {
       // Step 1: Load JAR
@@ -111,13 +149,10 @@ export class JarSpider implements ISpider {
         }
       } catch (error: any) {
         // Spider service unavailable — do NOT fall back to mock data.
-        // Surface the error so the UI can show a proper failure message
-        // instead of fake placeholder videos.
         console.error(
           '[JarSpider] Spider service not available:',
           error.message || error,
         );
-        loading.fail(taskId, `Spider服务不可用: ${error.message || error}`);
         throw error;
       }
 
@@ -138,11 +173,8 @@ export class JarSpider implements ISpider {
 
       this.initialized = true;
       console.log('[JarSpider] Initialized successfully:', this.key);
-
-      loading.finish(taskId, true);
     } catch (e) {
       console.error('[JarSpider] Init failed:', this.key, e);
-      loading.fail(taskId, e instanceof Error ? e.message : String(e));
       throw e;
     }
   }
@@ -277,6 +309,15 @@ export class JarSpider implements ISpider {
           // crash-prone sources will likely crash again — libhoudini limit).
           this.initialized = false;
           return '{}';
+        }
+        // Netdisk login-required errors returned by the Android side (e.g.
+        // "未登录网盘，请去配置中心登录对应网盘后重试" when playerContent
+        // times out waiting on the JAR's QR dialog) must reach the UI so the
+        // user sees WHY the video won't play. Return a JSON with a "msg" field
+        // that loadPlay surfaces verbatim.
+        if (method === 'playerContent' && /未登录|请登录|需登录|未授权|cookie/i.test(errMsg)) {
+          console.warn(`[JarSpider] ${method} login-required:`, errMsg);
+          return JSON.stringify({ url: '', msg: errMsg });
         }
         console.warn(
           `[JarSpider] ${method} failed:`,

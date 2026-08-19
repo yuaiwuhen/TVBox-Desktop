@@ -15,7 +15,28 @@ class SpiderHttpServer(port: Int = DEFAULT_PORT) : NanoHTTPD(port) {
     private val gson: Gson = Gson()
     private val spiderManager: SpiderManager = SpiderManager()
 
+    init {
+        SpiderManager.instance = spiderManager
+    }
+
     override fun serve(session: IHTTPSession): Response {
+        // NanoHTTPD decodes the POST body with the charset declared in the
+        // "Content-Type" header, defaulting to US-ASCII when none is present
+        // (see ContentType.getEncoding()). Our desktop frontend sends JSON
+        // bodies with UTF-8 bytes and "Content-Type: application/json" (no
+        // charset), so Chinese characters in keys/flags (e.g. "夸克原画#01")
+        // got mangled into US-ASCII garbage. Patching the header here makes
+        // NanoHTTPD decode the body as UTF-8, fixing Chinese flag matching
+        // (Quark / UC / etc.) in the spider JARs.
+        if (session.method == NanoHTTPD.Method.POST) {
+            val headers = session.headers
+            val ct = headers["content-type"] ?: headers["Content-Type"] ?: ""
+            if (ct.isNotEmpty() && !ct.contains("charset", ignoreCase = true)) {
+                val base = ct.substringBefore(";").trim()
+                headers["content-type"] = "$base; charset=UTF-8"
+                headers["Content-Type"] = "$base; charset=UTF-8"
+            }
+        }
         return runBlocking {
             try {
                 handleSpiderRequest(session)
@@ -32,7 +53,8 @@ class SpiderHttpServer(port: Int = DEFAULT_PORT) : NanoHTTPD(port) {
 
     private fun handleSpiderRequest(session: IHTTPSession): Response {
         val uri = session.uri
-        Log.d(TAG, "Request: ${session.method} $uri")
+        val query = session.queryParameterString
+        Log.d(TAG, "Request: ${session.method} $uri${if (query.isNullOrEmpty()) "" else "?$query"}")
         return when {
             uri == "/health" -> handleHealth()
             uri == "/spider/load" -> handleLoad(session)
@@ -41,13 +63,30 @@ class SpiderHttpServer(port: Int = DEFAULT_PORT) : NanoHTTPD(port) {
             uri == "/spider/homeVideoContent" -> handleHomeVideoContent(session)
             uri == "/spider/categoryContent" -> handleCategoryContent(session)
             uri == "/spider/detailContent" -> handleDetailContent(session)
+            uri == "/spider/scan" -> handleScan(session)
+            uri == "/spider/scan-status" -> handleScanStatus(session)
+            uri == "/spider/action" -> handleAction(session)
             uri == "/spider/playerContent" -> handlePlayerContent(session)
             uri == "/spider/searchContent" -> handleSearchContent(session)
             uri == "/spider/destroy" -> handleDestroy(session)
+            uri == "/spider/config" -> handleConfigUpdate(session)
             uri == "/spider/setPref" -> handleSetPref(session)
             uri == "/spider/resolve" -> handleResolve(session)
+            uri == "/spider/dump" -> handleDump(session)
             uri == "/proxy" -> handleProxy(session)
+            uri == "/goproxy" -> handleGoProxy(session)
             uri == "/image" -> handleImageProxy(session)
+            uri == "/platform" -> handlePlatform(session)
+            uri == "/action" -> handleConfigAction(session)
+            // ── Remote desktop (config-center mirroring) ──
+            uri == "/remote/screen" -> handleRemoteScreen(session)
+            uri == "/remote/tap" -> handleRemoteTap(session)
+            uri == "/remote/swipe" -> handleRemoteSwipe(session)
+            uri == "/remote/text" -> handleRemoteText(session)
+            uri == "/remote/back" -> handleRemoteBack(session)
+            uri == "/remote/home" -> handleRemoteHome(session)
+            uri == "/remote/open-config" -> handleRemoteOpenConfig(session)
+            uri == "/remote/test-dialog" -> handleTestDialog(session)
             else -> newJsonResponse(ApiResponse.error("Unknown endpoint: $uri"))
         }
     }
@@ -110,6 +149,34 @@ class SpiderHttpServer(port: Int = DEFAULT_PORT) : NanoHTTPD(port) {
         return newJsonResponse(result)
     }
 
+    /**
+     * 触发 jar 配置中心扫码弹窗并截取二维码，返回给桌面前端。
+     * 请求体: { key, ids: ["addQuark"] }
+     */
+    private fun handleScan(session: IHTTPSession): Response {
+        val request = parseBody(session, DetailContentRequest::class.java)
+        val result = spiderManager.scanQr(request.key, request.ids)
+        return newJsonResponse(result)
+    }
+
+    /**
+     * 调用 jar 的 action(String) 接口（FongMi 点击配置中心条目时的入口）。
+     * 请求体: { key, action: "quarkcookie" }
+     */
+    private fun handleAction(session: IHTTPSession): Response {
+        val request = parseBody(session, ActionRequest::class.java)
+        val result = spiderManager.spiderAction(request.key, request.action)
+        return newJsonResponse(result)
+    }
+
+    /**
+     * 查询当前二维码登录状态（前端轮询）。无请求体。
+     */
+    private fun handleScanStatus(session: IHTTPSession): Response {
+        val result = spiderManager.scanStatus()
+        return newJsonResponse(result)
+    }
+
     private fun handlePlayerContent(session: IHTTPSession): Response {
         val request = parseBody(session, PlayerContentRequest::class.java)
         val result = spiderManager.playerContent(request.key, request.flag, request.id, request.vipFlags)
@@ -126,6 +193,107 @@ class SpiderHttpServer(port: Int = DEFAULT_PORT) : NanoHTTPD(port) {
         val request = parseBody(session, DestroyRequest::class.java)
         spiderManager.destroy(request.key)
         return newJsonResponse(ApiResponse.success("Spider destroyed: ${request.key}"))
+    }
+
+    /**
+     * /spider/config — push the config JSON's global `hosts` (DNS override
+     * "host=ip") and `cors` (per-host header injection) rules into the JAR
+     * runtime. Mirrors FongMi/TV: OkHttp.dns().addAll(hosts) +
+     * OkHttp.responseInterceptor().addAll(cors).
+     */
+    private fun handleConfigUpdate(session: IHTTPSession): Response {
+        val request = parseBody(session, ConfigUpdateRequest::class.java)
+        try {
+            spiderManager.updateGlobalConfig(request.hosts, request.cors)
+            return newJsonResponse(ApiResponse.success("Config applied: ${request.hosts.size} hosts, ${request.cors.size} cors"))
+        } catch (e: Throwable) {
+            Log.e(TAG, "updateGlobalConfig failed", e)
+            return newJsonResponse(ApiResponse.error("updateGlobalConfig failed: ${e.message}"))
+        }
+    }
+
+    // ── Remote desktop (config-center mirroring) ─────────────────────────
+    //
+    // These endpoints let the PC (incl. Linux/Mac — just fill in the
+    // app's IP:port) operate the on-device config center directly, like a
+    // remote desktop. They are completely adb-free:
+    //   GET  /remote/screen          → JPEG base64 of the current screen
+    //   POST /remote/tap   {x,y}     → inject a tap at screen coords
+    //   POST /remote/swipe {x1,y1,x2,y2,duration}
+    //   POST /remote/text  {text}    → inject text into the focused field
+    //   POST /remote/back            → press BACK
+
+    private fun handleRemoteScreen(session: IHTTPSession): Response {
+        val scale = session.parameters.get("scale")?.firstOrNull()?.toFloatOrNull() ?: 0f
+        val b64 = RemotePanel.get().captureScreenshot(scale)
+        if (b64 == null) {
+            return newJsonResponse(ApiResponse.error("screenshot failed"))
+        }
+        // 返回设备真实分辨率，供 PC 端将镜像点击坐标换算为设备绝对坐标
+        val dm = android.content.res.Resources.getSystem().displayMetrics
+        return newJsonResponse(
+            ApiResponse.success(
+                mapOf(
+                    "image" to b64,
+                    "deviceWidth" to dm.widthPixels,
+                    "deviceHeight" to dm.heightPixels,
+                )
+            )
+        )
+    }
+
+    private fun handleRemoteTap(session: IHTTPSession): Response {
+        val request = parseBody(session, RemoteTapRequest::class.java)
+        val ok = RemotePanel.get().injectTap(request.x, request.y)
+        return newJsonResponse(if (ok) ApiResponse.success("tap ${request.x},${request.y}") else ApiResponse.error("tap failed"))
+    }
+
+    private fun handleRemoteSwipe(session: IHTTPSession): Response {
+        val request = parseBody(session, RemoteSwipeRequest::class.java)
+        val ok = RemotePanel.get().injectSwipe(request.x1, request.y1, request.x2, request.y2, request.duration)
+        return newJsonResponse(if (ok) ApiResponse.success("swipe ok") else ApiResponse.error("swipe failed"))
+    }
+
+    private fun handleRemoteText(session: IHTTPSession): Response {
+        val request = parseBody(session, RemoteTextRequest::class.java)
+        val ok = RemotePanel.get().injectText(request.text)
+        return newJsonResponse(if (ok) ApiResponse.success("text ok") else ApiResponse.error("text failed"))
+    }
+
+    private fun handleRemoteBack(session: IHTTPSession): Response {
+        val ok = RemotePanel.get().injectBack()
+        return newJsonResponse(if (ok) ApiResponse.success("back ok") else ApiResponse.error("back failed"))
+    }
+
+    private fun handleTestDialog(session: IHTTPSession): Response {
+        val ok = RemotePanel.get().showTestDialog()
+        return newJsonResponse(if (ok) ApiResponse.success("test dialog shown") else ApiResponse.error("failed"))
+    }
+
+    private fun handleRemoteHome(session: IHTTPSession): Response {
+        val ok = RemotePanel.get().injectHome()
+        return newJsonResponse(if (ok) ApiResponse.success("home ok") else ApiResponse.error("home failed"))
+    }
+
+    /**
+     * /remote/open-config — 让安卓端打开配置中心界面（ConfigCenterActivity）。
+     * PC 端切换/进入配置中心站点时调用，使 RemoteMirror 镜像显示的是
+     * 配置中心界面（登录二维码、网盘授权、cookie 设置等），而不是安卓
+     * 端 MainActivity 首页。
+     */
+    private fun handleRemoteOpenConfig(session: IHTTPSession): Response {
+        return try {
+            val ctx = SpiderApplication.get()
+            if (ctx == null) {
+                newJsonResponse(ApiResponse.error("application context unavailable"))
+            } else {
+                ConfigCenterActivity.start(ctx)
+                newJsonResponse(ApiResponse.success("config center opened"))
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "open-config failed", e)
+            newJsonResponse(ApiResponse.error("open config failed: ${e.message}"))
+        }
     }
 
     /**
@@ -169,6 +337,12 @@ class SpiderHttpServer(port: Int = DEFAULT_PORT) : NanoHTTPD(port) {
         }
         val result = spiderManager.resolve(map)
         return newJsonResponse(result)
+    }
+
+    private fun handleDump(session: IHTTPSession): Response {
+        val request = parseBody(session, DumpRequest::class.java)
+        val text = spiderManager.dumpSpider(request.key)
+        return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, text)
     }
 
     /**
@@ -235,6 +409,133 @@ class SpiderHttpServer(port: Int = DEFAULT_PORT) : NanoHTTPD(port) {
         result.headers.forEach { (k, v) -> resp.addHeader(k, v) }
         addCors(resp)
         return resp
+    }
+
+    /**
+     * /goproxy — unified proxy for the netdisk Go proxy that runs INSIDE the
+     * emulator (Quark's goproxy-android-amd64 binds 127.0.0.1:7989).
+     *
+     * Netdisk JARs return playback URLs like
+     *   http://127.0.0.1:7989?url=<quark dl>&key=quark&type=quark&...
+     * The browser can't reach that internal port, so the renderer rewrites it
+     * to  /goproxy?url=<encodeURIComponent(original 7989 URL)>  on the normal
+     * spider port (19978 -> 9978). This handler forwards the request to the
+     * local goproxy and streams the response back, keeping a single forwarded
+     * port for everything.
+     */
+    private fun handleGoProxy(session: IHTTPSession): Response {
+        // NanoHTTPD already URL-decodes query params once, so `url` here is the
+        // exact JAR-generated goproxy URL (inner `url=` param still %-encoded).
+        // IMPORTANT: do NOT URLDecoder.decode again -- double-decoding turns the
+        // inner quark dl (`https%3A%2F%2F...%26filename%3D...`) into a bare URL
+        // whose `&` splits params, which makes the Go proxy reply 400/empty.
+        val target = session.parameters["url"]?.firstOrNull() ?: ""
+        if (target.isBlank()) {
+            return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "Missing url parameter")
+        }
+        Log.d(TAG, "/goproxy: target=${target.take(120)}")
+
+        // Netdisk account Cookie injected by the PC frontend.
+        //
+        // The JAR's playerContent returns a `header` object containing the
+        // account Cookie (e.g. `{"Cookie":"__pus=...;__puus=...;"}`). Quark's
+        // goproxy REQUIRES this cookie when requesting the CDN (without it the
+        // CDN answers 412 / an empty body -> DEMUXER_ERROR_COULD_NOT_OPEN).
+        // FongMi's player (ExoPlayer) sends that Cookie header directly to the
+        // goproxy URL. A browser <video> cannot attach a custom Cookie header,
+        // so the renderer appends it as `&cookie=<encoded>` and we inject it
+        // here, exactly matching FongMi's behaviour.
+        val cookieParam = session.parameters["cookie"]?.firstOrNull() ?: ""
+        if (cookieParam.isNotBlank()) {
+            Log.d(TAG, "/goproxy: attaching netdisk cookie (${cookieParam.length} chars)")
+        }
+
+        return try {
+            val conn = URL(target).openConnection() as HttpURLConnection
+            conn.connectTimeout = 15000
+            conn.readTimeout = 60000
+            conn.instanceFollowRedirects = true
+            // Forward Range / User-Agent / Referer so direct mp4 streaming,
+            // seeking and anti-leech checks work.
+            val range = session.headers["range"] ?: session.headers["Range"]
+            if (!range.isNullOrBlank()) conn.setRequestProperty("Range", range)
+            val ua = session.headers["user-agent"] ?: session.headers["User-Agent"]
+            if (!ua.isNullOrBlank()) conn.setRequestProperty("User-Agent", ua)
+            // NOTE: we intentionally do NOT forward the browser's Referer
+            // header. Quark's goproxy replies with HTTP 200 + empty body when a
+            // request carries a foreign Referer (it builds its own correct Quark
+            // request headers internally, including anti-leech). Forwarding it
+            // caused DEMUXER_ERROR_COULD_NOT_OPEN.
+            // Inject the netdisk cookie from the URL param. On Android,
+            // HttpURLConnection accepts an explicit "Cookie" header via
+            // setRequestProperty (mirrors FongMi attaching it from the player).
+            if (cookieParam.isNotBlank()) {
+                conn.setRequestProperty("Cookie", cookieParam)
+            }
+            conn.doInput = true
+
+            val status = conn.responseCode
+            val mime = conn.contentType ?: "application/octet-stream"
+            val contentLength = conn.contentLength
+            val contentRange = conn.getHeaderField("Content-Range")
+            val acceptRanges = conn.getHeaderField("Accept-Ranges")
+            Log.d(TAG, "/goproxy: status=$status mime=$mime contentLength=$contentLength contentRange=$contentRange acceptRanges=$acceptRanges")
+            val input = if (status in 200..299) conn.inputStream else conn.errorStream
+                ?: java.io.ByteArrayInputStream(ByteArray(0))
+            // Stream the upstream response directly to the client -- the Go proxy
+            // serves the video body (hundreds of MB), so buffering with
+            // readBytes() would OOM / hit readTimeout. Wrap the stream so the
+            // HttpURLConnection is disconnected when NanoHTTPD closes it.
+            val stream = DisconnectingInputStream(input, conn)
+            val len = conn.contentLength
+            val resp = if (len >= 0) {
+                newFixedLengthResponse(
+                    Response.Status.lookup(status) ?: Response.Status.OK,
+                    mime,
+                    stream,
+                    len.toLong(),
+                )
+            } else {
+                newChunkedResponse(
+                    Response.Status.lookup(status) ?: Response.Status.OK,
+                    mime,
+                    stream,
+                )
+            }
+            // Forward 206 Content-Range for seeking.
+            conn.getHeaderField("Content-Range")?.let { resp.addHeader("Content-Range", it) }
+            conn.getHeaderField("Accept-Ranges")?.let { resp.addHeader("Accept-Ranges", it) }
+            addCors(resp)
+            resp
+        } catch (e: Throwable) {
+            Log.w(TAG, "/goproxy failed: ${e.message}")
+            newFixedLengthResponse(
+                Response.Status.lookup(502) ?: Response.Status.INTERNAL_ERROR,
+                MIME_PLAINTEXT,
+                "goproxy error: ${e.message ?: e.javaClass.simpleName}",
+            )
+        }
+    }
+
+    /** InputStream that disconnects its HttpURLConnection when closed. */
+    private class DisconnectingInputStream(
+        private val delegate: java.io.InputStream,
+        private val conn: HttpURLConnection,
+    ) : java.io.InputStream() {
+        override fun read(): Int = delegate.read()
+        override fun read(b: ByteArray, off: Int, len: Int): Int = delegate.read(b, off, len)
+        override fun skip(n: Long): Long = delegate.skip(n)
+        override fun available(): Int = delegate.available()
+        override fun close() {
+            try {
+                delegate.close()
+            } finally {
+                try {
+                    conn.disconnect()
+                } catch (_: Throwable) {
+                }
+            }
+        }
     }
 
     /**
@@ -361,6 +662,31 @@ class SpiderHttpServer(port: Int = DEFAULT_PORT) : NanoHTTPD(port) {
             Log.w(TAG, "/image fetch failed: ${e.message}")
             newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Image fetch failed: ${e.message}")
         }
+    }
+
+    /**
+     * /platform — 配置中心 jar 的平台探测端点（如 wex jar 请求
+     * /platform?type=androidbro）。实现 jar 配置中心协议，返回 200 让
+     * jar 继续其扫码/弹窗流程。探测阶段返回空，后续按 jar 需求填充。
+     */
+    private fun handlePlatform(session: IHTTPSession): Response {
+        val type = session.parameters["type"]?.firstOrNull() ?: ""
+        Log.d(TAG, "/platform: type=$type (query=${session.queryParameterString})")
+        return newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "ok")
+    }
+
+    /**
+     * /action — 配置中心 jar 的操作端点（如 wex jar 请求
+     * /action?do=refresh&type=fuckunet）。探测阶段返回空 JSON，
+     * 后续按 jar 协议实现扫码/登录流程。
+     */
+    private fun handleConfigAction(session: IHTTPSession): Response {
+        val params = HashMap<String, String>()
+        for ((k, v) in session.parameters) {
+            params[k] = v.firstOrNull() ?: ""
+        }
+        Log.d(TAG, "/action: $params")
+        return newFixedLengthResponse(Response.Status.OK, MIME_JSON, "{}")
     }
 
     private fun <T> parseBody(session: IHTTPSession, clazz: Class<T>): T {

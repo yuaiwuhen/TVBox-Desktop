@@ -3,6 +3,7 @@ package com.tvbox.spiderserver
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
+import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -26,6 +27,11 @@ class MainActivity : AppCompatActivity() {
 
         // 确保服务正在运行
         SpiderHttpService.startService(this)
+
+        // 配置中心入口（安卓端保底扫码登录）
+        findViewById<Button>(R.id.configCenterButton).setOnClickListener {
+            ConfigCenterActivity.start(this)
+        }
 
         // 更新状态
         updateServerStatus()
@@ -57,6 +63,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        SpiderApplication.currentActivity = this
         updateServerStatus()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (SpiderApplication.currentActivity === this) {
+            SpiderApplication.currentActivity = null
+        }
     }
 }

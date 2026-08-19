@@ -285,7 +285,6 @@
 import { ref, computed, reactive, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search, Loading, Film } from '@element-plus/icons-vue'
-import axios from 'axios'
 import { useAppStore } from '../store/app'
 import type { Movie } from '../core/models'
 import SearchResultGroup from '../components/SearchResultGroup.vue'
@@ -333,32 +332,8 @@ function clearSearchHistory() {
   saveSearchHistory([])
 }
 
-const hotWords = ref<string[]>(['热播', '电影', '电视剧', '综艺', '动漫', '纪录片', '动作', '喜剧', '科幻'])
-
-// Fetch hot words from QQ Video API
-async function fetchHotWords() {
-  try {
-    const resp = await axios.get('https://node.video.qq.com/x/api/hot_search', {
-      timeout: 5000,
-    })
-    if (resp.data?.data?.mapResult) {
-      const list = resp.data.data.mapResult['0']?.listInfo
-      if (Array.isArray(list) && list.length > 0) {
-        const words = list.slice(0, 10).map((item: any) => {
-          const title = item.title || item.name || ''
-          // Strip HTML tags
-          return title.replace(/<[^>]+>/g, '').trim()
-        }).filter((w: string) => w.length > 0)
-        if (words.length > 0) {
-          hotWords.value = words
-        }
-      }
-    }
-  } catch {
-    // Keep default hot words if API fails
-  }
-}
-fetchHotWords()
+// Built-in hot words (the external QQ Video API is deprecated and returns 404)
+const hotWords = ref<string[]>(['热播', '电影', '电视剧', '综艺', '动漫', '纪录片', '动作', '喜剧', '科幻', '爱情', '悬疑', '古装', '日剧', '韩剧', '美剧', '体育', '少儿'])
 
 const searchableSites = computed(() => store.sites.filter(s => s.searchable !== 0))
 

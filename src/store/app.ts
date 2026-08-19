@@ -1,6 +1,7 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { ref, computed } from 'vue';
-import { configParser, checkReplaceProxy } from '../core/ConfigParser';
+import axios from 'axios';
+import { configParser, checkReplaceProxy, getSpiderApiBaseUrl } from '../core/ConfigParser';
 import { spiderEngine } from '../core/SpiderEngine';
 import { ParseEngine } from '../core/ParseEngine';
 import {
@@ -43,6 +44,9 @@ export const useAppStore = defineStore('app', () => {
   const filters = ref<Record<string, FilterGroup[]>>({});
   const homeVodList = ref<Movie[]>([]);
   const homeLoading = ref(false);
+  // 首页加载失败时的具体错误信息（spider init 失败 / JAR 404 / 源不可用等）。
+  // 为空表示无错误。用于替代"暂无数据"这种泛化提示，让用户知道真正原因。
+  const homeError = ref('');
   const activeCategory = ref(''); // 当前选中的分类
   const filterValues = ref<Record<string, string>>({}); // 当前选中的筛选值
 
@@ -63,6 +67,8 @@ export const useAppStore = defineStore('app', () => {
   const currentPlayFlag = ref('');
   const currentPlayIndex = ref(0);
   const currentDanmuUrl = ref('');
+  const currentAudioUrls = ref<string[]>([]);
+  const currentSubtitleUrls = ref<string[]>([]);
   const playLoading = ref(false);
   const currentEpisodes = ref<{ name: string; url: string }[]>([]);
   const resumeProgress = ref(0);
@@ -128,6 +134,7 @@ export const useAppStore = defineStore('app', () => {
     }
     return found;
   });
+
   const activeParse = computed(() => {
     if (!defaultParseName.value && parses.value.length > 0)
       return parses.value[0];
@@ -300,6 +307,7 @@ export const useAppStore = defineStore('app', () => {
             sites.value = [];
           }
         }
+        pushGlobalConfig();
         return true;
       }
 
@@ -330,11 +338,36 @@ export const useAppStore = defineStore('app', () => {
       }
 
       clearSubConfigs();
+      pushGlobalConfig();
       return true;
     } catch (e) {
       console.error('loadConfig failed:', e);
       return false;
     }
+  }
+
+  /**
+   * Push the config JSON's global `hosts`/`cors` rules to the Android JAR
+   * runtime (/spider/config). Fire-and-forget: best-effort, never blocks the
+   * UI. This mirrors FongMi/TV applying OkHttp.dns().addAll(hosts) +
+   * responseInterceptor().addAll(cors) when a config loads.
+   */
+  function pushGlobalConfig() {
+    const hosts = configParser.getHosts();
+    const cors = configParser.getCors();
+    if (hosts.length === 0 && cors.length === 0) return;
+    const base = getSpiderApiBaseUrl();
+    axios
+      .post(`${base}/spider/config`, {
+        hosts,
+        cors: cors.map((c) => ({ host: c.host, header: c.header })),
+      })
+      .then((res) => {
+        console.log('[Store] pushGlobalConfig:', res.data?.data || res.data);
+      })
+      .catch((e) => {
+        console.warn('[Store] pushGlobalConfig failed:', e.message || e);
+      });
   }
 
   function setActiveSite(key: string) {
@@ -374,6 +407,63 @@ export const useAppStore = defineStore('app', () => {
     if (parse) configParser.setDefaultParse(parse);
   }
 
+  /**
+   * Switch to the config center site (csp_Config) so the user can log into the
+   * netdisk (夸克 / UC盘 / 百度 …) that a source requires for playback.
+   * Returns true if a config center source was found and activated.
+   */
+  function goToConfigCenter(): boolean {
+    const configSite = sites.value.find(
+      (s) =>
+        (s.key || '').toLowerCase() === 'config' ||
+        (s.api || '').toLowerCase().includes('config'),
+    );
+    if (!configSite) return false;
+    const key = getUniqueKey(configSite);
+    if (activeSiteKey.value !== key) {
+      setActiveSite(key);
+    }
+    return true;
+  }
+
+  /**
+   * Detect whether a spider playback error means "you need to log into a
+   * netdisk first" and normalize the message to a clear, drive-accurate hint.
+   *
+   * Many netdisk-based sources (e.g. csp_Duopan / 蜡笔影视) return a hardcoded
+   * "未登录UC" / "请去配置中心设置" string regardless of which Alibaba drive the
+   * video actually lives on (夸克网盘 or UC盘). This makes the raw message
+   * misleading. We rewrite it into a generic-but-accurate login prompt and let
+   * the caller point the user at the config center.
+   */
+  function isNetdiskLoginError(msg: string): boolean {
+    if (!msg) return false;
+    return (
+      /未登录|请登录|需要登录|请先登录|登录后|未授权|请授权|请扫码|扫码登录|cookie/i.test(
+        msg,
+      )
+    );
+  }
+
+  function normalizePlayError(raw: string): string {
+    if (!raw) return '';
+    // Only rewrite messages that clearly require a netdisk login.
+    if (!isNetdiskLoginError(raw)) return raw;
+    // Sources like 蜡笔影视 (csp_Duopan) hardcode a label (often "UC") that can
+    // be wrong for the actual drive (e.g. the video is on 夸克网盘). Quark and
+    // UC are distinct Alibaba drives with separate cookie entries in the config
+    // center, so we never echo a possibly-wrong drive name back. Instead we
+    // show a clear, actionable prompt and let the config-center button take the
+    // user to the exact cookie entry they need.
+    if (/夸克|quark|pan.quark/i.test(raw)) {
+      return '未登录夸克网盘，请去配置中心登录后重试';
+    }
+    if (/uc盘|pan.uc|uc\.cn/i.test(raw)) {
+      return '未登录UC盘，请去配置中心登录后重试';
+    }
+    return '未登录网盘，请去配置中心登录对应网盘（夸克网盘 / UC盘 / 百度等）后重试';
+  }
+
   function resetHome(oldKey?: string) {
     console.log('[Store] resetHome called, oldKey:', oldKey);
     console.log('[Store] resetHome stack:', new Error().stack);
@@ -397,6 +487,8 @@ export const useAppStore = defineStore('app', () => {
       console.warn('[Store] loadHome: no active site');
       return;
     }
+    // 清空上一次的错误，重新加载
+    homeError.value = '';
 
     const apiLower = (activeSite.value.api || '').toLowerCase();
     const keyLower = (activeSite.value.key || '').toLowerCase();
@@ -632,11 +724,40 @@ export const useAppStore = defineStore('app', () => {
           }
         }
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error('[Store] loadHome failed:', e);
+      // 提炼对用户有用的错误信息：JAR 404/加载失败、spider init 失败、
+      // 服务不可达等，让首页显示具体原因而不是空白。
+      const msg = String(e?.message || e || '');
+      homeError.value = normalizeSpiderError(msg, activeSite.value);
     } finally {
       homeLoading.value = false;
     }
+  }
+
+  /**
+   * 把 spider/配置加载错误转成对用户友好的中文提示。
+   * 例如：JAR 404 → "源 JAR 已失效，请切换其他源或更新配置"；
+   * 服务不可达 → "Spider 服务未连接，请确认模拟器/服务已启动"。
+   */
+  function normalizeSpiderError(raw: string, site: any): string {
+    if (!raw) return `当前源加载失败：${site?.name || ''}`;
+    if (/Failed to load JAR|Failed to load jar/i.test(raw)) {
+      return `当前源（${site?.name || ''}）的 JAR 已失效或无法下载，请切换其他源或更换配置地址`;
+    }
+    if (/JAR reload failed/i.test(raw)) {
+      return `当前源（${site?.name || ''}）的 JAR 已失效，请切换其他源或更换配置地址`;
+    }
+    if (/spider not found|no spider for key/i.test(raw)) {
+      return `当前源（${site?.name || ''}）未成功加载爬虫，请切换其他源重试`;
+    }
+    if (/ECONNREFUSED|Failed to fetch|Network Error|网络错误/i.test(raw)) {
+      return `Spider 服务未连接，请确认模拟器和服务已启动后重试`;
+    }
+    if (/timeout|Timed out|超时/i.test(raw)) {
+      return `当前源响应超时，请切换其他源或稍后重试`;
+    }
+    return `当前源加载失败：${raw.substring(0, 200)}`;
   }
 
   // 设置当前分类
@@ -948,6 +1069,8 @@ export const useAppStore = defineStore('app', () => {
     // old video playing until loadPlay completes (seconds later).
     currentPlayUrl.value = '';
     currentDanmuUrl.value = '';
+    currentAudioUrls.value = [];
+    currentSubtitleUrls.value = [];
     currentPlayIndex.value = episodeIndex;
     if (episodes) currentEpisodes.value = episodes;
     try {
@@ -983,7 +1106,17 @@ export const useAppStore = defineStore('app', () => {
       try {
         result = JSON.parse(rawResult);
       } catch {
-        playError.value = '播放地址解析失败，可能资源已下线';
+        // Some netdisk JARs return a *plain string* instead of JSON when the
+        // user is not logged in (e.g. Quark's "未登录夸克, 请去配置中心设置").
+        // Detect that here so the PC shows a clear login prompt rather than a
+        // generic "parse failed" error.
+        const trimmed = String(rawResult || '').trim();
+        if (isNetdiskLoginError(trimmed)) {
+          playError.value = normalizePlayError(trimmed);
+          console.warn('[Store] loadPlay: spider returned plain login-required text:', trimmed);
+        } else {
+          playError.value = '播放地址解析失败，可能资源已下线';
+        }
         return;
       }
 
@@ -1101,6 +1234,26 @@ export const useAppStore = defineStore('app', () => {
         }
       }
 
+      // Netdisk sources (Quark/UC/Baidu) require the account Cookie that
+      // playerContent returns in `header`. FongMi's player attaches it to the
+      // goproxy request directly, but a browser <video>/fetch cannot send a
+      // custom Cookie header. So when the play URL was rewritten to the
+      // /goproxy endpoint, we append the cookie as a query param and the
+      // Android handler injects it into the upstream goproxy request.
+      if (result.url && result.header && /\/goproxy\?/i.test(result.url)) {
+        try {
+          const playHeader = JSON.parse(result.header) as Record<string, string>;
+          const cookie = playHeader.Cookie || playHeader.cookie || '';
+          if (cookie && !/[?&]cookie=/.test(result.url)) {
+            const sep = result.url.includes('?') ? '&' : '?';
+            result.url = result.url + sep + 'cookie=' + encodeURIComponent(cookie);
+            console.log('[Store] loadPlay: attached netdisk cookie to /goproxy URL');
+          }
+        } catch (e) {
+          console.warn('[Store] loadPlay: failed to parse header for cookie:', e);
+        }
+      }
+
       // 检查是否是 UNSUPPORTED_FORMAT 错误（由 ProxyServer 返回）
       if ((result as any).error === 'UNSUPPORTED_FORMAT') {
         console.warn(
@@ -1171,7 +1324,7 @@ export const useAppStore = defineStore('app', () => {
         // 优先使用 spider 返回的具体错误信息
         const spiderMsg = (result as any).msg || (result as any).errMsg || '';
         if (spiderMsg) {
-          playError.value = spiderMsg;
+          playError.value = normalizePlayError(spiderMsg);
         } else {
           playError.value = '视频资源已失效，请尝试其他源或稍后重试';
         }
@@ -1307,7 +1460,47 @@ export const useAppStore = defineStore('app', () => {
       } else {
         currentPlayHeader.value = {};
       }
-      currentDanmuUrl.value = (result as any).danmuUrl || '';
+      // TVBox standard JARs return the barrage URL under `danmaku`; some
+      // return it as `danmuUrl`. Accept both and normalize proxy URLs so the
+      // browser can reach them (JAR-internal loopback → adb forward).
+      let rawDanmu =
+        (result as any).danmaku || (result as any).danmuUrl || '';
+      if (rawDanmu) {
+        rawDanmu = checkReplaceProxy(String(rawDanmu));
+        // Some netdisk JARs return a *placeholder* danmu URL with an empty
+        // vodUrl= parameter (e.g. `proxy?do=danmu&vodName=...&vodIndex=...&vodUrl=`).
+        // They expect the frontend to fill in the actual play address. Do that
+        // so the danmu endpoint doesn't fail with "Missing url parameter".
+        if (
+          /do=danmu/i.test(rawDanmu) &&
+          /[?&]vodUrl=(?:$|&|#)/i.test(rawDanmu)
+        ) {
+          try {
+            const u = new URL(rawDanmu);
+            u.searchParams.set('vodUrl', result.url || currentPlayUrl.value || '');
+            rawDanmu = u.toString();
+          } catch {
+            /* keep raw */
+          }
+        }
+      }
+      currentDanmuUrl.value = rawDanmu;
+
+      // TVBox standard: `audio` = alternate audio tracks (string or array),
+      // `sub`/`subtitle` = external subtitles (string or array).
+      // Normalize each URL through the proxy rewriter.
+      const toUrlArray = (v: unknown): string[] => {
+        if (v == null) return [];
+        const arr = Array.isArray(v) ? v : String(v).split('#');
+        return arr
+          .map((u) => String(u).trim())
+          .filter((u) => u)
+          .map((u) => checkReplaceProxy(u));
+      };
+      currentAudioUrls.value = toUrlArray((result as any).audio);
+      currentSubtitleUrls.value = toUrlArray(
+        (result as any).sub ?? (result as any).subtitle,
+      );
 
       if (currentVod.value) {
         await Database.saveHistory({
@@ -1568,6 +1761,7 @@ export const useAppStore = defineStore('app', () => {
     filters,
     homeVodList,
     homeLoading,
+    homeError,
     activeCategory,
     filterValues,
     categoryVodList,
@@ -1582,6 +1776,8 @@ export const useAppStore = defineStore('app', () => {
     currentPlayFlag,
     currentPlayIndex,
     currentDanmuUrl,
+    currentAudioUrls,
+    currentSubtitleUrls,
     currentEpisodes,
     resumeProgress,
     playLoading,
@@ -1608,6 +1804,9 @@ export const useAppStore = defineStore('app', () => {
     setConfigUrl,
     loadConfig,
     setActiveSite,
+    goToConfigCenter,
+    isNetdiskLoginError,
+    normalizePlayError,
     setDefaultParse,
     setSubConfigs,
     clearSubConfigs,

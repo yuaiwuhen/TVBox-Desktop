@@ -214,6 +214,47 @@ export class AutoInstallManager {
     });
     await muMuManager.ensureRunning({ installApk: true });
   }
+
+  /**
+   * Ensure the latest locally-built APK is deployed to an already-running
+   * emulator. Called on startup even when the spider service is healthy, so a
+   * freshly built APK is always installed. Failures are non-fatal — the app
+   * keeps running with the old APK if the re-install can't complete.
+   */
+  async ensureLatestApkOnStartup(): Promise<void> {
+    if (this.currentPlatform !== PlatformType.WINDOWS) return;
+    try {
+      const ok = await muMuManager.ensureLatestApk();
+      console.log(
+        ok
+          ? '[AutoInstallManager] Latest APK deployed, service healthy'
+          : '[AutoInstallManager] APK deploy finished, service status unknown',
+      );
+    } catch (error: any) {
+      console.warn('[AutoInstallManager] Startup APK upgrade failed:', error.message);
+    }
+  }
+
+  /**
+   * Re-verify the emulator is actually running even when the spider service
+   * reported healthy. Handles the case where the MuMu process was shut down
+   * while an adb forward / service cache lingered: ensureRunning will detect
+   * the VM is down, launch it, wait for boot, re-forward ports and start the
+   * service. APK install is skipped here (handled by ensureLatestApkOnStartup).
+   */
+  async ensureEmulatorRunning(): Promise<void> {
+    if (this.currentPlatform !== PlatformType.WINDOWS) return;
+    try {
+      const result = await muMuManager.ensureRunning({ installApk: false });
+      console.log(
+        result.running && result.serviceReady
+          ? '[AutoInstallManager] Emulator + service verified running'
+          : `[AutoInstallManager] Emulator state: running=${result.running} serviceReady=${result.serviceReady}`,
+      );
+    } catch (error: any) {
+      console.warn('[AutoInstallManager] Emulator verify failed:', error.message);
+    }
+  }
 }
 
 // 导出单例

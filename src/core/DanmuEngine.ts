@@ -20,17 +20,48 @@ export class DanmuEngine {
     const items: DanmuItem[] = [];
     try {
       const data = JSON.parse(content);
-      const list = Array.isArray(data) ? data : data.data || [];
+      // Normalize the various shapes TVBox barrage APIs return:
+      //  - bare array: [{...}]
+      //  - { data: [...] }
+      //  - dandanplay: { data: { comments: [{ progress, content, color, type, cid, ... }] } }
+      //  - dandanplay v2: { comments: [...] } (or { data: [...] } with count)
+      //  - bilibili json: { data: [{ time, text, mode, color }] }
+      let list: any[] = [];
+      if (Array.isArray(data)) {
+        list = data;
+      } else if (data && typeof data === 'object') {
+        const d = data.data;
+        if (Array.isArray(d)) {
+          list = d;
+        } else if (d && Array.isArray(d.comments)) {
+          list = d.comments;
+        } else if (Array.isArray(data.comments)) {
+          list = data.comments;
+        } else if (Array.isArray(d && d.danmaku)) {
+          list = d.danmaku;
+        } else if (Array.isArray(data.danmaku)) {
+          list = data.danmaku;
+        }
+      }
       for (const item of list) {
+        if (!item || typeof item !== 'object') continue;
+        // Bilibili JSON uses "mode" (1-3 scroll / 4 bottom / 5 top); the
+        // dandanplay JSON uses "type" (1 scroll / 4 bottom / 5 top).
+        const rawType = Number(item.type ?? item.mode ?? 0);
+        // Bilibili JSON uses "time" (seconds); dandanplay uses "progress"
+        // (milliseconds). Normalize both to seconds.
+        const timeRaw = Number(item.time ?? item.progress ?? 0);
+        const time =
+          item.time !== undefined && item.time !== null
+            ? timeRaw
+            : timeRaw / 1000;
         items.push({
-          text: String(item.text || item.content || ''),
-          time:
-            Number(item.time || item.progress || 0) /
-            (item.time !== undefined && item.time > 1000 ? 1000 : 1),
-          color: normalizeColor(item.color || '#ffffff'),
-          type: Number(item.type || 0),
-          fontSize: Number(item.fontSize || item.fontsize || 24),
-          timestamp: Number(item.timestamp || 0),
+          text: String(item.text || item.content || item.message || ''),
+          time,
+          color: normalizeColor(String(item.color ?? item.colour ?? '#ffffff')),
+          type: normalizeDanmuType(rawType),
+          fontSize: Number(item.fontSize ?? item.fontsize ?? item.size ?? 24),
+          timestamp: Number(item.timestamp ?? item.midtime ?? 0),
         });
       }
     } catch {
@@ -51,12 +82,16 @@ export class DanmuEngine {
         const parts = p.split(',');
         if (parts.length < 4) continue;
 
-        const text = el.textContent || '';
+        const text = (el.textContent || '').trim();
+        if (!text) continue;
 
         items.push({
           text,
           time: parseFloat(parts[0]) || 0,
-          type: parseInt(parts[1]) || 0,
+          // Bilibili XML: mode 1/2/3 = scroll, 4 = bottom, 5 = top.
+          // dandanplay XML: type 1 = scroll, 4 = bottom, 5 = top.
+          // Normalize to our internal: 0 scroll, 1 top, 2 bottom.
+          type: normalizeDanmuType(parseInt(parts[1]) || 0),
           fontSize: parseInt(parts[2]) || 24,
           color: decimalColorToHex(parseInt(parts[3]) || 16777215),
           timestamp: parseInt(parts[4]) || 0,
@@ -188,6 +223,26 @@ export class DanmuEngine {
 }
 
 // --- Helper functions ---
+
+/**
+ * Normalize the barrage type from the various source conventions into our
+ * internal representation:
+ *   - 0 = scroll (right-to-left)
+ *   - 1 = top fixed
+ *   - 2 = bottom fixed
+ *
+ * Bilibili XML/JSON: mode 1/2/3 = scroll, 4 = bottom, 5 = top.
+ * dandanplay:        type 1 = scroll, 4 = bottom, 5 = top.
+ * Internal renderer: 0 = scroll, 1 = top, 2 = bottom (as used by renderDanmu).
+ */
+function normalizeDanmuType(type: number): number {
+  if (type === 4) return 2; // bottom
+  if (type === 5) return 1; // top
+  if (type === 1 || type === 2 || type === 3) return 0; // scroll
+  // Some sources already use our internal convention
+  if (type === 0 || type === 1 || type === 2) return type;
+  return 0;
+}
 
 function decimalColorToHex(decimal: number): string {
   const hex = decimal.toString(16).padStart(6, '0');

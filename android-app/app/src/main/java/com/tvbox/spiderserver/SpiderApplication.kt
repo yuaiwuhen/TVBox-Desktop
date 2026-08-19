@@ -20,6 +20,13 @@ class SpiderApplication : Application() {
         @Volatile
         private var instance: SpiderApplication? = null
 
+        /** Currently resumed activity (set by MainActivity.onResume).
+         *  Used by /remote/test-dialog to show a real AlertDialog
+         *  without needing to reflect the activity stack. */
+        @Volatile
+        @JvmField
+        var currentActivity: android.app.Activity? = null
+
         /**
          * Process start timestamp (millis since epoch). Set once in onCreate.
          * Used by /health endpoint so clients can verify the process restarted

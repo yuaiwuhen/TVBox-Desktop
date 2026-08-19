@@ -10,6 +10,7 @@ import axios from 'axios';
 import { HEVCDecoder } from '@hevcjs/core';
 import { SubtitleEngine, type SubtitleCue } from '../core/SubtitleEngine';
 import { DanmuEngine, type DanmuItem } from '../core/DanmuEngine';
+import { checkReplaceProxy, getSpiderApiBaseUrl, getLocalProxy } from '../core/ConfigParser';
 import { useAppStore } from '../store/app';
 import {
   ChatDotRound,
@@ -34,7 +35,9 @@ import {
   Rank,
   ArrowLeft,
   CaretLeft,
-  CaretRight
+  CaretRight,
+  Headset,
+  DocumentCopy
 } from '@element-plus/icons-vue';
 
 // ==================== Props ====================
@@ -46,6 +49,10 @@ const props = withDefaults(defineProps<{
   headers?: Record<string, string>;
   subtitleUrl?: string;
   danmuUrl?: string;
+  /** TVBox `audio` field: alternate audio track URLs */
+  audioUrls?: string[];
+  /** TVBox `sub` field: external subtitle track URLs */
+  subtitleUrls?: string[];
   hasPrev?: boolean;
   hasNext?: boolean;
   resumeProgress?: number;
@@ -204,6 +211,17 @@ const subtitleFontSize = ref(Number(localStorage.getItem('tvbox_subtitle_size') 
 const subtitleColor = ref(localStorage.getItem('tvbox_subtitle_color') || '#ffffff');
 const subtitleDelay = ref(Number(localStorage.getItem('tvbox_subtitle_delay') || '0'));
 const currentSubtitle = ref<SubtitleCue | null>(null);
+/** Available external subtitle tracks (from TVBox `sub` field + search) */
+const subtitleTrackList = ref<string[]>([]);
+const activeSubtitleTrack = ref(-1); // -1 = off
+/** Available in-stream subtitle tracks (HLS subtitleTracks) */
+const hlsSubtitleTracks = ref<{ id: number; label: string }[]>([]);
+const activeHlsSubtitleTrack = ref(-1); // -1 = off
+
+// Audio tracks
+/** Available audio tracks (HLS audioTracks or TVBox `audio` field) */
+const audioTrackList = ref<{ id: number; label: string; url?: string }[]>([]);
+const activeAudioTrack = ref(0);
 
 // Danmu
 const danmuEngine = new DanmuEngine();
@@ -374,7 +392,22 @@ const initPlayer = async () => {
       (urlLower.includes('do=proxy') && !urlLower.includes('do=ali'));
     const isDirectVideoUrl =
       urlLower.includes('do=ali') ||
-      /\.(mp4|mkv|webm|avi|mov|flv|m4v)(\?|$)/i.test(props.url);
+      /\.(mp4|mkv|webm|avi|mov|flv|m4v)(\?|$|&)/i.test(props.url) ||
+      // goproxy / proxy URLs carry the real filename in the query, e.g.
+      //   http://127.0.0.1:19978/goproxy?url=http%3A%2F%2F127.0.0.1%3A7989%3Furl%3Dhttps%253A...%26filename%253DS01E01.mp4%26...
+      // The inner URL is double-encoded, so decode TWICE before matching
+      // filename=...mp4 so Quark/UC direct streams play natively (not hls.js).
+      (() => {
+        try {
+          let dec = props.url;
+          for (let i = 0; i < 2; i++) dec = decodeURIComponent(dec);
+          return /(?:filename|name)=[^&]*\.(mp4|mkv|webm|avi|mov|flv|m4v)(?:&|$|%26)/i.test(
+            dec,
+          );
+        } catch {
+          return false;
+        }
+      })();
 
     console.log('[VideoPlayer-hevc] URL type detection:', {
       url: props.url.substring(0, 100),
@@ -497,6 +530,8 @@ const initPlayer = async () => {
       hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
         console.log('[VideoPlayer-hevc] ✅ HLS manifest解析成功');
         console.log(`[VideoPlayer-hevc] resumeProgress=${props.resumeProgress}s (从props接收的值)`);
+        // Refresh audio/subtitle track lists (multi-track HLS streams).
+        refreshHlsTracks();
         // Resume progress (skip intro if needed)
         if (props.resumeProgress > 0) {
           const startPos = Math.max(props.resumeProgress, skipIntro.value);
@@ -511,6 +546,13 @@ const initPlayer = async () => {
           isLoading.value = false;
           playVideo();
         }
+      });
+
+      hlsPlayer.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
+        refreshHlsTracks();
+      });
+      hlsPlayer.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => {
+        refreshHlsTracks();
       });
 
       hlsPlayer.on(Hls.Events.ERROR, (event, data) => {
@@ -1088,7 +1130,9 @@ const onDoubleClick = (e: MouseEvent) => {
     showClickFeedback(e.offsetX, e.offsetY, '⏩');
   } else {
     togglePlay();
-    showClickFeedback(e.offsetX, e.offsetY, isPlaying.value ? '⏸' : '▶');
+    // Center the pause/play feedback icon on double-click.
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    showClickFeedback(rect.width / 2, rect.height / 2, isPlaying.value ? '⏸' : '▶');
   }
 };
 
@@ -1101,7 +1145,11 @@ const showClickFeedback = (x: number, y: number, icon: string) => {
 const onMouseDown = (e: MouseEvent) => {
   const target = e.target as HTMLElement;
   if (target.closest('.el-slider') || target.closest('.ctrl-btn') ||
-    target.closest('.vp-seek-bar') || target.closest('.vp-volume-slider')) {
+    target.closest('.vp-icon-btn') || target.closest('.vp-control-btn') ||
+    target.closest('.vp-episode-btn') || target.closest('.vp-speed-btn') ||
+    target.closest('.vp-play-btn') || target.closest('.vp-seek-bar') ||
+    target.closest('.vp-volume-slider') || target.closest('.el-dropdown') ||
+    target.closest('.el-dropdown-menu') || target.closest('.el-switch')) {
     return;
   }
 
@@ -1125,7 +1173,10 @@ const onMouseUp = (e: MouseEvent) => {
   if (target.closest('.ctrl-btn') || target.closest('.el-slider') ||
     target.closest('.el-dropdown') || target.closest('.el-dropdown-menu') ||
     target.closest('.el-switch') || target.closest('.vp-seek-bar') ||
-    target.closest('.vp-volume-slider')) {
+    target.closest('.vp-volume-slider') || target.closest('.vp-icon-btn') ||
+    target.closest('.vp-control-btn') || target.closest('.vp-episode-btn') ||
+    target.closest('.vp-speed-btn') || target.closest('.vp-play-btn') ||
+    target.closest('.vp-overlay-top') || target.closest('.vp-overlay-bottom')) {
     if (longPressTimer) {
       clearTimeout(longPressTimer);
       longPressTimer = null;
@@ -1165,7 +1216,11 @@ const onMouseMove = (e: MouseEvent) => {
   const target = e.target as HTMLElement;
   if (target.closest('.ctrl-btn') || target.closest('.el-slider') ||
     target.closest('.el-dropdown') || target.closest('.el-dropdown-menu') ||
-    target.closest('.vp-seek-bar')) {
+    target.closest('.vp-seek-bar') || target.closest('.vp-icon-btn') ||
+    target.closest('.vp-control-btn') || target.closest('.vp-episode-btn') ||
+    target.closest('.vp-speed-btn') || target.closest('.vp-play-btn') ||
+    target.closest('.vp-volume-slider') ||
+    target.closest('.vp-overlay-top') || target.closest('.vp-overlay-bottom')) {
     return;
   }
 
@@ -1228,7 +1283,20 @@ const onRemoteControl = (e: Event) => {
 // ==================== Subtitle ====================
 const loadSubtitle = async (url: string) => {
   try {
-    const resp = await axios.get(url, { responseType: 'text', timeout: 10000 });
+    // Rewrite JAR-internal proxy URLs and route external subtitle URLs
+    // through the local CORS-free proxy (same as danmu).
+    const target = checkReplaceProxy(url);
+    const isAndroidProxy =
+      target.startsWith(getSpiderApiBaseUrl()) ||
+      target.includes('/proxy?') ||
+      target.startsWith('proxy://');
+    let finalUrl = target;
+    if (!isAndroidProxy) {
+      let origin = '';
+      try { origin = new URL(target).origin; } catch { /* ignore */ }
+      finalUrl = `${getLocalProxy()}/proxy?do=danmu&url=${encodeURIComponent(target)}${origin ? `&referer=${encodeURIComponent(origin + '/')}` : ''}`;
+    }
+    const resp = await axios.get(finalUrl, { responseType: 'text', timeout: 10000 });
     subtitleEngine.load(resp.data);
     subtitleEnabled.value = true;
     localStorage.setItem('tvbox_subtitle_enabled', 'true');
@@ -1253,10 +1321,175 @@ const onSearchSubtitleClick = () => {
   emit('searchSubtitle');
 };
 
+/**
+ * Populate audio/subtitle track lists from:
+ *  1. HLS in-stream tracks (hls.js audioTracks / subtitleTracks)
+ *  2. TVBox `audio` / `sub` fields passed via props
+ */
+const refreshHlsTracks = () => {
+  // HLS audio tracks (multi-audio renditions)
+  if (hlsPlayer) {
+    try {
+      const audioTracks = (hlsPlayer as any).audioTracks || [];
+      const hlsAudio: { id: number; label: string }[] = audioTracks.map(
+        (t: any, i: number) => ({
+          id: i,
+          label: t.name || t.lang || `音轨 ${i + 1}`,
+        }),
+      );
+      if (hlsAudio.length > 0) {
+        audioTrackList.value = hlsAudio;
+        if (activeAudioTrack.value >= hlsAudio.length) {
+          activeAudioTrack.value = 0;
+        }
+      }
+    } catch (e) {
+      console.warn('[VideoPlayer-hevc] 读取HLS音轨失败:', e);
+    }
+    // HLS subtitle tracks (in-stream)
+    try {
+      const subTracks = (hlsPlayer as any).subtitleTracks || [];
+      hlsSubtitleTracks.value = subTracks.map((t: any, i: number) => ({
+        id: i,
+        label: t.name || `字幕 ${i + 1}`,
+      }));
+    } catch (e) {
+      console.warn('[VideoPlayer-hevc] 读取HLS字幕轨失败:', e);
+    }
+  }
+
+  // TVBox `audio` field: alternate audio URLs (only when HLS has no audio
+  // track list — jar-provided tracks take precedence via the dropdown).
+  if (props.audioUrls && props.audioUrls.length > 0 && audioTrackList.value.length === 0) {
+    audioTrackList.value = props.audioUrls.map((u, i) => ({
+      id: i,
+      label: `音轨 ${i + 1}`,
+      url: u,
+    }));
+  }
+  // TVBox `sub` field: external subtitle URLs (merged after any in-stream).
+  if (props.subtitleUrls && props.subtitleUrls.length > 0) {
+    subtitleTrackList.value = props.subtitleUrls.map((u, i) => u);
+    // Don't auto-load; the user picks from the dropdown.
+  }
+};
+
+/** Switch audio track. id >= 0 indexes audioTrackList (HLS or jar URL). */
+const switchAudioTrack = (id: number) => {
+  const track = audioTrackList.value[id];
+  if (!track) return;
+  activeAudioTrack.value = id;
+  if (hlsPlayer && track.url === undefined) {
+    // HLS in-stream audio track
+    try {
+      (hlsPlayer as any).audioTrack = id;
+      console.log('[VideoPlayer-hevc] 切换音轨(HLS):', track.label);
+    } catch (e) {
+      console.warn('[VideoPlayer-hevc] 切换HLS音轨失败:', e);
+    }
+  } else if (track.url) {
+    // Jar-provided alternate audio URL: reload video with that URL
+    console.log('[VideoPlayer-hevc] 切换音轨(URL):', track.url);
+    loadAudioTrack(track.url);
+  }
+};
+
+/** Load an alternate audio URL — keeps current time and resumes. */
+const loadAudioTrack = (url: string) => {
+  const resume = currentTime.value;
+  if (hlsPlayer) {
+    hlsPlayer.destroy();
+    hlsPlayer = null;
+  }
+  videoElement.value?.pause();
+  videoElement.value!.src = url;
+  videoElement.value!.load();
+  videoElement.value!.addEventListener(
+    'loadedmetadata',
+    () => {
+      videoElement.value!.currentTime = resume;
+      videoElement.value!.play().catch(() => {});
+    },
+    { once: true },
+  );
+};
+
+/** Switch external subtitle track. id=-1 turns subtitles off. */
+const switchSubtitleTrack = async (id: number) => {
+  if (id === -1) {
+    activeSubtitleTrack.value = -1;
+    subtitleEnabled.value = false;
+    currentSubtitle.value = null;
+    return;
+  }
+  const url = subtitleTrackList.value[id];
+  if (!url) return;
+  activeSubtitleTrack.value = id;
+  await loadSubtitle(url);
+};
+
+/** Switch in-stream subtitle track. id=-1 turns off, >=0 selects HLS track. */
+const switchHlsSubtitleTrack = (id: number) => {
+  activeHlsSubtitleTrack.value = id;
+  if (!hlsPlayer) return;
+  try {
+    (hlsPlayer as any).subtitleTrack = id;
+    console.log('[VideoPlayer-hevc] 切换内嵌字幕轨:', id);
+  } catch (e) {
+    console.warn('[VideoPlayer-hevc] 切换内嵌字幕轨失败:', e);
+  }
+};
+
+/** Dropdown command for the subtitle-track menu. */
+const onSubtitleTrackCommand = (cmd: number) => {
+  if (cmd === -1) {
+    // Off: disable both external and in-stream subtitles
+    activeSubtitleTrack.value = -1;
+    activeHlsSubtitleTrack.value = -1;
+    subtitleEnabled.value = false;
+    currentSubtitle.value = null;
+    if (hlsPlayer) {
+      try { (hlsPlayer as any).subtitleTrack = -1; } catch { /* ignore */ }
+    }
+    return;
+  }
+  if (cmd >= 200) {
+    switchHlsSubtitleTrack(cmd - 200);
+    // Turning on an in-stream track keeps external subtitles off
+    subtitleEnabled.value = false;
+    return;
+  }
+  if (cmd >= 100) {
+    switchSubtitleTrack(cmd - 100);
+    activeHlsSubtitleTrack.value = -1;
+    return;
+  }
+};
+
 // ==================== Danmu ====================
 const loadDanmu = async (url: string) => {
   try {
-    const resp = await axios.get(url, { responseType: 'text', timeout: 10000 });
+    // JAR-internal proxy URLs (proxy:// or 127.0.0.1:9978) must reach the
+    // Android API base first (adb forward) — mirroring Android DefaultConfig.
+    // All other feeds go through the local /proxy?do=danmu endpoint so the
+    // renderer gets a unified CORS-free, UA/Referer-tagged response.
+    const target = checkReplaceProxy(url);
+    const isAndroidProxy =
+      target.startsWith(getSpiderApiBaseUrl()) ||
+      target.includes('/proxy?') ||
+      target.startsWith('proxy://');
+    let finalUrl = target;
+    if (!isAndroidProxy) {
+      const origin = (() => {
+        try {
+          return new URL(target).origin;
+        } catch {
+          return '';
+        }
+      })();
+      finalUrl = `${getLocalProxy()}/proxy?do=danmu&url=${encodeURIComponent(target)}${origin ? `&referer=${encodeURIComponent(origin + '/')}` : ''}`;
+    }
+    const resp = await axios.get(finalUrl, { responseType: 'text', timeout: 10000 });
     danmuEngine.load(resp.data);
     danmuEnabled.value = true;
     danmuEngine.setEnabled(true);
@@ -1404,6 +1637,18 @@ onMounted(() => {
 
   if (props.subtitleUrl) loadSubtitle(props.subtitleUrl);
   if (props.danmuUrl) loadDanmu(props.danmuUrl);
+
+  // Register TVBox `sub`/`audio` track lists (populate dropdowns).
+  if (props.subtitleUrls && props.subtitleUrls.length > 0) {
+    subtitleTrackList.value = props.subtitleUrls;
+  }
+  if (props.audioUrls && props.audioUrls.length > 0) {
+    audioTrackList.value = props.audioUrls.map((u, i) => ({
+      id: i,
+      label: `音轨 ${i + 1}`,
+      url: u,
+    }));
+  }
 
   window.addEventListener('remote-control', onRemoteControl);
 });
@@ -1563,7 +1808,7 @@ defineExpose({
         class="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
         <button class="vp-center-play pointer-events-auto flex items-center justify-center rounded-full"
           @click="togglePlay" aria-label="播放">
-          <el-icon :size="32" style="color: var(--color-text-primary); margin-left: 3px;">
+          <el-icon :size="32" style="color: #ffffff; margin-left: 3px;">
             <component :is="isPlaying ? VideoPause : VideoPlay" />
           </el-icon>
         </button>
@@ -1576,19 +1821,19 @@ defineExpose({
         <div class="flex items-center gap-6">
           <button class="vp-locked-btn pointer-events-auto flex items-center justify-center rounded-full"
             @click="unlockScreen" aria-label="解锁">
-            <el-icon :size="24" style="color: var(--color-text-primary);">
+            <el-icon :size="24" style="color: #ffffff;">
               <Unlock />
             </el-icon>
           </button>
           <button class="vp-locked-btn pointer-events-auto flex items-center justify-center rounded-full"
             @click="togglePlay" aria-label="播放">
-            <el-icon :size="24" style="color: var(--color-text-primary);">
+            <el-icon :size="24" style="color: #ffffff;">
               <component :is="isPlaying ? VideoPause : VideoPlay" />
             </el-icon>
           </button>
           <button class="vp-locked-btn pointer-events-auto flex items-center justify-center rounded-full"
             @click="toggleFullscreen" aria-label="全屏">
-            <el-icon :size="24" style="color: var(--color-text-primary);">
+            <el-icon :size="24" style="color: #ffffff;">
               <FullScreen />
             </el-icon>
           </button>
@@ -1608,7 +1853,7 @@ defineExpose({
       <div v-if="isLoading" class="absolute inset-0 flex items-center justify-center z-50">
         <div class="flex flex-col items-center gap-3">
           <div class="vp-buffering-spinner"></div>
-          <div class="text-sm" style="color: var(--color-text-secondary);">加载中...</div>
+          <div class="text-sm" style="color: rgba(255,255,255,0.8);">加载中...</div>
         </div>
       </div>
 
@@ -1626,12 +1871,12 @@ defineExpose({
               <line x1="12" y1="16" x2="12.01" y2="16" />
             </svg>
           </div>
-          <div class="text-base font-medium mb-1" style="color: var(--color-text-primary);">{{ errorMessage }}</div>
+          <div class="text-base font-medium mb-1" style="color: #ffffff;">{{ errorMessage }}</div>
           <div class="text-sm mb-5" style="color: var(--color-text-tertiary);">视频播放出现错误</div>
 
           <!-- Unsupported format specific UI -->
           <div v-if="unsupportedFormat" class="space-y-3">
-            <div class="text-sm" style="color: var(--color-text-secondary);">
+            <div class="text-sm" style="color: rgba(255,255,255,0.8);">
               格式: {{ unsupportedFormat.format }}
             </div>
             <div class="flex gap-3 justify-center">
@@ -1665,7 +1910,7 @@ defineExpose({
           <!-- Left: back button -->
           <button class="vp-icon-btn shrink-0 flex items-center justify-center" @click="emit('prev')" v-if="hasPrev"
             title="返回">
-            <el-icon :size="20" style="color: var(--color-text-primary);">
+            <el-icon :size="20" style="color: #ffffff;">
               <ArrowLeft />
             </el-icon>
           </button>
@@ -1675,7 +1920,7 @@ defineExpose({
           <div class="flex items-center justify-center flex-1 min-w-0 gap-3">
             <button v-if="hasPrev" class="vp-episode-btn shrink-0 flex items-center justify-center gap-1"
               @click="emit('prev')" title="上一集">
-              <el-icon :size="16" style="color: var(--color-text-secondary);">
+              <el-icon :size="16" style="color: rgba(255,255,255,0.8);">
                 <CaretLeft />
               </el-icon>
               <span class="vp-episode-text">上一集</span>
@@ -1685,7 +1930,7 @@ defineExpose({
             <button v-if="hasNext" class="vp-episode-btn shrink-0 flex items-center justify-center gap-1"
               @click="emit('next')" title="下一集">
               <span class="vp-episode-text">下一集</span>
-              <el-icon :size="16" style="color: var(--color-text-secondary);">
+              <el-icon :size="16" style="color: rgba(255,255,255,0.8);">
                 <CaretRight />
               </el-icon>
             </button>
@@ -1758,8 +2003,8 @@ defineExpose({
 
           <!-- Time display -->
           <div class="flex items-center justify-center mb-2.5 pointer-events-none">
-            <span class="text-xs whitespace-nowrap tabular-nums" style="color: var(--color-text-secondary);">
-              <span style="color: var(--color-text-primary);">{{ formattedCurrentTime }}</span> / {{ formattedDuration
+            <span class="text-xs whitespace-nowrap tabular-nums" style="color: rgba(255,255,255,0.8);">
+              <span style="color: #ffffff;">{{ formattedCurrentTime }}</span> / {{ formattedDuration
               }}
             </span>
           </div>
@@ -1771,7 +2016,7 @@ defineExpose({
               <!-- Skip back -->
               <button class="vp-control-btn flex items-center justify-center gap-1" @click="skipBackward"
                 :title="`快退${timeStep}秒`">
-                <el-icon :size="20" style="color: var(--color-text-primary);">
+                <el-icon :size="20" style="color: #ffffff;">
                   <RefreshLeft />
                 </el-icon>
                 <span class="vp-control-text">{{ timeStep }}s</span>
@@ -1779,14 +2024,14 @@ defineExpose({
               <!-- Play/Pause -->
               <button class="vp-play-btn flex items-center justify-center" @click="togglePlay"
                 :title="isPlaying ? '暂停' : '播放'">
-                <el-icon :size="24" style="color: var(--color-text-primary);">
+                <el-icon :size="24" style="color: #ffffff;">
                   <component :is="isPlaying ? VideoPause : VideoPlay" />
                 </el-icon>
               </button>
               <!-- Skip forward -->
               <button class="vp-control-btn flex items-center justify-center gap-1" @click="skipForward"
                 :title="`快进${timeStep}秒`">
-                <el-icon :size="20" style="color: var(--color-text-primary);">
+                <el-icon :size="20" style="color: #ffffff;">
                   <RefreshRight />
                 </el-icon>
                 <span class="vp-control-text">{{ timeStep }}s</span>
@@ -1796,7 +2041,7 @@ defineExpose({
               <!-- Next Episode -->
               <button v-if="hasNext" class="vp-control-btn flex items-center justify-center gap-1.5"
                 @click="emit('next')" title="下一集">
-                <el-icon :size="16" style="color: var(--color-text-primary);">
+                <el-icon :size="16" style="color: #ffffff;">
                   <Right />
                 </el-icon>
                 <span class="vp-episode-text">下一集</span>
@@ -1811,7 +2056,7 @@ defineExpose({
               <!-- Volume group (icon + expandable slider) -->
               <div class="vp-volume-group hidden sm:flex items-center gap-0.5 relative">
                 <button class="vp-icon-btn" @click="toggleMute" :title="isMuted ? '取消静音' : '静音'">
-                  <el-icon :size="20" style="color: var(--color-text-primary);">
+                  <el-icon :size="20" style="color: #ffffff;">
                     <component :is="isMuted ? Mute : Microphone" />
                   </el-icon>
                 </button>
@@ -1826,7 +2071,7 @@ defineExpose({
                         :style="{ width: (isMuted ? 0 : volume * 100) + '%' }"></div>
                     </div>
                     <div class="absolute"
-                      style="width: 12px; height: 12px; border-radius: 50%; background: var(--color-text-primary);"
+                      style="width: 12px; height: 12px; border-radius: 50%; background: #ffffff;"
                       :style="{ left: (isMuted ? 0 : volume * 100) + '%', top: '50%', transform: 'translate(-50%, -50%)' }">
                     </div>
                   </div>
@@ -1856,6 +2101,54 @@ defineExpose({
                   <Setting />
                 </el-icon>
               </button>
+
+              <!-- Audio track dropdown -->
+              <el-dropdown v-if="audioTrackList.length > 1" @command="switchAudioTrack" trigger="click">
+                <button class="vp-icon-btn" :class="{ active: activeAudioTrack > 0 }" title="音轨">
+                  <el-icon :size="20">
+                    <Headset />
+                  </el-icon>
+                </button>
+                <template #dropdown>
+                  <el-dropdown-menu class="vp-dropdown-menu">
+                    <el-dropdown-item v-for="(t, i) in audioTrackList" :key="t.id" :command="i">
+                      <span :style="{ color: i === activeAudioTrack ? 'var(--color-primary)' : '' }">{{ t.label
+                        }}</span>
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+
+              <!-- Subtitle track dropdown (external `sub` + in-stream) -->
+              <el-dropdown
+                v-if="subtitleTrackList.length > 0 || hlsSubtitleTracks.length > 0"
+                @command="onSubtitleTrackCommand" trigger="click">
+                <button class="vp-icon-btn" :class="{ active: subtitleEnabled || activeHlsSubtitleTrack >= 0 }"
+                  title="字幕轨">
+                  <el-icon :size="20">
+                    <DocumentCopy />
+                  </el-icon>
+                </button>
+                <template #dropdown>
+                  <el-dropdown-menu class="vp-dropdown-menu">
+                    <el-dropdown-item :command="-1">
+                      <span :style="{ color: (activeSubtitleTrack === -1 && activeHlsSubtitleTrack === -1) ? 'var(--color-primary)' : '' }">关闭</span>
+                    </el-dropdown-item>
+                    <template v-if="subtitleTrackList.length > 0">
+                      <el-dropdown-item v-for="(u, i) in subtitleTrackList" :key="'s' + i" :command="100 + i">
+                        <span :style="{ color: i === activeSubtitleTrack ? 'var(--color-primary)' : '' }">外挂字幕 {{
+                          i + 1 }}</span>
+                      </el-dropdown-item>
+                    </template>
+                    <template v-if="hlsSubtitleTracks.length > 0">
+                      <el-dropdown-item v-for="t in hlsSubtitleTracks" :key="'h' + t.id" :command="200 + t.id">
+                        <span :style="{ color: t.id === activeHlsSubtitleTrack ? 'var(--color-primary)' : '' }">{{
+                          t.label }}</span>
+                      </el-dropdown-item>
+                    </template>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
 
               <!-- Subtitle ON/OFF toggle -->
               <button class="vp-icon-btn" :class="{ active: subtitleEnabled }" @click="toggleSubtitle" title="字幕">
@@ -1929,28 +2222,28 @@ defineExpose({
       <div v-if="showDanmuSettings && showControls && !screenLocked"
         class="vp-danmu-panel absolute p-3 rounded-lg z-40 w-56 space-y-2 text-sm">
         <div class="flex justify-between items-center">
-          <span style="color: var(--color-text-primary);">弹幕开关</span>
+          <span style="color: #ffffff;">弹幕开关</span>
           <el-switch v-model="danmuEnabled" size="small" @change="onDanmuToggle" />
         </div>
         <div>
-          <span style="color: var(--color-text-secondary);">速度</span>
+          <span style="color: rgba(255,255,255,0.8);">速度</span>
           <el-slider v-model="danmuSpeedIndex" :min="0" :max="3" :step="1"
             :format-tooltip="(v: number) => danmuSpeedOptions[v].label" @change="onDanmuSpeedChange" />
         </div>
         <div>
-          <span style="color: var(--color-text-secondary);">透明度 {{ danmuOpacity }}%</span>
+          <span style="color: rgba(255,255,255,0.8);">透明度 {{ danmuOpacity }}%</span>
           <el-slider v-model="danmuOpacity" :min="10" :max="100" :step="10" @change="onDanmuOpacityChange" />
         </div>
         <div class="flex justify-between items-center">
-          <span style="color: var(--color-text-secondary);">行数</span>
+          <span style="color: rgba(255,255,255,0.8);">行数</span>
           <div class="flex items-center gap-1">
             <el-button size="small" @click="adjustDanmuLines(-1)">-</el-button>
-            <span class="w-6 text-center" style="color: var(--color-text-primary);">{{ danmuLines }}</span>
+            <span class="w-6 text-center" style="color: #ffffff;">{{ danmuLines }}</span>
             <el-button size="small" @click="adjustDanmuLines(1)">+</el-button>
           </div>
         </div>
         <div class="flex justify-between items-center">
-          <span style="color: var(--color-text-secondary);">颜色</span>
+          <span style="color: rgba(255,255,255,0.8);">颜色</span>
           <el-select v-model="danmuColorMode" size="small" style="width:80px">
             <el-option label="默认" value="default" />
             <el-option label="随机" value="random" />
@@ -1967,7 +2260,7 @@ defineExpose({
           <el-icon :size="20" style="color: var(--color-primary);">
             <DArrowRight />
           </el-icon>
-          <span class="text-sm font-medium" style="color: var(--color-text-primary);">{{ playbackRate }}x 快进</span>
+          <span class="text-sm font-medium" style="color: #ffffff;">{{ playbackRate }}x 快进</span>
         </div>
       </div>
     </div>
@@ -1989,9 +2282,11 @@ defineExpose({
 /* ===== Top Bar ===== */
 .vp-overlay-top {
   height: 56px;
-  background: linear-gradient(180deg, var(--color-bg-glass-heavy) 0%, transparent 100%);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  /* Player overlay always uses dark glass regardless of app theme so control
+     text stays readable over the black video surface. */
+  background: linear-gradient(180deg, rgba(10, 11, 16, 0.82) 0%, transparent 100%);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
   transition: opacity var(--duration-slow, 400ms) var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
 }
 
@@ -2011,7 +2306,7 @@ defineExpose({
 }
 
 .vp-icon-btn:hover {
-  color: var(--color-text-primary);
+  color: #ffffff;
   background: rgba(255, 255, 255, 0.06);
 }
 
@@ -2043,7 +2338,7 @@ defineExpose({
 
 .vp-episode-text {
   font-size: 12px;
-  color: var(--color-text-secondary);
+  color: rgba(255, 255, 255, 0.8);
   white-space: nowrap;
   display: none;
 }
@@ -2057,15 +2352,15 @@ defineExpose({
 /* ===== Title ===== */
 .vp-title {
   max-width: 400px;
-  color: var(--color-text-primary);
+  color: #ffffff;
   font-family: var(--font-display, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
 }
 
 /* ===== Bottom Control Bar ===== */
 .vp-overlay-bottom {
-  background: linear-gradient(0deg, var(--color-bg-glass-heavy) 0%, transparent 100%);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  background: linear-gradient(0deg, rgba(10, 11, 16, 0.82) 0%, transparent 100%);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
   transition: opacity var(--duration-slow, 400ms) var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1));
 }
 
@@ -2156,7 +2451,7 @@ defineExpose({
 
 .vp-control-text {
   font-size: 12px;
-  color: var(--color-text-secondary);
+  color: rgba(255, 255, 255, 0.8);
   white-space: nowrap;
   display: none;
 }
@@ -2200,9 +2495,9 @@ defineExpose({
 .vp-speed-btn {
   padding: 6px 10px;
   border-radius: 6px;
-  border: 1px solid var(--color-border);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   background: transparent;
-  color: var(--color-text-secondary);
+  color: #ffffff;
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
@@ -2210,7 +2505,7 @@ defineExpose({
 }
 
 .vp-speed-btn:hover {
-  color: var(--color-text-primary);
+  color: #ffffff;
   background: rgba(255, 255, 255, 0.06);
 }
 

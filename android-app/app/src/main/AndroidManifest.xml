@@ -5,14 +5,27 @@
     <!-- 网络权限 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- jar 配置中心扫码需要获取本机 IP 拼接 pushinfo/wexconfig URL -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
-    <!-- 存储权限 -->
+    <!-- 存储权限。注意：Android 13+ 对 targetSdk 33+ 的应用，
+         WRITE_EXTERNAL_STORAGE 已被废弃，jar 每次扫码都 requestPermissions
+         会弹权限窗打断宿主 Activity，导致 jar 拿不到前台 Activity 而 NPE。
+         故不声明 WRITE_EXTERNAL_STORAGE，jar 请求未声明权限会被静默拒绝，
+         不弹窗。 -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
 
     <!-- 前台服务 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- 悬浮窗权限：拥有 SYSTEM_ALERT_WINDOW 的应用在 Android 10+ 可豁免
+         "后台启动 Activity" 限制（Background Activity Launch / BAL）。
+         PC 端通过 /remote/open-config 让后台 SpiderHttpService 直接拉起
+         ConfigCenterActivity（配置中心扫码/网盘登录）时，没有该权限会被
+         ActivityTaskManager 以 BAL_BLOCK 拦截（result code=102），导致镜像
+         屏报 "no windows"。 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:name=".SpiderApplication"
@@ -33,6 +46,21 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- jar 配置中心扫码宿主：保持前台以便 jar 弹出二维码 Dialog -->
+        <activity
+            android:name=".QrHostActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- 配置中心（安卓端保底入口）：列出配置条目并支持设备端扫码 -->
+        <activity
+            android:name=".ConfigCenterActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.SpiderServer.ConfigCenter"
+            android:windowSoftInputMode="adjustResize" />
 
         <!-- HTTP服务器服务 -->
         <service

@@ -264,6 +264,9 @@ export class LocalProxyServer {
       case 'go':
         await this.handleGoProxy(reqUrl, req, res);
         break;
+      case 'danmu':
+        await this.handleDanmuProxy(reqUrl, req, res);
+        break;
       default:
         this.sendError(res, 400, `Unknown action: ${doAction}`);
     }
@@ -585,6 +588,83 @@ export class LocalProxyServer {
     } catch (e) {
       console.error('[LocalProxyServer] Go proxy error:', e);
       this.sendError(res, 502, 'Failed to fetch URL');
+    }
+  }
+
+  // ── /proxy?do=danmu (Barrage/danmaku fetch proxy) ─────────────────────
+  //
+  // Fetches a barrage/danmaku feed (Bilibili XML, dandanplay JSON, etc.) and
+  // returns it to the renderer. Electron runs with webSecurity off, so CORS
+  // is not an issue, but this endpoint also acts as a fallback for browser
+  // dev mode and lets the renderer pass a custom Referer/User-Agent for
+  // anti-hotlink protection (e.g. Bilibili requires a proper Referer).
+
+  private async handleDanmuProxy(
+    reqUrl: URL,
+    _req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    // Primary: `url` param (VideoPlayer.loadDanmu wraps external feeds).
+    // Fallback: some netdisk JARs emit `do=danmu&vodName=...&vodUrl=<play url>`
+    // and expect the danmu provider to be derived from the play URL; when
+    // only vodUrl is present, accept it as the target so we don't 400.
+    const url =
+      reqUrl.searchParams.get('url') ||
+      reqUrl.searchParams.get('vodUrl') ||
+      '';
+    if (!url) {
+      this.sendError(res, 400, 'Missing url parameter');
+      return;
+    }
+
+    try {
+      const headers: Record<string, string> = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      };
+
+      // Optional referer override (some providers validate it)
+      const referer = reqUrl.searchParams.get('referer');
+      if (referer) {
+        headers.Referer = referer;
+      } else {
+        try {
+          headers.Referer = new URL(url).origin + '/';
+        } catch {
+          /* keep empty */
+        }
+      }
+
+      // Use Node's http/https directly instead of axios: this code runs in the
+      // Electron renderer where axios goes through XMLHttpRequest, which
+      // REFUSES to set "User-Agent"/"Referer" ("Refused to set unsafe header").
+      // Node's http/https lets us set them (Bilibili etc. require Referer).
+      const lib = url.startsWith('https:') ? _require('https') : _require('http');
+      const target = new URL(url);
+      const content = await new Promise<string>((resolve, reject) => {
+        const req = lib.get(
+          target,
+          { headers },
+          (resp: any) => {
+            const chunks: Buffer[] = [];
+            resp.on('data', (c: Buffer) => chunks.push(c));
+            resp.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+          },
+        );
+        req.on('error', reject);
+        req.setTimeout(15000, () => {
+          req.destroy(new Error('danmu fetch timeout'));
+        });
+      });
+
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.end(content);
+    } catch (e) {
+      console.error('[LocalProxyServer] Danmu proxy error:', e);
+      this.sendError(res, 502, 'Failed to fetch danmu URL');
     }
   }
 

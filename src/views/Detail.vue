@@ -67,6 +67,7 @@
             :headers="store.currentPlayHeader" :title="playerTitle" :has-prev="store.currentPlayIndex > 0"
             :has-next="store.currentPlayIndex < store.currentEpisodes.length - 1"
             :resume-progress="store.resumeProgress" :show-subtitle-search="true" :danmu-url="store.currentDanmuUrl"
+            :audio-urls="store.currentAudioUrls" :subtitle-urls="store.currentSubtitleUrls"
             @prev="onPrevEpisode" @next="onNextEpisode" @ended="onPlayEnded" @progress="onProgress"
             @search-subtitle="onSearchSubtitle" />
         </div>
@@ -87,12 +88,32 @@
                 </svg>
               </div>
               <h3 class="play-error-title">播放失败</h3>
-              <p class="play-error-source">播放源: {{ activePlaySource || '未知' }}</p>
+              <p class="play-error-source">当前播放源: {{ activePlaySource || '未知' }}</p>
               <p class="play-error-message">{{ formatPlayError(playError) }}</p>
+              <!-- Source switch list: other sources that also have the current episode -->
+              <div v-if="switchableSources.length > 0" class="play-error-switch">
+                <p class="play-error-switch-label">可切换以下源继续播放：</p>
+                <div class="play-error-switch-list">
+                  <button v-for="s in switchableSources" :key="s.name"
+                    class="play-error-btn play-error-btn-ghost" @click="playOnSource(s.name)">
+                    {{ s.name }}
+                  </button>
+                </div>
+              </div>
               <div class="play-error-actions">
-                <button class="play-error-btn play-error-btn-primary" @click="store.playError = ''">
-                  知道了
-                </button>
+                <template v-if="isLoginError">
+                  <button class="play-error-btn play-error-btn-primary" @click="goToConfigCenterLogin">
+                    去配置中心登录
+                  </button>
+                  <button class="play-error-btn play-error-btn-ghost" @click="store.playError = ''">
+                    关闭
+                  </button>
+                </template>
+                <template v-else>
+                  <button class="play-error-btn play-error-btn-primary" @click="store.playError = ''">
+                    知道了
+                  </button>
+                </template>
               </div>
             </div>
           </div>
@@ -500,6 +521,9 @@ async function playEpisode(flag: string, url: string) {
   const currentSource = playSources.value.find(s => s.name === flag)
   const episodes = currentSource?.episodes || []
   const epIndex = episodes.findIndex(ep => ep.url === url)
+  // Remember the episode index so a failed play can switch to the same
+  // episode on another source.
+  failedEpisodeIndex.value = epIndex >= 0 ? epIndex : 0
   try {
     await store.loadPlay(flag, url, epIndex >= 0 ? epIndex : 0, episodes)
     console.log('[Detail] playEpisode: loadPlay completed, currentPlayUrl=', store.currentPlayUrl?.substring(0, 80))
@@ -512,10 +536,49 @@ async function playEpisode(flag: string, url: string) {
 
 /**
  * Format play error message to be more user-friendly.
+ * Netdisk login-required errors are already normalized in the store
+ * (normalizePlayError), so here we just render the message as-is.
  */
 function formatPlayError(error: string): string {
   if (!error) return ''
   return error
+}
+
+/** True when the current play error is a "please log into a netdisk" prompt. */
+const isLoginError = computed(() => store.isNetdiskLoginError(playError.value))
+
+/** Jump to the config center so the user can log into the correct netdisk. */
+async function goToConfigCenterLogin() {
+  if (!store.goToConfigCenter()) {
+    ElMessage.warning('未找到配置中心源，请先在设置中加载包含配置中心的配置源')
+    return
+  }
+  store.playError = ''
+  router.push('/')
+}
+
+// Episode index that failed to play (used to switch to the same episode on
+// another source). Populated when a play attempt fails.
+const failedEpisodeIndex = ref(-1)
+
+// All playable sources except the current one that carry the failed episode.
+const switchableSources = computed(() => {
+  if (failedEpisodeIndex.value < 0 || playSources.value.length <= 1) return []
+  return playSources.value.filter((s) => {
+    if (s.name === activePlaySource.value) return false
+    return failedEpisodeIndex.value < s.episodes.length
+  })
+})
+
+/** Switch playback to another source at the same (failed) episode index. */
+async function playOnSource(sourceName: string) {
+  if (failedEpisodeIndex.value < 0) return
+  const target = playSources.value.find((s) => s.name === sourceName)
+  const ep = target?.episodes[failedEpisodeIndex.value]
+  if (!ep) return
+  store.playError = ''
+  activePlaySource.value = sourceName
+  await playEpisode(sourceName, ep.url)
 }
 
 const playSources = computed(() => {
@@ -1156,8 +1219,40 @@ async function onSelectSubtitle(item: SubtitleSearchResult) {
 .play-error-message {
   font-size: 14px;
   color: #94a3b8;
-  margin: 0 0 24px;
+  margin: 0 0 16px;
   line-height: 1.5;
+}
+
+/* Source switch list inside the play-error dialog */
+.play-error-switch {
+  margin: 0 0 20px;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(100, 116, 139, 0.08);
+  border: 1px solid rgba(100, 116, 139, 0.18);
+}
+.play-error-switch-label {
+  font-size: 12px;
+  color: #94a3b8;
+  margin: 0 0 10px;
+}
+.play-error-switch-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.play-error-btn-ghost {
+  padding: 6px 14px;
+  font-size: 13px;
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.12);
+  color: #cbd5e1;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+.play-error-btn-ghost:hover {
+  background: var(--color-primary);
+  color: var(--color-bg-base);
+  border-color: var(--color-primary);
 }
 
 .play-error-actions {

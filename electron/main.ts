@@ -14,7 +14,6 @@ import https from 'https';
 import http from 'http';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { registerJarLoaderIPC, jarLoader } from './JarLoader';
 import { registerMuMuIPC } from './MuMuIPC';
 import {
   applyConfiguredSpiderBaseUrl,
@@ -40,7 +39,7 @@ app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport');
 // Note: Default port changed to 9223 to avoid conflict with another
 // TVBox-PC project at D:\Code\TVBOXDesktop\TVBox-PC which uses 9222.
 if (!process.argv.some((arg) => arg.startsWith('--remote-debugging-port'))) {
-  app.commandLine.appendSwitch('remote-debugging-port', '9223');
+  app.commandLine.appendSwitch('remote-debugging-port', '9224');
 }
 // Allow CDP WebSocket connections from any origin (for inspection scripts).
 app.commandLine.appendSwitch('remote-allow-origins', '*');
@@ -57,7 +56,7 @@ let win: BrowserWindow;
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL'];
 
 // Diagnostic: ring buffer for main-process console output so the renderer
-// (and E2E tests) can inspect what JarLoader logs during spider calls.
+// (and E2E tests) can inspect main-process logs during spider calls.
 // Used to diagnose why detailContent returns empty {} for some spiders.
 const LOG_BUFFER_SIZE = 2000;
 const logBuffer: string[] = [];
@@ -67,9 +66,9 @@ const origConsoleError = console.error;
 function pushLog(level: string, args: any[]) {
   if (!logCaptureEnabled) return;
   const ts = new Date().toISOString().substr(11, 12);
-  // Be defensive: Java objects returned by java-bridge can throw on
-  // JSON.stringify (cyclic refs, missing toJSON). Don't let a single bad
-  // arg silence the rest of the log line — fall back to String().
+  // Be defensive: some objects can throw on JSON.stringify (cyclic refs,
+  // missing toJSON). Don't let a single bad arg silence the rest of the
+  // log line — fall back to String().
   const parts = args.map((a) => {
     if (typeof a === 'string') return a;
     if (a === null) return 'null';
@@ -211,90 +210,19 @@ function createWindow() {
   // Auto-open DevTools on startup (both dev and production)
   win.webContents.openDevTools({ mode: 'detach' });
 
-  // Video header injection + anti-leech interceptor.
-  // Some spiders return direct video URLs (https://...) with
-  // custom headers (User-Agent, Referer) that the browser cannot set:
-  //   - User-Agent is a forbidden header in fetch/XHR
-  //   - Referer is controlled by the browser
-  // jarLoader registers these headers by URL origin; we inject them here so
-  // the CDN receives the headers it expects. This covers both the m3u8
-  // manifest and the TS segments inside it (same origin).
-  //
-  // We also strip browser-specific headers (Sec-Fetch-*, Sec-Ch-Ua, etc.)
-  // because CDNs use them to detect third-party access ("请勿使用第三方程序"
-  // error). A real Lavf/57.83.100 client doesn't send these.
+  // Anti-leech interceptor: some spiders return direct video URLs whose
+  // CDN blocks third-party requests. Strip the browser Referer on m3u8/TS
+  // requests to bypass CDN anti-leech checks.
   const filter = { urls: ['*://*/*'] };
-  // Headers that reveal the request originates from a browser. CDNs check
-  // these to block third-party access even when User-Agent is spoofed.
-  const BROWSER_LEAK_HEADERS = [
-    'sec-fetch-dest',
-    'sec-fetch-mode',
-    'sec-fetch-site',
-    'sec-fetch-user',
-    'sec-ch-ua',
-    'sec-ch-ua-mobile',
-    'sec-ch-ua-platform',
-    'sec-ch-ua-arch',
-    'sec-ch-ua-bitness',
-    'sec-ch-ua-full-version',
-    'sec-ch-ua-full-version-list',
-    'accept-language',
-    'origin',
-    'cache-control',
-    'pragma',
-    'dnt',
-    'upgrade-insecure-requests',
-  ];
   win.webContents.session.webRequest.onBeforeSendHeaders(
     filter,
     (details, callback) => {
       const { requestHeaders } = details;
-      const videoHeaders = jarLoader.getVideoHeadersForUrl(details.url);
-      if (videoHeaders) {
-        // Inject spider-provided headers (User-Agent, Referer, etc.)
-        for (const [hk, hv] of Object.entries(videoHeaders)) {
-          requestHeaders[hk] = hv;
-        }
-        // Strip browser-specific headers that betray a browser origin.
-        // CDN anti-leech checks look for Sec-Fetch-* and Sec-Ch-Ua headers
-        // — a real native client (Lavf/57.83.100) never sends them.
-        for (const h of BROWSER_LEAK_HEADERS) {
-          delete requestHeaders[h];
-          // Also handle case-sensitive variants
-          delete requestHeaders[h.charAt(0).toUpperCase() + h.slice(1)];
-        }
-        console.log(
-          '[webRequest] Injected video headers for',
-          details.url.substring(0, 80),
-          '— keys:',
-          Object.keys(requestHeaders).join(','),
-        );
-      } else if (details.url.includes('.m3u8') || details.url.includes('.ts')) {
-        // No custom headers registered — apply default anti-leech bypass
+      if (details.url.includes('.m3u8') || details.url.includes('.ts')) {
+        // Apply default anti-leech bypass
         delete requestHeaders['Referer'];
       }
       callback({ requestHeaders });
-    },
-  );
-
-  // CORS bypass for direct video URLs. CDNs often don't send
-  // Access-Control-Allow-Origin, which makes hls.js fail to fetch the
-  // m3u8/TS segments. Add permissive CORS headers to the response.
-  win.webContents.session.webRequest.onHeadersReceived(
-    filter,
-    (details, callback) => {
-      const videoHeaders = jarLoader.getVideoHeadersForUrl(details.url);
-      if (videoHeaders) {
-        const responseHeaders = { ...details.responseHeaders };
-        responseHeaders['access-control-allow-origin'] = ['*'];
-        responseHeaders['access-control-allow-headers'] = ['*'];
-        responseHeaders['access-control-allow-methods'] = [
-          'GET, HEAD, OPTIONS',
-        ];
-        callback({ responseHeaders });
-        return;
-      }
-      callback({});
     },
   );
 
@@ -707,9 +635,6 @@ app.whenReady().then(async () => {
     ],
   });
 
-  // Register JarLoader IPC handlers
-  registerJarLoaderIPC();
-
   // Register MuMu IPC handlers (auto-start emulator + spider service)
   registerMuMuIPC();
 
@@ -723,10 +648,17 @@ app.whenReady().then(async () => {
     // On Windows, auto-manage the MuMu emulator. On Mac/Linux the user
     // configures their own Android runtime and the Spider API address.
     if (process.platform === 'win32') {
+      // Always ensure the emulator + spider service are running: detect
+      // whether MuMu / the spider service is up, and start whatever is not.
+      // ensureRunning handles: emulator not booted -> launch it; service not
+      // healthy -> start it; then ensureLatestApkOnStartup re-installs the
+      // latest APK only when it changed (MD5 check). Nothing to skip here.
       const envStatus = await autoInstallManager.checkEnvironment();
-
       if (envStatus.status === InstallStatus.SUCCESS) {
-        console.log('[Main] Spider service already ready');
+        console.log('[Main] Spider service already ready, verifying emulator...');
+        // Service is healthy, but the emulator process may have been shut
+        // down while the service cache lingered — re-verify and restart it.
+        await autoInstallManager.ensureEmulatorRunning();
       } else {
         console.log('[Main] MuMu env not ready, auto-starting emulator...');
         try {
@@ -736,6 +668,10 @@ app.whenReady().then(async () => {
           console.error('[Main] Auto-install failed:', installErr.message);
         }
       }
+      // Even when the service is healthy, ensure the latest locally-built
+      // APK is deployed so code changes in android-app are picked up without
+      // a manual re-install. Non-fatal if the upgrade fails.
+      await autoInstallManager.ensureLatestApkOnStartup();
     } else {
       await autoInstallManager.checkEnvironment();
     }

@@ -18,54 +18,11 @@
         </div>
 
         <template v-else>
-          <!-- Config Center: show categories as tabs and config items as list -->
-          <div v-if="isConfigCenter">
-            <div class="flex items-center justify-between mb-4 px-1">
-              <h2 class="text-lg font-semibold" style="color: var(--color-text-primary)">配置中心</h2>
-              <el-button size="small" :loading="store.homeLoading" @click="refreshConfigCenter">
-                <el-icon>
-                  <Refresh />
-                </el-icon>
-                <span class="ml-1">刷新</span>
-              </el-button>
-            </div>
-
-            <!-- Category Tabs (horizontally scrollable) -->
-            <div v-if="configClasses.length > 0" class="mb-4 overflow-x-auto flex gap-2 pb-2 scrollbar-hide">
-              <button v-for="cls in configClasses" :key="cls.type_id"
-                class="category-pill px-4 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-all duration-200 flex-shrink-0 cursor-pointer"
-                :class="{ 'category-pill-active': activeConfigTab === cls.type_id }"
-                @click="onConfigTabChange(cls.type_id)">{{ cls.type_name }}</button>
-            </div>
-
-            <!-- Config Items List -->
-            <div v-if="configItems.length > 0" class="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 max-w-4xl mx-auto">
-              <div v-for="item in configItems" :key="item.vod_id"
-                class="config-item-card"
-                @click="onConfigItemClick(item)">
-                <div class="config-item-icon" :style="item.iconStyle">
-                  <span class="config-item-emoji">{{ item.emoji }}</span>
-                </div>
-                <div class="config-item-info">
-                  <p class="config-item-name">{{ item.vod_name }}</p>
-                  <p class="config-item-status" :class="item.statusClass">{{ item.vod_remarks || '—' }}</p>
-                </div>
-                <div class="config-item-action">
-                  <el-icon v-if="item.actionType === 'config'"><Setting /></el-icon>
-                  <el-icon v-else><InfoFilled /></el-icon>
-                </div>
-              </div>
-            </div>
-
-            <div v-else-if="store.categoryLoading" class="py-20">
-              <el-skeleton :rows="4" animated />
-            </div>
-
-            <div v-else class="flex flex-col items-center justify-center py-20" style="color: var(--color-text-tertiary)">
-              <el-icon :size="48" class="mb-3"><Film /></el-icon>
-              <p>该分类暂无配置项</p>
-            </div>
-          </div>
+          <!-- Config Center: directly mirror the Android config-center screen.
+               The PC renders NO local cards — everything (entries, login QR,
+               cookie state) is the Android JAR's native UI mirrored here, and
+               clicks are forwarded to the Android device. -->
+          <RemoteMirror v-if="isConfigCenter" />
 
           <!-- Normal Site: video list -->
           <template v-else>
@@ -116,13 +73,18 @@
             </div>
 
             <!-- Empty State -->
-            <div v-else class="flex-1 flex flex-col items-center justify-center py-20"
+            <div v-else class="flex-1 flex flex-col items-center justify-center py-20 px-6"
               style="color: var(--color-text-tertiary)">
               <el-icon :size="48" class="mb-3">
-                <Film />
+                <Warning v-if="store.homeError" />
+                <Film v-else />
               </el-icon>
-              <p>暂无数据</p>
-              <p class="text-xs mt-2">请检查 DevTools 控制台日志，或尝试切换其他源</p>
+              <p v-if="store.homeError" class="text-sm text-center max-w-md"
+                style="color: var(--color-error, #f56c6c)">
+                {{ store.homeError }}
+              </p>
+              <p v-else>暂无数据</p>
+              <p class="text-xs mt-2 text-center">可尝试切换其他源；若提示源 JAR 失效，请在设置中更换配置地址</p>
             </div>
 
             <!-- Scroll-to-bottom loading indicator -->
@@ -142,25 +104,16 @@
       </div>
     </div>
 
-    <!-- 配置对话框（Emby/多线程/综合） -->
-    <ConfigDialog
-      v-model:visible="configDialogVisible"
-      :vod-id="configDialogVodId"
-      :vod-name="configDialogVodName"
-      :vod-remarks="configDialogVodRemarks"
-      :spider-api="store.activeSite?.api || ''"
-      @saved="onConfigDialogSaved"
-    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onActivated, onDeactivated } from 'vue'
 import { useRouter } from 'vue-router'
-import { Box, Film, Refresh, Setting, InfoFilled } from '@element-plus/icons-vue'
+import { Box, Film, Warning } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAppStore } from '../store/app'
-import ConfigDialog from '../components/ConfigDialog.vue'
+import RemoteMirror from '../components/RemoteMirror.vue'
 import type { Movie } from '../core/models'
 import { processImageUrl } from '../core/models'
 
@@ -174,12 +127,6 @@ const scrollContainer = ref<HTMLElement | null>(null)
 // 使用store中的状态
 const activeCategory = computed(() => store.activeCategory)
 const filterValues = computed(() => store.filterValues)
-
-// 配置对话框状态（Emby/多线程/综合 设置）
-const configDialogVisible = ref(false)
-const configDialogVodId = ref('')
-const configDialogVodName = ref('')
-const configDialogVodRemarks = ref('')
 
 // 当 classes 为空但有 filters 时，从 filters 的 key 生成虚拟分类
 const displayClasses = computed(() => {
@@ -232,91 +179,9 @@ const isConfigCenter = computed(() => {
   )
 })
 
-// Determine action type from vod_id.
-// `spiderApi` (csp_Xxx) is used to apply spider-specific rules.
-function getConfigActionType(
-  vodId: string,
-  remarks: string,
-  spiderApi: string = '',
-): 'config' | 'info' {
-  const id = (vodId || '').toLowerCase()
-  const rm = (remarks || '')
-
-  // Emby — config pages
-  if (id.includes('emby')) return 'config'
-  if (rm.includes('点击设置') || rm.includes('点击增加') || rm.includes('点击选择') || rm.includes('点击删除') || rm.includes('点击清空') || rm.includes('备份') || rm.includes('恢复')) return 'config'
-
-  // feimao go设置 items have numeric vod_ids (1/2/4) — config pages
-  if (/^\d+$/.test(id)) return 'config'
-
-  return 'info'
-}
-
-// Bump this to force configItems recompute after a config dialog save
-const loginVersion = ref(0)
-
-// Active config tab (category type_id)
-const activeConfigTab = ref('')
-
-// Config center categories (exclude __recommend__)
-const configClasses = computed(() => {
-  return store.classes.filter((c) => c.type_id !== '__recommend__')
-})
-
-// Config items for the active tab — these come from store.categoryVodList
-// when the active tab is selected
-interface ConfigItem {
-  vod_id: string
-  vod_name: string
-  vod_remarks: string
-  vod_pic?: string
-  actionType: 'config' | 'info'
-  emoji: string
-  iconStyle: string
-  statusClass: string
-}
-
-const configItems = computed<ConfigItem[]>(() => {
-  loginVersion.value // touch reactive dep
-  const items = store.categoryVodList.length > 0
-    ? store.categoryVodList
-    : store.homeVodList
-  const spiderApi = store.activeSite?.api || ''
-  return items.map((vod: any) => {
-    const actionType = getConfigActionType(vod.vod_id, vod.vod_remarks, spiderApi)
-    // Pick icon
-    let emoji = '⚙️'
-    let color = '#6b7280'
-    if (actionType === 'config') {
-      emoji = '🔧'
-      color = '#8b5cf6'
-    } else {
-      emoji = 'ℹ️'
-      color = '#3b82f6'
-    }
-    // Status class
-    let statusClass = ''
-    const rm = vod.vod_remarks || ''
-    if (rm.includes('已启动') || rm.includes('已开启') || rm.includes('已启用')) {
-      statusClass = 'status-ok'
-    }
-    return {
-      vod_id: vod.vod_id,
-      vod_name: vod.vod_name,
-      vod_remarks: vod.vod_remarks || '',
-      vod_pic: vod.vod_pic,
-      actionType,
-      emoji,
-      iconStyle: `background: ${color}22; color: ${color};`,
-      statusClass,
-    }
-  })
-})
-
 const activeFilters = computed(() => {
   if (activeCategory.value) {
-    return store.filters[activeCategory.value] || []
-  }
+    return store.filters[activeCategory.value] || []  }
   return []
 })
 
@@ -328,16 +193,10 @@ watch(() => store.activeSiteKey, async (newKey, oldKey) => {
   console.log(`[Home] activeSiteKey changed: oldKey=${oldKey}, newKey=${newKey}`)
   if (newKey) {
     store.setCategory('')
-    activeConfigTab.value = '' // reset config tab
     console.log(`[Home] Calling loadHome(true) for key=${newKey}`)
     await store.loadHome(true)
 
-    if (isConfigCenter.value && configClasses.value.length > 0) {
-      // Config center: auto-select first category tab and load its items
-      const firstTab = configClasses.value[0]
-      console.log(`[Home] Config center: selecting first tab: ${firstTab.type_name}`)
-      onConfigTabChange(firstTab.type_id)
-    } else if (store.homeVodList.length > 0) {
+    if (store.homeVodList.length > 0) {
       const recommendClass = store.classes.find(c => c.type_id === '__recommend__')
       if (recommendClass) {
         console.log(`[Home] homeVodList has data, selecting recommend category`)
@@ -432,45 +291,7 @@ async function handleVodClick(vod: Movie) {
   router.push({ name: 'detail', params: { sourceKey: store.activeSiteKey, vodId: vod.vod_id } })
 }
 
-// Config tab change — load category content for the selected tab
-function onConfigTabChange(tid: string) {
-  activeConfigTab.value = tid
-  store.setCategory(tid)
-  store.loadCategory(tid, '1')
-}
 
-// Config item click — open the config dialog for config/info items
-async function onConfigItemClick(item: ConfigItem) {
-  console.log(`[onConfigItemClick] ${item.vod_id} (${item.vod_name}) — action: ${item.actionType}`)
-
-  if (item.actionType === 'config') {
-    // Emby / multi-thread / 综合 — open config dialog
-    configDialogVodId.value = item.vod_id
-    configDialogVodName.value = item.vod_name
-    configDialogVodRemarks.value = item.vod_remarks
-    configDialogVisible.value = true
-    return
-  }
-
-  // info items (webconfig, etc.) — open config dialog in info mode
-  configDialogVodId.value = item.vod_id
-  configDialogVodName.value = item.vod_name
-  configDialogVodRemarks.value = item.vod_remarks
-  configDialogVisible.value = true
-}
-
-function onConfigDialogSaved() {
-  console.log('[onConfigDialogSaved] config saved')
-  loginVersion.value++
-  if (activeConfigTab.value) {
-    store.loadCategory(activeConfigTab.value, '1')
-  }
-}
-
-function refreshConfigCenter() {
-  console.log('[refreshConfigCenter] manual refresh')
-  store.loadHome(true)
-}
 </script>
 
 <style scoped>

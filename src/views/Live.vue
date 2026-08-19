@@ -84,7 +84,7 @@
       </div>
 
       <!-- MIDDLE PANEL: Channel List -->
-      <div class="shrink-0 flex flex-col border-r overflow-hidden live-channel-list" style="width: 200px; background: var(--color-bg-base); border-color: var(--color-border);">
+      <div class="shrink-0 flex flex-col border-r overflow-hidden live-channel-list" style="width: 260px; background: var(--color-bg-base); border-color: var(--color-border);">
         <!-- Channel list header -->
         <div v-if="activeGroup" class="flex items-center justify-between px-4 py-3 shrink-0 border-b" style="border-color: var(--color-border);">
           <span class="text-xs font-medium" style="color: var(--color-text-tertiary);">{{ activeGroup.groupName }}</span>

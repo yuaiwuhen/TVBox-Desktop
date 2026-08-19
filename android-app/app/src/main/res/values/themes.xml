@@ -13,4 +13,12 @@
         <item name="android:statusBarColor" tools:targetApi="l">?attr/colorPrimaryVariant</item>
         <!-- Customize your theme here. -->
     </style>
+
+    <!-- 配置中心：无默认 ActionBar，使用 MaterialToolbar 作为标题栏，避免
+         "This Activity already has an action bar" 崩溃 -->
+    <style name="Theme.SpiderServer.ConfigCenter" parent="Theme.SpiderServer">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
 </resources>

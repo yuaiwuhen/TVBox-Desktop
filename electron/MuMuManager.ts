@@ -228,12 +228,47 @@ export class MuMuManager {
     return false;
   }
 
+  /**
+   * Wait until `adb devices` shows a connected emulator (the MuMu bundled adb
+   * auto-discovers the running VM, but right after MuMu boots the adb device
+   * may still be "offline"/absent for a few seconds).
+   */
+  private async waitForAdbDevice(timeoutMs = 60000): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const out = await this.runAdb(['devices'], 10000);
+        if (/device\b/.test(out) && !/offline\b/.test(out)) {
+          return true;
+        }
+      } catch {
+        // adb server not ready yet
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    return false;
+  }
+
   /** Set up port forwarding so the PC can reach the spider API. */
   async forwardPorts(): Promise<void> {
-    await this.runAdb(['forward', `tcp:${SPIDER_API_PORT}`, `tcp:${SPIDER_CONTAINER_PORT}`]);
-    console.log(
-      `[MuMuManager] adb forward tcp:${SPIDER_API_PORT} -> tcp:${SPIDER_CONTAINER_PORT}`,
-    );
+    // MuMu may have just been launched — the adb device can take a few
+    // seconds to appear. Retry forward until the device is reachable.
+    await this.waitForAdbDevice();
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await this.runAdb(['forward', `tcp:${SPIDER_API_PORT}`, `tcp:${SPIDER_CONTAINER_PORT}`]);
+        console.log(
+          `[MuMuManager] adb forward tcp:${SPIDER_API_PORT} -> tcp:${SPIDER_CONTAINER_PORT}`,
+        );
+        return;
+      } catch (e: any) {
+        lastErr = e;
+        console.warn(`[MuMuManager] adb forward attempt ${attempt + 1} failed:`, e.message);
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    throw lastErr || new Error('adb forward failed');
   }
 
   /** Check whether the spider app is installed. */
@@ -254,6 +289,66 @@ export class MuMuManager {
     console.log(`[MuMuManager] Installing APK: ${apkPath}`);
     await this.runAdb(['install', '-r', '-t', apkPath], 120000);
     console.log('[MuMuManager] APK installed');
+    // Grant SYSTEM_ALERT_WINDOW (悬浮窗) so the background SpiderHttpService can
+    // launch ConfigCenterActivity on Android 10+ (BAL background-activity-start
+    // exemption). Without it, /remote/open-config is blocked with BAL_BLOCK
+    // (result code=102) and the PC mirror screen reports "no windows".
+    await this.grantOverlayPermission();
+  }
+
+  /**
+   * Grant the overlay (SYSTEM_ALERT_WINDOW) permission to the spider app via
+   * appops. Best-effort: harmless if the permission is already granted or the
+   * command is unsupported on a device.
+   */
+  async grantOverlayPermission(): Promise<void> {
+    try {
+      await this.runAdb(
+        ['shell', 'appops', 'set', 'com.tvbox.spiderserver', 'SYSTEM_ALERT_WINDOW', 'allow'],
+        15000,
+      );
+      console.log('[MuMuManager] SYSTEM_ALERT_WINDOW granted');
+    } catch (e: any) {
+      console.warn('[MuMuManager] grant SYSTEM_ALERT_WINDOW failed:', e.message);
+    }
+  }
+
+  /** Uninstall the spider app (ignores "not installed"). */
+  async uninstallApk(): Promise<void> {
+    console.log('[MuMuManager] Uninstalling spider app...');
+    try {
+      await this.runAdb(
+        ['uninstall', 'com.tvbox.spiderserver'],
+        30000,
+      );
+      console.log('[MuMuManager] Spider app uninstalled');
+    } catch {
+      // "not installed" is fine — nothing to uninstall
+      console.log('[MuMuManager] Spider app was not installed (skip uninstall)');
+    }
+  }
+
+  /**
+   * When the service still can't be reached after a normal install/start,
+   * uninstall and reinstall the APK once to recover from a corrupted install.
+   */
+  async reinstallApkOnce(apkPath: string): Promise<boolean> {
+    console.log('[MuMuManager] Service unreachable — reinstalling APK once...');
+    try {
+      await this.uninstallApk();
+      await this.installApk(apkPath);
+      await this.startService();
+      const ready = await this.waitForServiceReady(60000);
+      console.log(
+        ready
+          ? '[MuMuManager] Service healthy after reinstall'
+          : '[MuMuManager] Service still unhealthy after reinstall',
+      );
+      return ready;
+    } catch (e: any) {
+      console.warn('[MuMuManager] Reinstall failed:', e.message);
+      return false;
+    }
   }
 
   /** Start the SpiderHttpService foreground service. */
@@ -286,6 +381,84 @@ export class MuMuManager {
 
   async isServiceReady(): Promise<boolean> {
     return healthCheck(`http://127.0.0.1:${SPIDER_API_PORT}`);
+  }
+
+  /**
+   * MD5 of the locally built APK (hex, lowercased), or null if unreadable.
+   */
+  private async localApkMd5(apkPath: string): Promise<string | null> {
+    try {
+      const { createHash } = await import('crypto');
+      const buf = await fs.promises.readFile(apkPath);
+      return createHash('md5').update(buf).digest('hex');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * MD5 of the currently installed APK inside the emulator, or null when the
+   * app is not installed / md5 is unavailable. Locates the APK via
+   * `pm path`, then hashes it on the device with md5sum.
+   */
+  private async installedApkMd5(): Promise<string | null> {
+    try {
+      const out = await this.runAdb(
+        ['shell', 'pm', 'path', 'com.tvbox.spiderserver'],
+        15000,
+      );
+      const line = out
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .find((s) => s.startsWith('package:'));
+      if (!line) return null;
+      const apkPath = line.slice('package:'.length).trim();
+      if (!apkPath) return null;
+      const md5 = await this.runAdb(
+        ['shell', 'md5sum', apkPath],
+        20000,
+      );
+      const first = md5.trim().split(/\s+/)[0];
+      return first ? first.toLowerCase() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Lightweight "ensure latest APK is deployed" for an already-running VM.
+   * Unlike ensureRunning, it does NOT boot/launch the VM or wait for boot —
+   * it assumes the emulator is already up (caller checked checkEnvironment).
+   * It only re-installs when the local APK differs from the installed one
+   * (by MD5), then reports whether the service is reachable.
+   */
+  async ensureLatestApk(apkPath?: string): Promise<boolean> {
+    const p = apkPath || this.findSpiderApk();
+    if (!p) {
+      console.warn('[MuMuManager] ensureLatestApk: no local APK found');
+      return false;
+    }
+    try {
+      await this.forwardPorts();
+      const [localMd5, installedMd5] = await Promise.all([
+        this.localApkMd5(p),
+        this.installedApkMd5(),
+      ]);
+      if (localMd5 && installedMd5 === localMd5) {
+        console.log(
+          '[MuMuManager] Installed APK is up to date (md5 match), skipping install',
+        );
+        // APK didn't change but the emulator may have been reset — make sure
+        // the overlay permission (BAL exemption) is still granted.
+        await this.grantOverlayPermission();
+      } else {
+        await this.installApk(p);
+      }
+      return await this.isServiceReady();
+    } catch (e: any) {
+      console.warn('[MuMuManager] ensureLatestApk failed:', e.message);
+      return false;
+    }
   }
 
   /**
@@ -343,8 +516,8 @@ export class MuMuManager {
 
     // 4. Install/upgrade the APK.
     const wantInstall = opts?.installApk ?? true;
+    let apkPath = opts?.apkPath || this.findSpiderApk();
     if (wantInstall) {
-      const apkPath = opts?.apkPath || this.findSpiderApk();
       if (apkPath) {
         try {
           await this.installApk(apkPath);
@@ -359,14 +532,22 @@ export class MuMuManager {
       }
     }
 
-    // 5. Start the service if it isn't already healthy.
+    // 5. Start the service if it isn't already healthy. If it still can't be
+    //    reached after a normal start, uninstall + reinstall the APK once to
+    //    recover from a corrupted install.
     if (!(await this.isServiceReady())) {
       try {
         await this.startService();
       } catch (e: any) {
         console.warn('[MuMuManager] startService failed:', e.message);
       }
-      const ready = await this.waitForServiceReady(60000);
+      let ready = await this.waitForServiceReady(60000);
+      if (!ready && wantInstall && apkPath) {
+        console.log(
+          '[MuMuManager] Service unreachable after normal start, trying uninstall + reinstall once...',
+        );
+        ready = await this.reinstallApkOnce(apkPath);
+      }
       return {
         installed: true,
         running: true,

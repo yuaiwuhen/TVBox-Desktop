@@ -65,6 +65,12 @@ export interface PlayResult {
   playUrl?: string;
   jxFrom?: string;
   danmuUrl?: string; // URL to fetch danmaku/barrage data (Bilibili XML or JSON format)
+  danmaku?: string; // TVBox standard field for the barrage data URL (same meaning as danmuUrl)
+  /** TVBox standard: alternate audio tracks (URLs) for audio-track switching */
+  audio?: string | string[];
+  /** TVBox standard: external subtitle tracks (URLs) for subtitle switching */
+  sub?: string | string[];
+  subtitle?: string | string[];
 }
 
 // ===== Filter / Sort =====

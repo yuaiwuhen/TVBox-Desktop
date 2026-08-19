@@ -347,6 +347,23 @@ export function checkReplaceProxy(url: string): string {
   if (url.startsWith('proxy://')) {
     return url.replace('proxy://', ANDROID_PROXY_URL + '/proxy?');
   }
+  // Netdisk Go proxy URLs: Quark's goproxy-android-amd64 runs INSIDE the
+  // emulator on 127.0.0.1:7989 and the JAR returns playback URLs like
+  //   http://127.0.0.1:7989?url=<quark dl>&key=quark&type=quark&...
+  // The browser can't reach that port, so route it through the Android
+  // proxy endpoint /goproxy on the unified 19978 port (single adb forward).
+  // The full original URL is passed as an encoded `url` param and the Android
+  // side forwards it to the local goproxy and streams the response back.
+  const goproxyMatch = url.match(
+    /^https?:\/\/(?:127\.0\.0\.1|localhost):7989(?:\/|\?|$)/,
+  );
+  if (goproxyMatch) {
+    return (
+      ANDROID_PROXY_URL +
+      '/goproxy?url=' +
+      encodeURIComponent(url)
+    );
+  }
   // Rewrite http(s)://127.0.0.1:<port>/proxy?... → appropriate local target.
   // The spider's Proxy.getUrl() constructs URLs like
   //   http://127.0.0.1:<port>/proxy?do=hxq&url=...
@@ -704,6 +721,8 @@ export class ConfigParser {
   private vipParseFlags: string[] = [];
   private ijkCodes: IJKCodeGroup[] = [];
   private spiderJar = '';
+  private hostsVal: string[] = [];
+  private corsVal: { host: string; header: any }[] = [];
   private wallpaperStr = '';
   private jarCacheStr = 'true';
   private livePlayHeadersVal: any = null;
@@ -1133,6 +1152,19 @@ export class ConfigParser {
     } else {
       this.livePlayHeadersVal = null;
     }
+
+    // hosts: DNS override rules "host=ip" (mirrors Android OkDns.addAll)
+    this.hostsVal = Array.isArray(infoJson.hosts)
+      ? infoJson.hosts.map(String).filter((h: string) => h.includes('='))
+      : [];
+
+    // cors: per-host header injection {host, header} (mirrors Android
+    // ResponseInterceptor.addAll)
+    this.corsVal = Array.isArray(infoJson.cors)
+      ? infoJson.cors
+        .filter((c: any) => c && c.host && c.header)
+        .map((c: any) => ({ host: String(c.host), header: c.header }))
+      : [];
 
     // ---- Sites ----
     this.sourceBeanList.clear();
@@ -1613,6 +1645,16 @@ export class ConfigParser {
 
   getWallpaper(): string {
     return this.wallpaperStr;
+  }
+
+  /** DNS override rules "host=ip" parsed from config JSON (mirrors Android OkDns). */
+  getHosts(): string[] {
+    return this.hostsVal;
+  }
+
+  /** Per-host header-injection rules {host, header} parsed from config JSON. */
+  getCors(): { host: string; header: any }[] {
+    return this.corsVal;
   }
 
   getJarCache(): string {

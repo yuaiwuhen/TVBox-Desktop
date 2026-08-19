@@ -139,6 +139,28 @@ export function registerMuMuIPC(): void {
     }
   });
 
+  /**
+   * Re-establish adb port forwarding on demand. Called by the renderer when a
+   * spider HTTP request fails with a connection error — after the emulator
+   * was restarted (or adb reset), the tcp:19978 -> tcp:9978 forward is lost,
+   * and re-running it is the only way to reach the spider service again.
+   */
+  ipcMain.handle(
+    'mumu:ensureForward',
+    async (): Promise<{ ok: boolean; error?: string }> => {
+      if (!muMuManager.locate()) {
+        return { ok: false, error: '未找到 MuMu 模拟器' };
+      }
+      try {
+        await muMuManager.forwardPorts();
+        return { ok: true };
+      } catch (e: any) {
+        console.warn('[MuMuIPC] ensureForward failed:', e.message);
+        return { ok: false, error: e.message };
+      }
+    },
+  );
+
   ipcMain.handle('mumu:openGuide', async () => {
     // The renderer opens the MuMu setup guide directly; nothing to do here.
     return { handled: true };

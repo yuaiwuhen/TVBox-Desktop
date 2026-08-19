@@ -10,13 +10,34 @@ android {
     defaultConfig {
         applicationId "com.tvbox.spiderserver"
         minSdk 24
-        targetSdk 36
+        // targetSdk 必须保持 ≤ 28（与 FongMi/bhsj 一致）。
+        //
+        // 原因：spider JAR 的 Init.init() 会调用 GoProxy.start(7989)，其 native
+        // startServer 用 nohup 方式启动 goproxy 进程。Android 15 对
+        // targetSdk ≥ 35 的应用有 phantom process 限制：这类 app 从自身
+        // fork 出的进程会被判定为 phantom process 并被限制（网络访问受限 /
+        // 频繁被杀），导致 goproxy 收到请求后无法连接外网，返回空 body，
+        // 播放器报 DEMUXER_ERROR_COULD_NOT_OPEN。
+        //
+        // FongMi 的 targetSdk=28，其 goproxy 作为普通子进程可正常联网，
+        // 因此“同一个 JAR”在 FongMi 里能播、在我们这里播不了。降到 28
+        // 与 FongMi 保持一致，phantom 限制不再生效。
+        targetSdk 28
         versionCode 1
         versionName "1.0"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
-        // Docker redroid x86_64 容器: 只打包 arm64-v8a。
+        // 只打包 arm64-v8a。即使宿主是 x86_64 模拟器（MuMu/redroid），
+        // 只要 APK 声明 arm64 abi，整个进程会走 native bridge 翻译层，
+        // jar 内 DexNative System.load 的 arm64 .so 才能被正常 dlopen。
+        // 若 APK 无任何 native lib（primaryCpuAbi=null），进程跑 x86_64 原生，
+        // jar 加载 arm64 .so 会报 "is for EM_AARCH64 instead of EM_X86_64"。
+        //
+        // jniLibs/arm64-v8a/libarm64stub.so 是纯 ABI 占位库（无业务逻辑，
+        // 源码见 app/src/main/cpp/arm64stub.c），只为了让 APK 声明 arm64 abi。
+        // 注意：与 FongMi 一致，wex 相关 so（wexguard/decjni 等）无需打包进
+        // APK——jar 的 DexNative 会从自身 assets 提取并 System.load，走翻译层。
         ndk {
             abiFilters 'arm64-v8a'
         }

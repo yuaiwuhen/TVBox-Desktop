@@ -3,7 +3,6 @@
     <div class="px-6 pt-4 pb-2 flex items-center justify-between flex-shrink-0">
       <h2 class="text-xl font-bold" style="color: var(--color-text-primary)">我的收藏</h2>
       <span
-        v-if="store.favoriteList.length > 0"
         class="text-xs px-2.5 py-1 rounded-md"
         style="
           color: var(--color-text-secondary);
@@ -16,8 +15,23 @@
     </div>
 
     <div v-if="store.favoriteList.length === 0" class="flex-1 flex flex-col items-center justify-center" style="color: var(--color-text-tertiary)">
-      <el-icon class="text-5xl mb-3"><Star /></el-icon>
-      <p>暂无收藏</p>
+      <div class="w-20 h-20 mb-4 rounded-full flex items-center justify-center" style="background: var(--color-bg-elevated); border: 1px solid var(--color-border)">
+        <el-icon :size="36"><Star /></el-icon>
+      </div>
+      <p class="text-sm mb-1" style="color: var(--color-text-secondary)">暂无收藏</p>
+      <p class="text-xs mb-6">在影片详情页点击「收藏」，就会出现在这里</p>
+      <div class="flex items-center gap-3">
+        <button
+          class="px-5 h-10 text-sm font-medium cursor-pointer border-none transition-all duration-200"
+          style="background: var(--color-primary); color: white; border-radius: var(--radius-md, 10px); box-shadow: 0 4px 16px var(--color-primary-soft)"
+          @click="goHome"
+        >去首页看看</button>
+        <button
+          class="px-5 h-10 text-sm font-medium cursor-pointer transition-all duration-200"
+          style="background: transparent; color: var(--color-text-secondary); border: 1px solid var(--color-border); border-radius: var(--radius-md, 10px)"
+          @click="goSearch"
+        >去搜索</button>
+      </div>
     </div>
 
     <div v-else class="flex-1 overflow-auto px-4 pb-4">
@@ -31,9 +45,11 @@
         >
           <div class="relative overflow-hidden aspect-[3/4]">
             <img
-              v-if="item.vod_pic"
+              v-if="item.vod_pic && !imgFailed[favKey(item)]"
               :src="processImageUrl(item.vod_pic)"
               class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+              loading="lazy"
+              @error="onImgError(favKey(item))"
             />
             <div v-else class="w-full h-full flex items-center justify-center" style="background: var(--color-bg-elevated)">
               <el-icon :size="32" style="color: var(--color-text-tertiary)"><Film /></el-icon>
@@ -74,7 +90,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Star, Delete, Film } from '@element-plus/icons-vue'
@@ -84,6 +100,17 @@ import { processImageUrl } from '../core/models'
 
 const store = useAppStore()
 const router = useRouter()
+
+// Track images that failed to load, keyed by `${sourceKey}_${vod_id}`
+const imgFailed = reactive<Record<string, boolean>>({})
+
+function favKey(item: FavoriteRecord): string {
+  return `${item.sourceKey}_${item.vod_id}`
+}
+
+function onImgError(key: string) {
+  imgFailed[key] = true
+}
 
 onMounted(() => {
   store.refreshFavorites()
@@ -96,6 +123,14 @@ function getSourceName(sourceKey: string): string {
 
 function goToPlay(item: FavoriteRecord) {
   router.push({ name: 'detail', params: { sourceKey: item.sourceKey, vodId: item.vod_id } })
+}
+
+function goHome() {
+  router.push({ name: 'home' })
+}
+
+function goSearch() {
+  router.push({ name: 'search' })
 }
 
 async function handleRemove(item: FavoriteRecord) {

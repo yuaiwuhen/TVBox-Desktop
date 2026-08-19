@@ -27,7 +27,6 @@ async function main() {
   page.on('console', (msg) => {
     const text = msg.text();
     if (
-      text.includes('JarLoader') ||
       text.includes('Store') ||
       text.includes('Spider') ||
       text.includes('Proxy') ||
