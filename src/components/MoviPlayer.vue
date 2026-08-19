@@ -16,7 +16,7 @@ import axios from 'axios';
 import { checkReplaceProxy, getLocalProxy } from '../core/ConfigParser';
 import { useAppStore } from '../store/app';
 import type { MediaTrack } from '../core/models';
-import { Search, ArrowLeft, ArrowRight, ChatDotRound } from '@element-plus/icons-vue';
+import { Search, ArrowLeft, ArrowRight, ChatDotRound, Headset, Document } from '@element-plus/icons-vue';
 
 // 让 Vue 把 <movi-player> 当原生自定义元素渲染，不做组件解析
 defineOptions({
@@ -92,9 +92,12 @@ danmuEngine.setOpacity(danmuOpacity.value);
 danmuEngine.setSpeed(danmuSpeed.value);
 danmuEngine.setFontSize(danmuFontSize.value);
 
-// 字幕/音轨调试信息
+// 字幕/音轨（自建下拉菜单用；movi-player 内部对单音轨/单字幕轨会隐藏自带菜单，
+// 但用户仍希望"只有一个也应可选"，因此这里自行暴露）
 const subtitleTracksInfo = ref<string[]>([]);
 const audioTracksInfo = ref<string[]>([]);
+const subtitleMenuItems = ref<{ id: string; label: string; active: boolean }[]>([]);
+const audioMenuItems = ref<{ id: string; label: string; active: boolean }[]>([]);
 
 // ==================== 弹幕 ====================
 const loadDanmu = async (url: string) => {
@@ -247,23 +250,112 @@ const onTracksChange = (e: any) => {
   const el = mpRef.value;
   const detail = e.detail ?? {};
   try {
-    // detail.subtitle = 内嵌字幕轨（含 MKV/MP4 容器内嵌轨），比 getSubtitleLangs 完整
-    const subs: any[] = detail.subtitle ?? el?.getSubtitleLangs?.() ?? [];
-    subtitleTracksInfo.value = subs.map((s: any) =>
-      `${s.label ?? s.language ?? s.lang ?? s.id ?? ''}${s.subtitleType === 'image' ? ' [图形]' : ''}${s.active ? ' ✓' : ''}`,
-    );
-    const audios: any[] = detail.audio ?? el?.getAudioLangs?.() ?? [];
-    audioTracksInfo.value = audios.map((a: any) =>
-      `${a.label ?? a.language ?? a.lang ?? a.id ?? ''}${a.active ? ' ✓' : ''}`,
-    );
-    if (subs.length > 0) {
-      console.log('[MoviPlayer] trackschange 内嵌字幕轨:', subtitleTracksInfo.value);
+    // detail.subtitle = 内嵌字幕轨（含 MKV/MP4 容器内嵌轨）
+    const subs: any[] = detail.subtitle ?? el?.getSubtitleTracks?.() ?? [];
+    const extSubs: any[] = el?.getSubtitleLangs?.() ?? [];
+    // 内嵌轨 + 外部轨合并；外部轨用 lang 区分，内嵌轨用 id
+    subtitleTracksInfo.value = [
+      ...subs.map((s: any) =>
+        `${s.label ?? s.language ?? `字幕 ${s.id}`}${s.subtitleType === 'image' ? ' [图形]' : ''}`,
+      ),
+      ...extSubs.map((s: any) => `${s.label ?? s.lang ?? ''}`),
+    ];
+    subtitleMenuItems.value = [
+      { id: '__off', label: '关闭字幕', active: false },
+      ...subs.map((s: any) => ({
+        id: `s${s.id}`,
+        label: s.label ?? s.language ?? `字幕 ${s.id}`,
+        active: false,
+      })),
+      ...extSubs.map((s: any) => ({
+        id: `l${s.lang}`,
+        label: s.label ?? s.lang ?? '',
+        active: !!s.active,
+      })),
+    ];
+
+    const audios: any[] = detail.audio ?? el?.getAudioTracks?.() ?? [];
+    const extAudios: any[] = el?.getAudioLangs?.() ?? [];
+    audioTracksInfo.value = [
+      ...audios.map((a: any) => a.label ?? a.language ?? `音轨 ${a.id}`),
+      ...extAudios.map((a: any) => a.label ?? a.lang ?? ''),
+    ];
+    audioMenuItems.value = [
+      ...audios.map((a: any) => ({
+        id: `a${a.id}`,
+        label: a.label ?? a.language ?? `音轨 ${a.id}`,
+        active: false,
+      })),
+      ...extAudios.map((a: any) => ({
+        id: `l${a.lang}`,
+        label: a.label ?? a.lang ?? '',
+        active: !!a.active,
+      })),
+    ];
+    if (subs.length > 0 || extSubs.length > 0) {
+      console.log('[MoviPlayer] trackschange 字幕轨:', subtitleTracksInfo.value);
     }
-    if (audios.length > 0) {
+    if (audios.length > 0 || extAudios.length > 0) {
       console.log('[MoviPlayer] trackschange 音轨:', audioTracksInfo.value);
     }
   } catch (err) {
     console.warn('[MoviPlayer] trackschange 解析失败:', err);
+  }
+};
+
+// ==================== 字幕/音轨选择 ====================
+// 用元素公开 API 切换：内嵌轨走 selectSubtitleTrack/selectAudioTrack(id)，
+// 外部/语言轨走 selectSubtitleLang/selectAudioLang(lang)。
+const selectSubtitle = async (id: string) => {
+  const el = mpRef.value;
+  if (!el) return;
+  try {
+    if (id === '__off') {
+      // 关闭所有字幕
+      await el.selectSubtitleLang?.(null);
+      await el.selectSubtitleTrack?.(-1).catch(() => null);
+      el.querySelectorAll?.('track').forEach((t: any) => { t.track.mode = 'disabled'; });
+    } else if (id.startsWith('ext')) {
+      // 外挂 <track>：启用目标、禁用其他
+      const idx = Number(id.slice(3));
+      const tracks = el.querySelectorAll?.('track') ?? [];
+      const extTracks = (props.subtitleUrls ?? []).length > 0
+        ? Array.from(tracks).slice(-(props.subtitleUrls?.length ?? 0))
+        : [];
+      extTracks.forEach((t: any, i: number) => {
+        t.track.mode = i === idx ? 'showing' : 'disabled';
+      });
+      await el.selectSubtitleLang?.(null);
+    } else if (id.startsWith('s')) {
+      await el.selectSubtitleTrack?.(Number(id.slice(1)));
+    } else if (id.startsWith('l')) {
+      await el.selectSubtitleLang?.(id.slice(1));
+    }
+    // 更新选中状态
+    subtitleMenuItems.value = subtitleMenuItems.value.map((m) => ({
+      ...m,
+      active: m.id === id,
+    }));
+  } catch (err) {
+    console.warn('[MoviPlayer] 切换字幕失败:', err);
+  }
+};
+
+const selectAudio = async (id: string) => {
+  const el = mpRef.value;
+  if (!el) return;
+  try {
+    if (id.startsWith('a')) {
+      await el.selectAudioTrack?.(Number(id.slice(1)));
+    } else if (id.startsWith('l')) {
+      await el.selectAudioLang?.(id.slice(1));
+    }
+    audioMenuItems.value = audioMenuItems.value.map((m) => ({
+      ...m,
+      active: m.id === id,
+    }));
+  } catch (err) {
+    console.warn('[MoviPlayer] 切换音轨失败:', err);
   }
 };
 
@@ -310,6 +402,11 @@ const initPlayer = () => {
   el.addEventListener('timeupdate', onTimeUpdate);
   el.addEventListener('error', onError);
   el.addEventListener('trackschange', onTracksChange);
+
+  // 主动查询一次轨道（trackschange 可能在监听绑定前已触发）
+  setTimeout(() => {
+    try { onTracksChange({ detail: {} }); } catch { /* noop */ }
+  }, 1500);
 };
 
 
@@ -347,16 +444,27 @@ watch(() => props.danmuUrl, (newUrl) => {
   if (newUrl) loadDanmu(newUrl);
 });
 watch(() => props.subtitleUrls, () => {
-  // movi-player 自动发现内嵌字幕；外部字幕轨直接 append <track>
+  // movi-player 自动发现内嵌字幕；外部字幕轨直接 append <track> 并加入菜单
   const el = mpRef.value;
   if (!el) return;
-  for (const s of props.subtitleUrls ?? []) {
+  const existing = props.subtitleUrls ?? [];
+  for (const s of existing) {
     const track = document.createElement('track');
     track.kind = 'subtitles';
     track.src = s.url;
     track.label = s.name;
     track.setAttribute('data-format', s.url.endsWith('.srt') ? 'srt' : 'vtt');
     el.appendChild(track);
+  }
+  if (existing.length > 0) {
+    subtitleMenuItems.value = [
+      { id: '__off', label: '关闭字幕', active: false },
+      ...existing.map((s, i) => ({
+        id: `ext${i}`,
+        label: s.name,
+        active: false,
+      })),
+    ];
   }
 });
 watch(playbackRate, (val) => {
@@ -418,6 +526,36 @@ onUnmounted(() => {
         </button>
       </div>
       <div class="flex items-center gap-2 pointer-events-auto">
+        <!-- 音轨选择（即使只有 1 条也可选） -->
+        <el-dropdown v-if="audioMenuItems.length > 0" trigger="click" @command="selectAudio">
+          <button class="vp-icon-btn" title="选择音轨">
+            <el-icon :size="18"><Headset /></el-icon>
+          </button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item v-for="m in audioMenuItems" :key="'au' + m.id"
+                :command="m.id">
+                <span :style="{ color: m.active ? 'var(--color-primary)' : '' }">{{ m.label }}</span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+
+        <!-- 字幕选择 -->
+        <el-dropdown v-if="subtitleMenuItems.length > 0" trigger="click" @command="selectSubtitle">
+          <button class="vp-icon-btn" title="选择字幕">
+            <el-icon :size="18"><Document /></el-icon>
+          </button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item v-for="m in subtitleMenuItems" :key="'sub' + m.id"
+                :command="m.id">
+                <span :style="{ color: m.active ? 'var(--color-primary)' : '' }">{{ m.label }}</span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+
         <!-- 弹幕开关 -->
         <button class="vp-icon-btn" @click="toggleDanmu" :title="danmuEnabled ? '关闭弹幕' : '开启弹幕'">
           <el-icon :size="18" :style="{ color: danmuEnabled ? 'var(--color-primary)' : '' }">
