@@ -286,6 +286,25 @@ export class MuMuManager {
     index = this.targetIndex,
     timeoutMs = 120000,
   ): Promise<boolean> {
+    // MuMu 定制 adb 不会自动发现运行中的实例（adb devices 初始为空），
+    // 必须先 adb connect 目标连接串，否则下方所有 boot 判定永不成立、
+    // 必然等到 120s 超时。连接串由 MuMuManager.exe adb -v <index> 解析。
+    const serial = await this.resolveAdbSerial(index);
+    if (serial) {
+      try {
+        await this.runAdb(['connect', serial], 10000);
+        console.log(`[MuMuManager] adb connect ${serial}`);
+      } catch (e: any) {
+        console.warn(
+          `[MuMuManager] adb connect ${serial} failed:`,
+          e?.message || e,
+        );
+      }
+    } else {
+      console.warn(
+        '[MuMuManager] unable to resolve adb serial, boot check may hang',
+      );
+    }
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       try {
@@ -332,6 +351,15 @@ export class MuMuManager {
    */
   private async waitForAdbDevice(timeoutMs = 60000): Promise<boolean> {
     const serial = await this.resolveAdbSerial();
+    // 兜底：MuMu 定制 adb 不自动发现实例，且 adb server 重启后会丢失连接，
+    // 先 connect 目标 serial 再轮询。
+    if (serial) {
+      try {
+        await this.runAdb(['connect', serial], 10000);
+      } catch {
+        // 忽略，轮询里继续尝试
+      }
+    }
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       try {

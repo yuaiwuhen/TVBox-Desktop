@@ -25,6 +25,21 @@ export default defineConfig({
         entry: 'electron/main.ts',
         vite: {
           build: {
+            // vite-plugin-electron 默认按 package.json 的 "type":"module" 把
+            // build.lib.formats 设成 ["es"]，而 lib 配置的优先级高于
+            // rollupOptions.output，所以必须在这里显式改成 CJS。
+            //
+            // 主进程若以 ESM 运行，Node 的 ESM loader 会把
+            // `import ... from 'electron'` 解析到 npm 包 node_modules/electron
+            // （它导出的是一个可执行文件路径字符串），而非 Electron 内置模块，
+            // 随后触发：
+            //   TypeError: Cannot read properties of undefined (reading 'exports')
+            //   at cjsPreparseModuleExports (node:internal/modules/esm/translators)
+            // 走 CJS 时 require('electron') 才由 Electron 自身的 hook 接管。
+            lib: {
+              formats: ['cjs'],
+              fileName: () => 'main.cjs',
+            },
             rollupOptions: {
               external: [
                 'vm',
@@ -50,15 +65,29 @@ export default defineConfig({
         entry: 'electron/preload.ts',
         vite: {
           build: {
+            // 同主进程：强制 CJS，输出 .cjs，避免被 root package.json 的
+            // "type":"module" 影响而被 Electron 的 CJS 加载器拒绝。
+            lib: {
+              formats: ['cjs'],
+              fileName: () => 'preload.cjs',
+            },
             rollupOptions: {
-              output: {
-                format: 'cjs',
-                // Output as .cjs so Node.js treats it as CommonJS regardless
-                // of the root package.json's "type":"module" setting.
-                // Without this, Electron fails to load preload with:
-                //   "require() of ES Module ... not supported"
-                entryFileNames: 'preload.cjs',
-              },
+              external: [
+                'vm',
+                'http',
+                'https',
+                'url',
+                'fs',
+                'path',
+                'os',
+                'child_process',
+                'crypto',
+                'module',
+                'net',
+                'dns',
+                'stream',
+                'zlib',
+              ],
             },
           },
         },

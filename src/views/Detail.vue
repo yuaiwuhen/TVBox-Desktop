@@ -60,7 +60,7 @@
       </div>
 
       <!-- Video Player at top (shown when playing) -->
-      <div v-if="store.currentPlayUrl" class="w-full px-6 pt-4 player-enter-container">
+      <div v-if="store.currentPlayUrl" ref="playerEnterRef" class="w-full px-6 pt-4 player-enter-container">
         <div class="rounded-xl overflow-hidden detail-player-shadow player-enter-animation"
           style="aspect-ratio: 16/9; background: black">
           <VideoPlayer :key="store.currentPlayUrl" ref="videoPlayerRef" :url="store.currentPlayUrl"
@@ -434,6 +434,7 @@ const sortOrder = ref<'asc' | 'desc'>('asc')
 const quickSearchLoading = ref(false)
 const activeEpisodeGroup = ref(0)
 const videoPlayerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
+const playerEnterRef = ref<HTMLElement | null>(null)
 // 播放器对外方法：MoviPlayer 通过 defineExpose 暴露 loadSubtitleContent
 const subtitleSearchVisible = ref(false)
 const subtitleSearchResults = ref<SubtitleSearchResult[]>([])
@@ -705,6 +706,10 @@ function isEpisodeActive(episodes: { name: string; url: string }[], visibleIndex
 
 watch([() => store.currentPlayUrl, playSources], () => {
   if (!store.currentPlayUrl) return
+  // 开始播放时滚动到顶部播放区域（等播放器渲染完成再滚）
+  requestAnimationFrame(() => {
+    playerEnterRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  })
   for (const source of playSources.value) {
     const idx = source.episodes.findIndex(ep => ep.url === store.currentPlayUrl)
     if (idx >= 0 && source.episodes.length > GROUP_SIZE_THRESHOLD) {

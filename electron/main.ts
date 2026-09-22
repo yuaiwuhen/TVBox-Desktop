@@ -376,15 +376,44 @@ ipcMain.handle(
   'check-video-format',
   async (_event, videoUrl: string, headerObj?: Record<string, string>) => {
     return new Promise((resolve) => {
-      const urlObj = new URL(videoUrl);
+      // 当传入的是裸 CDN 直链（非本地代理）且带有鉴权头时，先重写为本进程的
+      // do=stream 代理，确保「header 探测」也走我们自己的代理（带 Cookie/Referer/
+      // UA 转发）。否则裸直连 CDN 会因缺鉴权头而失败。若已是 /proxy? 的代理 URL，
+      // 或没有鉴权头，则保持原样。
+      const PROXY_PORT = 19980;
+      const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost)/i.test(videoUrl);
+      const isProxy = /\/proxy\?/i.test(videoUrl);
+      const hasAuth =
+        !!headerObj &&
+        !!(headerObj.Cookie || headerObj.cookie || headerObj.Referer);
+      let targetUrl = videoUrl;
+      if (!isLocal && !isProxy && hasAuth) {
+        try {
+          const headersB64 = Buffer.from(JSON.stringify(headerObj)).toString(
+            'base64',
+          );
+          targetUrl = `http://127.0.0.1:${PROXY_PORT}/proxy?do=stream&url=${encodeURIComponent(
+            videoUrl,
+          )}&headers=${encodeURIComponent(headersB64)}`;
+        } catch {
+          /* 重写失败则仍用原 URL */
+        }
+      }
+      const targetIsProxy = /\/proxy\?/i.test(targetUrl);
+
+      const urlObj = new URL(targetUrl);
       const lib = urlObj.protocol === 'https:' ? https : http;
 
       const headers: Record<string, string> = {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         Range: 'bytes=0-65535',
-        ...headerObj,
       };
+      // 仅当目标是裸 CDN（未走代理）时才把鉴权头直接带上；
+      // 走代理时鉴权头已在 URL 的 headers 参数里，由代理注入，无需重复。
+      if (!targetIsProxy && headerObj) {
+        Object.assign(headers, headerObj);
+      }
 
       const req = lib.request(
         {
@@ -498,7 +527,8 @@ ipcMain.handle(
         resolve({ status: 0, contentType: '', error: e.message });
       });
 
-      req.setTimeout(15000, () => {
+      // 给足 30s：夸克转码首链首字节可能较慢，避免早于代理（30s）超时
+      req.setTimeout(30000, () => {
         req.destroy();
         resolve({ status: 0, contentType: '', error: 'timeout' });
       });

@@ -7,7 +7,7 @@
     "email": "tvbox-pc@example.com"
   },
   "type": "module",
-  "main": "dist-electron/main.js",
+  "main": "dist-electron/main.cjs",
   "scripts": {
     "dev": "node scripts/run-dev.mjs",
     "build": "vite build && electron-builder --publish never",

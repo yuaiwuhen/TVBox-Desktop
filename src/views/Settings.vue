@@ -241,6 +241,14 @@
             </div>
             <el-switch v-model="hardDecodeValue" @change="onHardDecodeChange" />
           </div>
+          <!-- Prefer WASM for direct streams -->
+          <div class="flex items-center justify-between">
+            <div class="flex flex-col gap-0.5">
+              <span class="text-[13px]" style="color: var(--color-text-secondary)">直链 WASM 引擎</span>
+              <span class="text-[11px]" style="color: var(--color-text-tertiary)">直链播放优先使用 WASM 引擎，可支持内嵌字幕切换；开启失败会自动回退原生播放</span>
+            </div>
+            <el-switch v-model="preferWasmValue" @change="onPreferWasmChange" />
+          </div>
           <!-- Skip intro / outro -->
           <div class="grid grid-cols-2 gap-3">
             <div>
@@ -673,6 +681,7 @@ const scaleTypeValue = ref('default')
 const hardDecodeValue = ref(true)
 const skipIntroValue = ref(0)
 const skipOutroValue = ref(0)
+const preferWasmValue = ref(false)
 const scaleTypeOptions = [
   { label: '默认', value: 'default' },
   { label: '16:9', value: '16:9' },
@@ -798,6 +807,7 @@ onMounted(() => {
   hardDecodeValue.value = store.hardDecode
   skipIntroValue.value = store.skipIntro
   skipOutroValue.value = store.skipOutro
+  preferWasmValue.value = localStorage.getItem('tvbox_prefer_wasm') === 'true'
 
   // Subtitle
   subtitleSizeValue.value = Number(localStorage.getItem('tvbox_subtitle_size') || '24')
@@ -902,6 +912,9 @@ function onScaleTypeChange(val: string) {
 }
 function onHardDecodeChange(val: boolean) {
   store.setHardDecode(val)
+}
+function onPreferWasmChange(val: boolean) {
+  localStorage.setItem('tvbox_prefer_wasm', String(val))
 }
 function onSkipIntroChange(val: number) {
   store.setSkipIntro(val || 0)

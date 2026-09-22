@@ -14,7 +14,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
-const mainEntry = path.join(rootDir, 'dist-electron', 'main.js');
+const mainEntry = path.join(rootDir, 'dist-electron', 'main.cjs');
 
 const colors = {
   reset: '\x1b[0m',
@@ -72,7 +72,7 @@ async function startDev() {
   // Wait for dist-electron/main.js to be built
   try {
     await waitForFile(mainEntry, 120000);
-    log('  ✓ Electron main.js built successfully', colors.green);
+    log('  ✓ Electron main.cjs built successfully', colors.green);
   } catch (err) {
     log(`\n✗ Build failed: ${err.message}`, colors.red);
     viteProcess.kill();
